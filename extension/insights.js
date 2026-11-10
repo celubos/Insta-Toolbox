@@ -2,6 +2,8 @@ const ORIGIN = 'https://www.instagram.com';
 const clean = (value, limit = 160) => String(value ?? '').replace(/\s+/gu, ' ').trim().slice(0, limit);
 const visible = node => Boolean(node?.isConnected && node.getClientRects?.().length
   && !node.closest?.('[hidden], [aria-hidden="true"]'));
+const hasVisibleCarousel = root => [...root.querySelectorAll('[aria-label]')].some(node => visible(node)
+  && /^(?:carousel|slide \d+ of \d+)$/i.test(node.getAttribute('aria-label') || ''));
 const route = href => {
   if (typeof href !== 'string' || !href.trim()) return null;
   try { const url = new URL(href, ORIGIN); return url.origin === ORIGIN && !url.username && !url.password ? url.pathname : null; }
@@ -67,9 +69,7 @@ export function readLoadedInsights({ document = globalThis.document, location = 
     const hashtags = paths.filter(path => path.startsWith('/explore/tags/')).flatMap(path => {
       try { return [decodeURIComponent(path.split('/')[3])]; } catch { return []; }
     });
-    const carousel = [...article.querySelectorAll('[aria-label]')].some(node => visible(node)
-      && /^(?:carousel|slide \d+ of \d+)$/i.test(node.getAttribute('aria-label') || ''));
-    const type = carousel ? 'carousel' : article.querySelector('video') ? 'video' : 'unknown';
+    const type = hasVisibleCarousel(article) ? 'carousel' : article.querySelector('video') ? 'video' : 'unknown';
     const times = [...article.querySelectorAll('time[datetime]')].filter(node => {
       const path = route(node.closest('a[href]')?.getAttribute('href'));
       return path && identities.has(postIdentity(path)?.id);
@@ -81,7 +81,7 @@ export function readLoadedInsights({ document = globalThis.document, location = 
     if (!visible(link) || link.closest('article') || observations.length >= 1000) continue;
     const path = route(link.getAttribute('href'));
     if (!postIdentity(path)) continue;
-    observations.push({ url: `${ORIGIN}${path}`, type: 'unknown', hashtags: [] });
+    observations.push({ url: `${ORIGIN}${path}`, type: hasVisibleCarousel(link) ? 'carousel' : 'unknown', hashtags: [] });
   }
   const report = summarizeLoadedPosts(observations, { sourceUrl: location.href, capturedAt: now() });
   const username = String(location.pathname).match(/^\/([a-zA-Z0-9_.]{1,30})\/?$/)?.[1];

@@ -117,9 +117,9 @@ pnpm run qa:overlay:check
 pnpm run verify:repo-hygiene
 ```
 
-The 4.3.1 development matrix covers the PWA, extension, userscript, layout controls, and packaged apps. The service worker uses cache generation `insta-toolbox-v431`. Automated fixtures do not prove current authenticated Instagram behavior; disposable-content acceptance is recorded separately.
+The development matrix covers the PWA, extension, userscript, layout controls, and packaged apps. The 4.3.2 userscript is a development candidate; its authenticated acceptance and final-source CI remain release gates. Reviewed screenshot captures retain their original version and runtime identities. Automated fixtures do not prove current authenticated Instagram behavior.
 
-See [Contributing](CONTRIBUTING.md), [Maintainer Guide](docs/MAINTAINER_GUIDE.md), [4.3.1 compatibility](docs/compatibility/4.3.1.md), and [4.3.1 acceptance](docs/acceptance/4.3.1.md).
+See [Contributing](CONTRIBUTING.md), [Maintainer Guide](docs/MAINTAINER_GUIDE.md), [4.3.2 compatibility](docs/compatibility/4.3.2.md), and [4.3.2 acceptance](docs/acceptance/4.3.2.md). The held packages retain their [4.3.1 compatibility](docs/compatibility/4.3.1.md) and [acceptance record](docs/acceptance/4.3.1.md).
 
 ## License and credit
 

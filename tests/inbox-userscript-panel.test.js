@@ -10,6 +10,7 @@ const viewerSource = await readFile(new URL('../extension/instagram-viewer.js', 
 const viewerContext = vm.createContext({ URL });
 vm.runInContext(viewerSource, viewerContext);
 const accountKey = viewerContext.InstaToolboxInstagramViewer.accountKey;
+const reviewedThreadIds = confirmation => confirmation.items.map(value => /^Thread ([0-9]+)/.exec(value)?.[1]);
 const deferred = () => {
   let resolve;
   const promise = new Promise(value => { resolve = value; });
@@ -230,7 +231,8 @@ test('confirmation names the exact selection and discloses messages sent during 
   assert.match(confirmation.detail, /Messages you send while cleanup is running may also be removed/);
   assert.match(confirmation.detail, /Keep this Instagram tab loaded/);
   assert.equal(confirmation.facts.find(item => item.label === 'Account').value, '@fixture.owner');
-  assert.equal(confirmation.facts.find(item => item.label === 'Conversations').value, '202');
+  assert.equal(confirmation.facts.find(item => item.label === 'Conversations').value, '1');
+  assert.deepEqual(reviewedThreadIds(confirmation), ['202']);
   assert.match(confirmation.facts.find(item => item.label === 'Messages').value, /one conversation at a time/);
   assert.equal(confirmation.binding.action, 'inbox-unsend');
   assert.equal(typeof confirmation.binding.reviewKey, 'string');
@@ -376,7 +378,8 @@ test('Start Ghost Mode discovers all sections and confirms the frozen inventory 
   assert.equal(start.parentElement, f.container, 'primary action is not buried in a disclosure');
   await start.click();
   assert.equal(f.confirmations.length, 1);
-  assert.equal(f.confirmations[0].facts.find(item => item.label === 'Conversations').value, '101, 202');
+  assert.equal(f.confirmations[0].facts.find(item => item.label === 'Conversations').value, '2');
+  assert.deepEqual(reviewedThreadIds(f.confirmations[0]), ['101', '202']);
   assert.deepEqual(f.dispatches, []);
   assert.equal(f.panel.busy(), false);
   assert.equal(f.selection().children.length, 2, 'Cancel preserves the found inventory');
@@ -459,7 +462,8 @@ test('replacing interrupted history requires acknowledgment plus a new exact con
   assert.deepEqual(f.starts, []); assert.deepEqual(f.dispatches, []); assert.deepEqual(f.checkpoints, []);
   accept = true; review = f.button('Review 1 conversation'); await review.click();
   assert.equal(f.confirmations.length, 2);
-  assert.equal(f.confirmations[1].facts.find(item => item.label === 'Conversations').value, '202');
+  assert.equal(f.confirmations[1].facts.find(item => item.label === 'Conversations').value, '1');
+  assert.deepEqual(reviewedThreadIds(f.confirmations[1]), ['202']);
   assert.deepEqual(f.starts.map(plan => plan.threadId), ['202']); assert.deepEqual(f.dispatches, ['202']);
   const final = f.panel.snapshot();
   assert.equal(final.status, 'completed'); assert.deepEqual(final.review.threadIds, ['202']);
@@ -498,7 +502,8 @@ test('resume reviews only unfinished discovered threads and never restores old a
   const resume = f.button('Review 1 remaining to resume');
   assert.equal(resume.hidden, false); assert.equal(resume.disabled, false);
   await resume.click();
-  assert.equal(f.confirmations[0].facts.find(item => item.label === 'Conversations').value, '202');
+  assert.equal(f.confirmations[0].facts.find(item => item.label === 'Conversations').value, '1');
+  assert.deepEqual(reviewedThreadIds(f.confirmations[0]), ['202']);
   assert.deepEqual(f.starts, []); assert.deepEqual(f.panel.snapshot(), saved, 'Cancel preserves prior verified counts');
   accept = true; await resume.click();
   assert.equal(f.confirmations.length, 2);
@@ -570,7 +575,8 @@ test('native chat names and verified handles filter explicit selections without 
   filter.value = '@alex'; await filter.fire('input');
   assert.match(f.visibleText(), /1 selected outside this filter/);
   await f.button('Review 2 conversations').click();
-  assert.equal(f.confirmations[0].facts.find(item => item.label === 'Conversations').value, '101, 202');
+  assert.equal(f.confirmations[0].facts.find(item => item.label === 'Conversations').value, '2');
+  assert.deepEqual(reviewedThreadIds(f.confirmations[0]), ['101', '202']);
   assert.deepEqual(f.starts, []); assert.deepEqual(f.checkpoints, [], 'Cancel stores neither labels nor authority');
   filter.value = '@not.exposed'; await filter.fire('input');
   assert.ok(labels.every(label => label.hidden));
@@ -590,4 +596,52 @@ test('review labels render as text and are not saved in cleanup checkpoints', { 
   assert.equal(JSON.stringify(f.checkpoints).includes('Named chat'), false);
   assert.equal(JSON.stringify(f.checkpoints).includes('fixture.friend'), false);
   assert.deepEqual(f.panel.snapshot().review.threadIds, ['101']);
+});
+
+for (const mode of ['workers', 'single-tab']) {
+  test(`${mode} review names every selected thread, including filtered-out targets, and Cancel dispatches nothing`, { timeout: 15_000 }, async t => {
+    const threadIds = ['101', '202', '303', '404'];
+    const opened = [], workerWrites = [];
+    const workerTransport = mode === 'workers' ? {
+      storage: { get: async () => null, set: async (...args) => { workerWrites.push(args); },
+        listen: () => 1, unlisten: () => {} },
+      openTab: async (...args) => { opened.push(args); throw new Error('Cancel must not open workers'); },
+    } : undefined;
+    const f = fixture({ workerTransport, threadIds, labels: {
+      '101': { title: '<img src=invalid> Exact chat', username: 'fixture.friend' },
+      '202': { title: 'Duplicate title' }, '303': { title: 'Duplicate title', username: 'second.friend' },
+    } });
+    t.after(() => f.dispose()); await f.find();
+    for (let index = 0; index < threadIds.length; index += 1) await f.select(index);
+    const filter = f.container.all().find(node => node.getAttribute('aria-label') === 'Filter conversations');
+    filter.value = '@fixture'; await filter.fire('input');
+    assert.match(f.visibleText(), /3 selected outside this filter/);
+    await f.button('Review 4 conversations').click();
+    assert.equal(f.confirmations.length, 1);
+    const request = f.confirmations[0];
+    assert.equal(request.itemLimit, 1_000);
+    assert.equal(request.facts.find(item => item.label === 'Conversations').value, '4');
+    assert.deepEqual(reviewedThreadIds(request), JSON.parse(request.binding.reviewKey).threadIds);
+    assert.deepEqual(request.items, [
+      'Thread 101 — <img src=invalid> Exact chat · @fixture.friend',
+      'Thread 202 — Duplicate title', 'Thread 303 — Duplicate title · @second.friend', 'Thread 404',
+    ]);
+    assert.deepEqual(f.starts, []); assert.deepEqual(f.dispatches, []);
+    assert.deepEqual(f.checkpoints, []); assert.deepEqual(opened, []); assert.deepEqual(workerWrites, []);
+    assert.equal(f.panel.busy(), false);
+  });
+}
+
+test('the exact review target payload retains all 1000 thread IDs before optional display labels', async () => {
+  const panelSource = await readFile(new URL('../extension/inbox-userscript-panel.js', import.meta.url), 'utf8');
+  const helper = panelSource.match(/function inboxReviewTargets\([\s\S]*?\n\}/)?.[0];
+  assert.ok(helper);
+  const targets = vm.runInNewContext(`${helper}\ninboxReviewTargets`);
+  const ids = Array.from({ length: 1_000 }, (_, index) => String(10n ** 29n + BigInt(index)));
+  const labels = ids.map(threadId => ({ threadId, title: 'A'.repeat(160), username: 'fixture.friend' }));
+  const items = targets(ids, labels);
+  assert.equal(items.length, ids.length);
+  assert.deepEqual(Array.from(items, value => /^Thread ([0-9]+)/.exec(value)[1]), ids);
+  assert.ok(items.every(value => value.length < 1_000));
+  assert.equal(items.at(-1), `Thread ${ids.at(-1)} — ${'A'.repeat(120)} · @fixture.friend`);
 });

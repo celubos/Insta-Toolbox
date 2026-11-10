@@ -29,7 +29,7 @@ function fixture({ targets = ['candidate'], account = 'owner', growth = true, lo
   let clock = Date.now();
   const events = [], records = [], messages = [], tabWrites = [];
   const context = vm.createContext({
-    AbortController, Math, Number, String, Boolean, Object, Array, Set,
+    AbortController, Math, Number, String, Boolean, Object, Array, Set, manualScanController: null,
     Date: class extends Date { static now() { return clock; } },
     RUN_CAPABILITY_MS: 1_200_000,
     normalizeUsername: value => String(value || '').trim().toLowerCase(),

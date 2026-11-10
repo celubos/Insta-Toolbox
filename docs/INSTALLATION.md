@@ -1,4 +1,4 @@
-# Install Insta Toolbox 4.3.1
+# Install Insta Toolbox
 
 **Tampermonkey is the active update channel.** Chrome extension, Windows/macOS desktop and web/PWA packages are **On hold after 4.3.1**. Existing downloads and local data remain available.
 
@@ -11,6 +11,11 @@ Tampermonkey is the quickest way to put the toolbox on Instagram. Desktop and we
 1. Install [Tampermonkey](https://www.tampermonkey.net/).
 
 2. In Chrome, open `chrome://extensions/?id=dhdgffkkebhmkfjojejmpbldmpobfkfo`. Turn on **Allow User Scripts**.
+
+   On Chrome 138 and newer, this is a separate permission from the script's
+   enabled switch. An installed, enabled script cannot run until this permission
+   is on. See [Tampermonkey's instructions](https://www.tampermonkey.net/faq.php?locale=en&q=Q209)
+   and [Chrome's documentation](https://developer.chrome.com/docs/extensions/reference/api/userScripts#chrome_versions_138_and_newer_allow_user_scripts_toggle).
 
    ![Tampermonkey details page showing the Allow User Scripts switch](media/install/01-allow-user-scripts.png)
 
@@ -169,6 +174,8 @@ Read the reason shown in the active tool. Challenge, rate-limit, wrong-thread, c
 
 ## Acceptance and support
 
+- [4.3.2 userscript candidate acceptance](acceptance/4.3.2.md)
+- [4.3.2 userscript compatibility](compatibility/4.3.2.md)
 - [4.3.1 acceptance record](acceptance/4.3.1.md)
 - [4.3.1 compatibility](compatibility/4.3.1.md)
 - [Operator acceptance guide](OPERATOR_ACCEPTANCE.md)

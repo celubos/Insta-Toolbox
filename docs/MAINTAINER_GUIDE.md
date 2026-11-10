@@ -144,7 +144,9 @@ CI checksum manifest, including extension and web archive contents and versions.
 
 Configure the `release` environment with required reviewers. Configure GitHub
 Pages to use GitHub Actions; the Pages workflow extracts the exact successful
-`main` web artifact instead of rebuilding it.
+`main` web artifact instead of rebuilding it. Its channel gate permits only
+4.3.1; later CI web artifacts are verified without deployment while the PWA is
+on hold.
 
 Keep the repository description, homepage, and topics aligned with
 [GITHUB_METADATA.md](./GITHUB_METADATA.md).
@@ -229,6 +231,6 @@ close the tab in the middle of verification.
 - [ ] The complete CI checksum manifest covers all six tested artifacts
 - [ ] Published `SHA256SUMS.txt` covers every promoted file and its SBOM
 - [ ] SBOM and provenance attestation cover the promoted release files
-- [ ] GitHub Pages serves the exact successful `main` web artifact
+- [ ] The Pages channel gate retains the held 4.3.1 PWA
 - [ ] Secret scan completed
 - [ ] Repository metadata and issue titles are current

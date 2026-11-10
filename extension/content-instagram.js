@@ -72,6 +72,17 @@
   }
 
   function detectAuthenticatedUsername() {
+    const viewer = globalThis.InstaToolboxInstagramViewer;
+    if ('InstaToolboxInstagramViewer' in globalThis) {
+      // Feed and story avatars identify their authors, not the signed-in
+      // account. Use the same current navigation proof as the action runners.
+      // An unavailable verifier must never fall back to those unrelated rows.
+      if (typeof viewer?.inspect !== 'function') return '';
+      try {
+        const account = viewer.inspect({ document, location, session: inspectSession() });
+        return account.accountVerified === true ? normalizeUsername(account.accountId) : '';
+      } catch { return ''; }
+    }
     const candidates = new Set();
     const anchors = [
       ...document.querySelectorAll('a[href]'),
@@ -298,7 +309,9 @@
             if (attemptSignal.aborted) throw error;
             if (error?.code === 'request-timeout' || error?.code === 'stopped') throw error;
             if (!response.ok) {
-              throw relationshipError('request-failed', `Instagram could not load this account request (HTTP ${response.status || 'error'}).`);
+              throw Object.assign(relationshipError('request-failed', `Instagram could not load this account request (HTTP ${response.status || 'error'}).`), {
+                httpStatus: response.status,
+              });
             }
             throw relationshipError('invalid-response', 'Instagram returned an invalid account response. Reload your profile before trying again.');
           }
@@ -316,7 +329,9 @@
             throw relationshipError('action-blocked', 'Instagram restricted activity.');
           }
           if (!response.ok || data?.status === 'fail') {
-            throw relationshipError('request-failed', `Instagram could not load this follower page (HTTP ${response.status || 'error'}).`);
+            throw Object.assign(relationshipError('request-failed', `Instagram could not load this follower page (HTTP ${response.status || 'error'}).`), {
+              httpStatus: response.status,
+            });
           }
           return data;
         }, { clearTimer, setTimer, signal, timeoutMs: requestTimeoutMs });
@@ -384,39 +399,56 @@
     return /^[1-9]\d{0,29}$/.test(id) ? id : '';
   }
 
-  async function resolveRelationshipUserId(username, options) {
-    const url = new URL('/api/v1/web/search/topsearch/', INSTAGRAM_WEB_ORIGIN);
-    url.searchParams.set('context', 'blended');
-    url.searchParams.set('query', username);
-    url.searchParams.set('include_reel', 'false');
-    const data = await fetchInstagramRelationshipJson(url, options);
-    const exact = (Array.isArray(data?.users) ? data.users : [])
-      .map((entry) => entry?.user)
-      .find((user) => normalizeUsername(user?.username) === username);
-    const userId = String(exact?.pk || '').trim();
-    if (!/^\d+$/.test(userId)) {
-      throw relationshipError('username-not-found', `Instagram could not resolve @${username}.`);
-    }
-    return {
-      userId,
-      ...(normalizeObservedInstagramId(exact?.pk)
-        ? { subjectInstagramId: normalizeObservedInstagramId(exact.pk) } : {}),
-    };
-  }
-
-  async function resolveRelationshipProfileCounts(username, userId, options) {
-    const url = new URL('/api/v1/users/web_profile_info/', INSTAGRAM_WEB_ORIGIN);
-    url.searchParams.set('username', username);
-    const data = await fetchInstagramRelationshipJson(url, options);
-    const profile = data?.data?.user;
-    const resolvedUsername = normalizeUsername(profile?.username);
-    const resolvedUserId = String(profile?.id || profile?.pk || '').trim();
-    if (resolvedUsername !== username || resolvedUserId !== userId) {
+  function boundRelationshipProfileId(profile, username, expectedUserId = '') {
+    const profileUsername = typeof profile?.username === 'string' ? profile.username.trim().toLowerCase() : '';
+    const suppliedIds = [profile?.id, profile?.pk].filter((value) => value !== undefined && value !== null);
+    const ids = suppliedIds.map(normalizeObservedInstagramId);
+    if (profileUsername !== username || !ids.length || ids.some((id) => !id)
+      || new Set(ids).size !== 1 || (expectedUserId && ids[0] !== expectedUserId)) {
       throw relationshipError(
         'profile-mismatch',
         `Instagram did not return the exact profile counters for @${username}. The previous comparison is unchanged.`,
       );
     }
+    return ids[0];
+  }
+
+  async function fetchRelationshipProfile(username, options) {
+    const url = new URL('/api/v1/users/web_profile_info/', INSTAGRAM_WEB_ORIGIN);
+    url.searchParams.set('username', username);
+    const data = await fetchInstagramRelationshipJson(url, options);
+    return data?.data?.user;
+  }
+
+  async function resolveRelationshipUserId(username, options) {
+    const url = new URL('/api/v1/web/search/topsearch/', INSTAGRAM_WEB_ORIGIN);
+    url.searchParams.set('context', 'blended');
+    url.searchParams.set('query', username);
+    url.searchParams.set('include_reel', 'false');
+    let data;
+    try {
+      data = await fetchInstagramRelationshipJson(url, options);
+    } catch (error) {
+      // A retired lookup route is not an authentication or transport failure.
+      // Use only the already allowlisted profile GET, never another search path.
+      if (error?.code !== 'request-failed' || ![404, 410].includes(error.httpStatus)) throw error;
+      const profile = await fetchRelationshipProfile(username, options);
+      const userId = boundRelationshipProfileId(profile, username);
+      return { userId, subjectInstagramId: userId, profile };
+    }
+    const exact = (Array.isArray(data?.users) ? data.users : [])
+      .map((entry) => entry?.user)
+      .find((user) => normalizeUsername(user?.username) === username);
+    const userId = normalizeObservedInstagramId(exact?.pk);
+    if (!userId) {
+      throw relationshipError('username-not-found', `Instagram could not resolve @${username}.`);
+    }
+    return { userId, subjectInstagramId: userId };
+  }
+
+  async function resolveRelationshipProfileCounts(username, userId, options, resolvedProfile = null) {
+    const profile = resolvedProfile || await fetchRelationshipProfile(username, options);
+    boundRelationshipProfileId(profile, username, userId);
     const followers = relationshipCount(
       profile?.edge_followed_by?.count,
       profile?.follower_count,
@@ -724,7 +756,7 @@
         listType: null,
         pages: 0,
         username,
-      });
+      }, resolution.profile);
       onProgress?.(Object.freeze({
         expectedCounts: profileCountsAtStart,
         found: 0,
@@ -2036,10 +2068,40 @@
     if (listType !== 'followers' && listType !== 'following') return null;
     const profileUsername = normalizeUsername(location.pathname);
     const profileHeader = verifiedProfileHeader(profileUsername).root;
+    const backdrop = profileHeader?.closest?.('[aria-hidden="true"]');
+    const rendered = (element, allowedBackdrop = null) => {
+      if (element?.isConnected !== true || !element.getClientRects?.().length) return false;
+      for (let current = element; current; current = current.parentElement) {
+        if (current.hidden || (current.getAttribute?.('aria-hidden') === 'true'
+          && current !== allowedBackdrop)) return false;
+        const style = getComputedStyle(current);
+        if (style.display === 'none' || ['hidden', 'collapse'].includes(style.visibility)
+          || (style.opacity !== undefined && style.opacity !== '' && Number(style.opacity) === 0)) return false;
+      }
+      return true;
+    };
+    // A native list modal can aria-hide its still-rendered profile backdrop.
+    // Re-read only that current owner's header; hidden or cached totals are
+    // not evidence of completeness, and an unrelated modal grants no exception.
+    const exactProfileRoute = location.origin === INSTAGRAM_WEB_ORIGIN
+      && /^\/[a-z0-9._]+\/?$/i.test(location.pathname);
+    const dialogs = backdrop && exactProfileRoute && backdrop !== profileHeader
+      ? visibleDialogs().filter(dialog => rendered(dialog)) : [];
+    const modal = dialogs.length === 1
+      && accountListDialog(listType)?.dialog === dialogs[0] ? dialogs[0] : null;
+    const verifiedBackdrop = Boolean(modal && !backdrop.contains(modal)
+      && rendered(profileHeader, backdrop)
+      && [...profileHeader.querySelectorAll('a[href], h1, h2, [role="heading"]')]
+        .some(element => normalizeUsername(visibleText(element)) === profileUsername
+          && rendered(element, backdrop)));
     const scopedCounts = new Set();
     const fallbackCounts = new Set();
     for (const link of document.querySelectorAll('a[role="link"], a[href="#"]')) {
-      if (!visibleText(link) || link.closest?.('[hidden], [aria-hidden="true"], [role="dialog"]')) continue;
+      const backdropCount = verifiedBackdrop && profileHeader.contains(link)
+        && link.closest?.('[aria-hidden="true"]') === backdrop
+        && rendered(link, backdrop);
+      if (!visibleText(link) || (link.closest?.('[hidden], [aria-hidden="true"], [role="dialog"]')
+        && !backdropCount)) continue;
       const values = [
         link.getAttribute('title'),
         visibleText(link),
@@ -2062,7 +2124,7 @@
         if (!digits) continue;
         const count = Number(digits);
         if (!Number.isSafeInteger(count)) continue;
-        fallbackCounts.add(count);
+        if (!backdropCount) fallbackCounts.add(count);
         const href = link.getAttribute?.('href');
         if (!href || !profileUsername) continue;
         // Instagram also renders profile counters as non-navigation links.
@@ -2074,6 +2136,7 @@
         try {
           const target = new URL(href, INSTAGRAM_WEB_ORIGIN);
           if (target.origin !== INSTAGRAM_WEB_ORIGIN || target.username || target.password) continue;
+          if (backdropCount && (target.search || target.hash)) continue;
           const pathname = target.pathname
             .replace(/\/+$/, '')
             .toLowerCase();
@@ -2089,13 +2152,25 @@
     return null;
   }
 
-  function sleep(ms) {
-    return new Promise((resolve) => { setTimeout(resolve, ms); });
+  function sleep(ms, signal) {
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) { reject(relationshipError('stopped', 'List scan stopped.')); return; }
+      const stop = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener?.('abort', stop);
+        reject(relationshipError('stopped', 'List scan stopped.'));
+      };
+      const timer = setTimeout(() => {
+        signal?.removeEventListener?.('abort', stop);
+        resolve();
+      }, ms);
+      signal?.addEventListener?.('abort', stop, { once: true });
+    });
   }
 
   // Scrolls the open followers/following dialog to enumerate the full list.
   // Read-only: it only scrolls an already-open list and reads rendered rows.
-  async function collectAccountList({ maxScrolls = 1_200, settleMs = 500, listType = '' } = {}) {
+  async function collectAccountList({ maxScrolls = 1_200, settleMs = 500, listType = '', signal, onProgress } = {}) {
     const session = inspectSession();
     if (session.sessionExpired || session.challenge || session.actionBlocked || session.rateLimited) {
       return { ...session, accounts: [], complete: false, reason: 'session-stop' };
@@ -2110,10 +2185,35 @@
     const observedListType = listContext?.listType || expectedListType;
     expectedListType = observedListType;
     const profilePath = location.pathname;
-    const expectedCountAtStart = exactProfileListCount(observedListType);
-
+    const profileUsername = normalizeUsername(profilePath);
+    const ownerHeaderPresent = () => {
+      const header = verifiedProfileHeader(profileUsername).root;
+      return Boolean(header?.isConnected && header.getClientRects?.().length
+        && [...header.querySelectorAll('a[href], h1, h2, [role="heading"]')]
+          .some(element => normalizeUsername(visibleText(element)) === profileUsername
+            && element.isConnected && element.getClientRects?.().length));
+    };
+    const ownerHeaderAtStart = ownerHeaderPresent();
+    const expectedCountAtStart = exactProfileListCount(observedListType, { requireScoped: true });
     const accounts = new Map();
+    let stopReason = '';
+    let stoppedSession = null;
+    let reportedCount = -1;
+    const currentContext = () => {
+      if (signal?.aborted) { stopReason = 'stopped'; return null; }
+      if (location.pathname !== profilePath) { stopReason = 'profile-changed'; return null; }
+      if (ownerHeaderAtStart && !ownerHeaderPresent()) { stopReason = 'profile-changed'; return null; }
+      const check = inspectSession();
+      if (check.sessionExpired || check.challenge || check.actionBlocked || check.rateLimited) {
+        stopReason = 'session-stop'; stoppedSession = check; return null;
+      }
+      const context = accountListDialog(expectedListType);
+      if (!context) stopReason = accountListDialog() ? 'list-changed' : 'list-closed';
+      return context;
+    };
     const harvest = () => {
+      const context = currentContext();
+      if (!context || context.dialog !== root) return false;
       for (const anchor of root.querySelectorAll('a[href^="/"]')) {
         const username = normalizeUsername(anchor.getAttribute('href'));
         if (!username || accounts.has(username)) continue;
@@ -2125,130 +2225,129 @@
           source: 'extension-scrolled-dom',
         });
       }
+      if (accounts.size !== reportedCount && !signal?.aborted) {
+        reportedCount = accounts.size;
+        onProgress?.({ listType: observedListType, found: accounts.size, expectedCount: expectedCountAtStart });
+      }
+      return true;
     };
-
-    harvest();
-    // Recycled rows cannot all exist in the DOM at once. Start at the top and
-    // retain each window before advancing by less than one viewport.
-    if (scroller) {
-      scroller.scrollTop = 0;
-      await sleep(settleMs);
-    }
-    let complete = !scroller
-      && Number.isSafeInteger(expectedCountAtStart)
-      && accounts.size === expectedCountAtStart;
+    const settle = (ms) => sleep(ms, signal);
+    let complete = false;
     let stagnantRounds = 0;
-    for (let round = 0; round < maxScrolls; round += 1) {
-      const currentContext = accountListDialog(expectedListType);
-      if (!currentContext || location.pathname !== profilePath) {
-        complete = false;
-        break;
+    const scan = async () => {
+      if (!harvest() || !currentContext()) return;
+      // Recycled rows cannot all exist in the DOM at once. Start at the top and
+      // retain each window before advancing by less than one viewport.
+      if (scroller) {
+        scroller.scrollTop = 0;
+        await settle(settleMs);
       }
-      const currentRoot = currentContext.dialog;
-      const currentScroller = scrollableWithin(currentRoot);
-      if (currentRoot !== root || currentScroller !== scroller) {
-        listContext = currentContext;
-        root = currentRoot;
-        scroller = currentScroller;
-        stagnantRounds = 0;
-        if (scroller) {
-          scroller.scrollTop = 0;
-          await sleep(settleMs);
+      for (let round = 0; round < maxScrolls; round += 1) {
+        const context = currentContext();
+        if (!context) return;
+        const currentRoot = context.dialog;
+        const currentScroller = scrollableWithin(currentRoot);
+        if (currentRoot !== root || currentScroller !== scroller) {
+          listContext = context;
+          root = currentRoot;
+          scroller = currentScroller;
+          stagnantRounds = 0;
+          if (scroller) {
+            scroller.scrollTop = 0;
+            await settle(settleMs);
+          }
         }
-        harvest();
-      }
-      harvest();
-      if (!scroller) {
-        complete = Number.isSafeInteger(expectedCountAtStart)
-          && accounts.size === expectedCountAtStart;
-        break;
-      }
-      const beforeCount = accounts.size;
-      const beforeHeight = scroller.scrollHeight;
-      const beforeTop = scroller.scrollTop;
-      // Nudge only at the end to trigger a stalled lazy-loading sentinel.
-      if (scroller.scrollTop >= scroller.scrollHeight - scroller.clientHeight - 8) {
-        scroller.scrollTop = Math.max(
-          0,
-          scroller.scrollTop - Math.max(80, Math.floor(scroller.clientHeight / 2)),
+        if (!harvest()) { if (stopReason) return; continue; }
+        if (!currentContext()) return;
+        if (!scroller) {
+          complete = Number.isSafeInteger(expectedCountAtStart)
+            && accounts.size === expectedCountAtStart;
+          return;
+        }
+        const beforeCount = accounts.size;
+        const beforeHeight = scroller.scrollHeight;
+        const beforeTop = scroller.scrollTop;
+        // Nudge only at the end to trigger a stalled lazy-loading sentinel.
+        if (scroller.scrollTop >= scroller.scrollHeight - scroller.clientHeight - 8) {
+          scroller.scrollTop = Math.max(
+            0,
+            scroller.scrollTop - Math.max(80, Math.floor(scroller.clientHeight / 2)),
+          );
+          await settle(settleMs);
+          if (!harvest()) { if (stopReason) return; continue; }
+        }
+        if (!currentContext()) return;
+        scroller.scrollTop = Math.min(
+          Math.max(0, scroller.scrollHeight - scroller.clientHeight),
+          beforeTop + Math.max(1, Math.floor(scroller.clientHeight * 0.75)),
         );
-        await sleep(settleMs);
-        harvest();
-      }
-      scroller.scrollTop = Math.min(
-        Math.max(0, scroller.scrollHeight - scroller.clientHeight),
-        beforeTop + Math.max(1, Math.floor(scroller.clientHeight * 0.75)),
-      );
-      await sleep(settleMs);
-      // A long Followers list keeps a spinner up well past the settle delay.
-      // Waiting for it to clear is what stops a big list being declared
-      // complete while thousands of rows are still unfetched.
-      let loading = false;
-      for (let wait = 0; wait < 24; wait += 1) {
-        loading = Boolean(root.querySelector('[role="progressbar"], svg[aria-label*="Loading" i]'));
-        if (!loading) break;
-        await sleep(250);
-      }
-      const settledContext = accountListDialog(expectedListType);
-      if (location.pathname !== profilePath || !settledContext) {
-        complete = false;
-        break;
-      }
-      if (settledContext.dialog !== root || scrollableWithin(root) !== scroller) continue;
-      harvest();
+        await settle(settleMs);
+        // A long Followers list keeps a spinner up well past the settle delay.
+        // Waiting for it to clear stops a big list being declared complete while
+        // thousands of rows are still unfetched. Stop also interrupts this wait.
+        let loading = false;
+        for (let wait = 0; wait < 24; wait += 1) {
+          const context = currentContext();
+          if (!context) return;
+          if (context.dialog !== root || scrollableWithin(root) !== scroller) break;
+          loading = Boolean(root.querySelector('[role="progressbar"], svg[aria-label*="Loading" i]'));
+          if (!loading) break;
+          await settle(250);
+        }
+        const settledContext = currentContext();
+        if (!settledContext) return;
+        if (settledContext.dialog !== root || scrollableWithin(root) !== scroller) continue;
+        if (!harvest() || !currentContext()) return;
 
-      const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 8;
-      const grew = accounts.size > beforeCount || scroller.scrollHeight > beforeHeight;
-      stagnantRounds = grew || loading ? 0 : stagnantRounds + 1;
-      const check = inspectSession();
-      if (check.sessionExpired || check.challenge || check.actionBlocked || check.rateLimited) {
-        return {
-          ...check,
-          accounts: [...accounts.values()],
-          complete: false,
-          reason: 'session-stop',
-        };
+        const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 8;
+        const grew = accounts.size > beforeCount || scroller.scrollHeight > beforeHeight;
+        stagnantRounds = grew || loading ? 0 : stagnantRounds + 1;
+        if (atBottom && !loading
+          && Number.isSafeInteger(expectedCountAtStart)
+          && accounts.size === expectedCountAtStart) {
+          complete = true;
+          return;
+        }
+        // Instagram lazy-loads in bursts and can pause between pages, so a couple
+        // of quiet rounds does not mean the end. Be patient before concluding.
+        if (atBottom && !loading && stagnantRounds >= 10) return;
       }
-      if (atBottom && !loading
-        && Number.isSafeInteger(expectedCountAtStart)
-        && accounts.size === expectedCountAtStart) {
-        complete = true;
-        break;
-      }
-      // Instagram lazy-loads in bursts and can pause between pages, so a couple
-      // of quiet rounds does not mean the end. Be patient before concluding.
-      if (atBottom && !loading && stagnantRounds >= 10) {
-        break;
-      }
+    };
+    try { await scan(); }
+    catch (error) {
+      if (signal?.aborted || error?.code === 'stopped') stopReason = 'stopped';
+      else throw error;
     }
-
-    const expectedCountAtEnd = exactProfileListCount(observedListType);
+    currentContext();
+    const expectedCountAtEnd = stopReason ? null : exactProfileListCount(observedListType, { requireScoped: true });
     const expectedCount = expectedCountAtEnd ?? expectedCountAtStart;
     const countChanged = Number.isSafeInteger(expectedCountAtStart)
       && Number.isSafeInteger(expectedCountAtEnd)
       && expectedCountAtStart !== expectedCountAtEnd;
     const countMismatch = Number.isSafeInteger(expectedCount)
       && accounts.size !== expectedCount;
-    if (countChanged || countMismatch || !Number.isSafeInteger(expectedCount)) complete = false;
+    const latestCountUnverified = !Number.isSafeInteger(expectedCountAtEnd);
+    if (stopReason || countChanged || countMismatch || latestCountUnverified) complete = false;
 
     return {
-      ...session,
+      ...(stoppedSession || session),
       accounts: [...accounts.values()]
         .sort((left, right) => left.username.localeCompare(right.username)),
       complete,
       listType: listContext?.listType || null,
       expectedCount,
       observedCount: accounts.size,
+      profilePath,
       capturedAt: new Date().toISOString(),
-      reason: countChanged
+      reason: stopReason || (countChanged
         ? 'list-count-changed'
-        : countMismatch
-          ? 'list-count-mismatch'
-          : !Number.isSafeInteger(expectedCount)
-            ? 'list-count-unverified'
+        : latestCountUnverified
+          ? 'list-count-unverified'
+          : countMismatch
+            ? 'list-count-mismatch'
             : complete
               ? 'list-complete'
-              : 'list-truncated',
+              : 'list-truncated'),
     };
   }
 

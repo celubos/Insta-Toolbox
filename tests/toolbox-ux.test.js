@@ -670,6 +670,7 @@ test('failed manual scans replace the visible scanning message', async () => {
   const select = { value: '' };
   const scanInto = loadShellFunction('scanInto', {
     inboxPanel: null,
+    assertManualScanAvailable() {},
     actions: { 'scan-list': async () => outcome },
     query(selector) {
       if (selector === '[data-role="list-type"]') return select;

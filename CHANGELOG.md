@@ -2,6 +2,31 @@
 
 This project uses [Semantic Versioning](https://semver.org/).
 
+## 4.3.2 - 2026-11-09 (development)
+
+- Identify the signed-in account from verified navigation instead of unrelated
+  feed and story avatars.
+- Resolve an exact account through the existing profile lookup when Instagram's
+  search route returns 404 or 410. Keep identity, restriction and rate-limit
+  checks in place without adding another endpoint.
+- Show incremental manual-list progress and a dedicated Stop control. Retain
+  captured rows on cancellation, and require a fresh, owner-bound final count
+  before labelling a list complete.
+- Preserve Live like me activity, duration and break choices. Keep verified
+  progress visible while Pause or Stop settles an in-flight result.
+- Bind reviewed growth actions to the current account, exact targets and original
+  expiry; retain uncertain outcomes for reconciliation before another action.
+- Recognize current profile counters and profile-prefixed post links. Read
+  visible carousel markers inside each post link while keeping unproven media
+  and dates unknown. Keep sampled insights and partial comparisons distinct.
+- Improve narrow layouts, empty-state guidance and text/control contrast.
+- Show every selected thread in the Ghost Mode confirmation before cleanup.
+- Patch build dependencies and update macOS CI to a supported Intel runner.
+  Retain reviewed screenshot provenance and exact pixel checks across versions.
+- Publish future updates through Tampermonkey only; keep all other public
+  downloads pinned to 4.3.1 and preserve their package checks. Gate Pages
+  deployment so later web artifacts do not replace the held PWA.
+
 ## 4.3.1 - 2026-10-05
 
 - Make Tampermonkey the active update channel. Mark extension, desktop and

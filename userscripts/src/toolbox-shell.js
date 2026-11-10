@@ -920,7 +920,7 @@
       </nav>
       <div class="scroll">
         <section id="insta-toolbox-panel-checker" class="view" role="tabpanel" aria-labelledby="insta-toolbox-tab-checker" data-panel="checker" hidden><section class="card" aria-labelledby="insta-toolbox-checker-account-title"><h2 id="insta-toolbox-checker-account-title">Check mutuals</h2><p>Read-only. Uses the Instagram session in this tab.</p><div class="field"><label for="insta-toolbox-checker-username">Instagram username</label><input id="insta-toolbox-checker-username" type="text" inputmode="text" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="your_username" data-role="checker-username"></div><div class="toolbar"><button class="button primary" type="button" data-action="check-account-relationships" data-role="checker-run">Check mutuals</button></div></section>
-          <div class="scan-progress" data-role="scan-progress" hidden><div class="run-bar" data-role="scan-bar" role="progressbar" aria-label="Mutual check progress" aria-describedby="insta-toolbox-scan-detail" aria-valuemin="0" aria-valuemax="100"><span data-role="scan-fill"></span></div><p id="insta-toolbox-scan-detail" class="lead" data-role="scan-detail"></p></div>
+          <div class="scan-progress" data-role="scan-progress" hidden><div class="run-bar" data-role="scan-bar" role="progressbar" aria-label="Mutual check progress" aria-describedby="insta-toolbox-scan-detail" aria-valuemin="0" aria-valuemax="100"><span data-role="scan-fill"></span></div><p id="insta-toolbox-scan-detail" class="lead" data-role="scan-detail"></p><button class="button danger" type="button" data-action="stop-list-scan" data-role="list-scan-stop" hidden>Stop scan</button></div>
           <div class="card" data-role="comparison"></div>
           <div data-role="loaded-insights"></div>
           <section class="card comparison-browser" data-role="comparison-browser" aria-labelledby="insta-toolbox-comparison-browser-title" hidden><h2 id="insta-toolbox-comparison-browser-title">Comparison list</h2><div class="comparison-controls"><div class="field"><label for="insta-toolbox-comparison-category">Show accounts</label><select id="insta-toolbox-comparison-category" data-role="comparison-category" aria-controls="insta-toolbox-comparison-list"><option value="not-following-me-back">Don't follow you back</option><option value="i-do-not-follow-back">You don't follow back</option><option value="mutuals">Mutuals</option></select></div><div class="field"><label for="insta-toolbox-filter">Find a username</label><input id="insta-toolbox-filter" type="search" inputmode="search" autocomplete="off" spellcheck="false" placeholder="Search usernames" data-role="result-filter" aria-controls="insta-toolbox-comparison-list"></div></div><p id="insta-toolbox-comparison-count" class="comparison-count" data-role="comparison-count" tabindex="-1"></p><ul id="insta-toolbox-comparison-list" class="list comparison-list" data-role="comparison-list" aria-describedby="insta-toolbox-comparison-count"></ul><button class="button quiet comparison-more" type="button" data-action="show-more-comparison" data-role="comparison-more" hidden>Show more</button></section>
@@ -1411,6 +1411,7 @@
     renderMessages();
     syncTabs(preferences.view);
     renderCheckerSteps();
+    renderListScanControls();
     renderDmSummary();
     renderContext();
     renderRun();
@@ -1537,6 +1538,7 @@
   let accountActionController = null;
   let accountRunDraft = null;
   let relationshipController = null;
+  let manualScanController = null;
   let relationshipProgress = null;
   let dmThreadPreview = null;
   let dmRunnerSnapshot = null;
@@ -2025,6 +2027,7 @@
   }
 
   async function startAccountRun({ action, usernames, growthCampaignId = '', growthAccount = '', expiresAt = null }) {
+    if (manualScanController) { status('Stop the list scan before starting account actions.'); return; }
     const accountUsername = normalizeUsername(engine.detectAuthenticatedUsername?.());
     if (!accountUsername || (growthCampaignId && accountUsername !== growthAccount)) {
       status('Verify the signed-in account before starting. No account action started.');
@@ -2266,6 +2269,35 @@
     };
   }
 
+  function renderListScanControls() {
+    const stop = query('[data-role="list-scan-stop"]');
+    if (stop) {
+      stop.hidden = !manualScanController;
+      stop.disabled = manualScanController?.signal.aborted === true;
+      stop.textContent = stop.disabled ? 'Stopping scan…' : 'Stop scan';
+    }
+    const readBusy = Boolean(manualScanController || relationshipController);
+    for (const action of ['scan-following', 'scan-followers', 'scan-list', 'capture', 'clear-capture']) {
+      for (const control of shadow.querySelectorAll(`[data-action="${action}"]`)) control.disabled = readBusy;
+    }
+    const listType = query('[data-role="list-type"]');
+    if (listType) listType.disabled = readBusy;
+    const check = query('[data-role="checker-run"]');
+    if (check) check.disabled = Boolean(manualScanController);
+  }
+
+  function assertManualScanAvailable() {
+    if (inboxPanel?.busy()) throw new Error('Stop inbox cleanup before scanning a list.');
+    if (manualScanController) throw new Error('A list scan is already running. Use Stop scan first.');
+    if (relationshipController) throw new Error('Stop the mutual check before scanning a list.');
+    if (presencePanel?.busy() || presenceGrowthPanel?.busy()) throw new Error('Stop Presence before scanning a list.');
+    const dm = dmRunner?.snapshot();
+    if (accountActionController || dmCleanupController || dm?.canStop
+      || ['preparing', 'running', 'waiting', 'stopping'].includes(dm?.status) || state.run?.status === 'running') {
+      throw new Error('Stop the current run before scanning a list.');
+    }
+  }
+
   function scanProgressPercent(found, expectedCounts, complete = false) {
     const types = ['followers', 'following'];
     const knownTypes = types.filter((type) => Number.isSafeInteger(expectedCounts?.[type]));
@@ -2287,6 +2319,7 @@
     settled = false,
     expectedCount = null,
     expectedCounts = null,
+    { kind = 'mutual', stopped = false } = {},
   ) {
     const panel = query('[data-role="scan-progress"]');
     if (!panel) return;
@@ -2317,13 +2350,16 @@
     );
     if (fill) fill.style.width = percent === null ? '100%' : `${percent}%`;
     if (bar) {
+      const task = kind === 'list' ? 'List scan' : 'Mutual check';
+      bar.setAttribute('aria-label', `${task} progress`);
       bar.dataset.indeterminate = String(percent === null);
       if (percent === null) bar.removeAttribute('aria-valuenow');
       else bar.setAttribute('aria-valuenow', String(percent));
       bar.setAttribute(
         'aria-valuetext',
         settled
-          ? complete ? 'Mutual check complete' : 'Mutual check finished with a partial result'
+          ? stopped ? `${task} stopped with a partial result`
+            : complete ? `${task} complete` : `${task} finished with a partial result`
           : percent === null
             ? `Scanning ${listType || 'accounts'}; total unknown`
             : `${percent}% of the expected accounts read`,
@@ -2347,7 +2383,7 @@
     return `Mutual check failed: ${message} Saved comparison unchanged.`;
   }
 
-  function settleFailedRelationshipProgress(error) {
+  function settleFailedRelationshipProgress(error, { kind = 'mutual' } = {}) {
     const bar = query('[data-role="scan-bar"]');
     const fill = query('[data-role="scan-fill"]');
     if (fill) fill.style.width = '0%';
@@ -2356,17 +2392,23 @@
     bar.removeAttribute('aria-valuenow');
     bar.setAttribute(
       'aria-valuetext',
-      error?.code === 'stopped' ? 'Mutual check stopped' : 'Mutual check failed',
+      `${kind === 'list' ? 'List scan' : 'Mutual check'} ${error?.code === 'stopped' ? 'stopped' : 'failed'}`,
     );
   }
 
   async function scanInto(listType) {
     if (inboxPanel?.busy()) throw new Error('Stop inbox cleanup before scanning a list.');
+    assertManualScanAvailable();
     const select = query('[data-role="list-type"]');
     if (select) select.value = listType;
-    resetRelationshipProgress();
-    showScanProgress(listType, 0, false);
-    const outcome = await actions['scan-list']();
+    let outcome;
+    try { outcome = await actions['scan-list'](); }
+    catch (error) {
+      if (error?.code === 'stale-list-scan') return;
+      settleFailedRelationshipProgress(error, { kind: 'list' });
+      setText('scan-detail', `List scan failed: ${safeText(error?.message, 'Instagram did not return readable rows.')}`);
+      throw error;
+    }
     if (!outcome?.applied) {
       const detail = safeText(outcome?.detail, `The ${listType} scan did not start.`);
       const bar = query('[data-role="scan-bar"]');
@@ -2387,11 +2429,15 @@
       outcome.complete,
       true,
       outcome.expectedCount,
+      null,
+      { kind: 'list', stopped: outcome.stopped === true },
     );
+    if (outcome.detail) setText('scan-detail', outcome.detail);
     renderAll();
   }
 
   async function checkAccountRelationships() {
+    if (manualScanController) { status('Stop the list scan before checking mutuals.'); return; }
     if (inboxPanel?.busy()) { status('Stop inbox cleanup before checking mutuals.'); return; }
     if (presencePanel?.busy()) { status('Pause or stop Presence before checking mutuals.'); return; }
     if (relationshipController) {
@@ -2830,6 +2876,7 @@
 
   async function scanSentConversation() {
     if (inboxPanel?.busy()) throw new Error('Stop inbox cleanup before checking the conversation.');
+    if (manualScanController) throw new Error('Stop the list scan before checking the conversation.');
     if (dmCleanupController) throw new Error('Stop cleanup before checking the conversation.');
     if (!dmRunner) throw new Error('Reload Instagram to load the DM Unsend runner.');
     status('Checking this conversation for messages you sent. Nothing will be removed.');
@@ -2870,6 +2917,7 @@
   }
 
   async function runReactionsOnly() {
+    if (manualScanController) { status('Stop the list scan before removing reactions.'); return; }
     if (inboxPanel?.busy() || (typeof presencePanel !== 'undefined' && presencePanel?.busy())) {
       status('Stop the current run before removing reactions.'); return;
     }
@@ -2919,6 +2967,7 @@
   }
 
   async function runDmUnsend() {
+    if (manualScanController) { status('Stop the list scan before using DM Unsend.'); return; }
     if (inboxPanel?.busy()) { inboxPanel.stop(); return; }
     if (typeof presencePanel !== 'undefined' && presencePanel?.busy()) {
       status('Pause or stop Presence before using DM Unsend.');
@@ -3125,6 +3174,19 @@
     'check-account-relationships': () => checkAccountRelationships(),
     'scan-following': () => scanInto('following'),
     'scan-followers': () => scanInto('followers'),
+    'stop-list-scan': () => {
+      if (!manualScanController || manualScanController.signal.aborted) return;
+      const restoreFocus = shadow.activeElement === query('[data-role="list-scan-stop"]');
+      manualScanController.abort();
+      renderListScanControls();
+      const detail = query('[data-role="scan-detail"]');
+      if (restoreFocus && preferences.view === 'checker' && preferences.open
+        && detail?.getClientRects?.().length && !detail.closest?.('[hidden]')) {
+        detail.tabIndex = -1;
+        detail.focus({ preventScroll: true });
+      }
+      status('Stopping the list scan. Read rows will be kept as a partial capture.');
+    },
     'context-cta': () => {
       const cta = query('[data-role="context-cta"]');
       const target = cta?.dataset.ctaAction;
@@ -3159,58 +3221,94 @@
       status('Run stopped. It will not resume.');
     },
     'scan-list': async () => {
-      if (inboxPanel?.busy()) throw new Error('Stop inbox cleanup before scanning a list.');
+      assertManualScanAvailable();
       const listType = query('[data-role="list-type"]').value === 'followers' ? 'followers' : 'following';
-      status(`Scanning the open ${listType} list. Keep the dialog open.`);
-      const outcome = await engine.collectAccountList({ listType });
-      const stopReason = sessionStop(outcome);
-      if (stopReason) {
-        const detail = `Stopped: ${stopReason}.`;
-        status(detail);
-        return { applied: false, detail };
-      }
-      const accounts = outcome?.accounts || [];
-      if (outcome?.listType !== listType) {
-        const detail = `No verified ${listType} dialog was open. Open that exact list and scan again.`;
-        status(detail);
-        return { applied: false, detail };
-      }
-      if (!accounts.length) {
-        const detail = `No rows were readable. Open your ${listType} list first.`;
-        status(detail);
-        return { applied: false, detail };
-      }
       const subjectUsername = currentProfileCaptureSubject();
-      prepareCaptureWorkspace(subjectUsername);
-      state.capture[listType] = reconciledRelationshipAccounts(
-        verifiedCapture(listType),
-        accounts,
-        outcome.complete === true,
-      );
-      state.capture.capturedAt[listType] = nowIso();
-      state.capture.complete = { ...(state.capture.complete || {}), [listType]: outcome.complete === true };
-      state.capture.verified = { ...(state.capture.verified || {}), [listType]: true };
-      state.capture.source = { ...(state.capture.source || {}), [listType]: 'list-dialog' };
-      state.capture.subjectUsername = subjectUsername;
-      saveState();
-      renderAll();
-      const mismatch = outcome?.reason === 'list-count-mismatch'
-        && Number.isSafeInteger(outcome.expectedCount);
-      status(
-        `Scanned ${accounts.length} ${listType} rows.${outcome.complete
-          ? ''
-          : mismatch
-            ? ` Instagram reports ${outcome.expectedCount}, so this capture stays incomplete.`
-            : outcome?.reason === 'list-count-changed'
-              ? ' The profile count changed during the scan, so this capture stays incomplete.'
-              : ' The list did not reach its end, so some may be missing.'}`,
-      );
-      return {
-        applied: true,
-        complete: outcome.complete === true,
-        expectedCount: outcome.expectedCount,
-        found: state.capture[listType].length,
-      };
+      if (!subjectUsername) throw new Error('Open the profile whose list you want to scan first.');
+      const profilePath = location.pathname;
+      const workspaceAtStart = state.capture;
+      const controller = new AbortController();
+      manualScanController = controller;
+      try {
+        invalidatePresence();
+        resetRelationshipProgress();
+        showScanProgress(listType, 0, false, false, null, null, { kind: 'list' });
+        renderAll();
+        status(`Scanning the open ${listType} list. Keep the dialog open.`);
+        const outcome = await engine.collectAccountList({
+          listType, signal: controller.signal,
+          onProgress(progress) {
+            if (manualScanController !== controller || controller.signal.aborted
+              || state.capture !== workspaceAtStart || location.pathname !== profilePath) return;
+            showScanProgress(listType, progress.found, false, false, progress.expectedCount,
+              null, { kind: 'list' });
+          },
+        });
+        if (manualScanController !== controller) {
+          const error = new Error('A newer list scan owns this context.');
+          error.code = 'stale-list-scan';
+          throw error;
+        }
+        if (state.capture !== workspaceAtStart) {
+          throw new Error('The saved capture changed during the scan. Its result was not overwritten.');
+        }
+        const accounts = outcome?.accounts || [];
+        const stopReason = sessionStop(outcome);
+        if (stopReason && !accounts.length) {
+          const detail = `Stopped: ${stopReason}.`;
+          status(detail);
+          return { applied: false, detail };
+        }
+        if (outcome?.listType !== listType || (outcome.profilePath && outcome.profilePath !== profilePath)) {
+          const detail = `No verified ${listType} dialog was open. Open that exact list and scan again.`;
+          status(detail);
+          return { applied: false, detail };
+        }
+        const stopped = controller.signal.aborted || outcome.reason === 'stopped';
+        const profileChanged = location.pathname !== profilePath || outcome.reason === 'profile-changed';
+        const listChanged = ['list-closed', 'list-changed'].includes(outcome.reason);
+        const complete = outcome.complete === true && !stopped && !profileChanged && !listChanged && !stopReason;
+        const existing = state.capture.subjectUsername === subjectUsername ? verifiedCapture(listType) : [];
+        if (!accounts.length && !(complete && outcome.expectedCount === 0)
+          && !((stopped || profileChanged) && existing.length
+            && state.capture.source?.[listType] === 'list-dialog')) {
+          const detail = stopped ? 'List scan stopped before any rows were read. Saved capture unchanged.'
+            : `No rows were readable. Open your ${listType} list first.`;
+          status(detail);
+          return { applied: false, detail };
+        }
+        prepareCaptureWorkspace(subjectUsername);
+        state.capture[listType] = reconciledRelationshipAccounts(
+          verifiedCapture(listType), accounts, complete,
+        );
+        state.capture.capturedAt[listType] = nowIso();
+        state.capture.complete = { ...(state.capture.complete || {}), [listType]: complete };
+        state.capture.verified = { ...(state.capture.verified || {}), [listType]: true };
+        state.capture.source = { ...(state.capture.source || {}), [listType]: 'list-dialog' };
+        state.capture.subjectUsername = subjectUsername;
+        saveState();
+        const mismatch = outcome?.reason === 'list-count-mismatch' && Number.isSafeInteger(outcome.expectedCount);
+        const interruption = stopped ? 'List scan stopped.'
+          : profileChanged ? 'The profile changed; list scan stopped.'
+            : outcome.reason === 'list-closed' ? 'The list closed before the scan finished.'
+              : outcome.reason === 'list-changed' ? 'The open list changed; scan stopped.'
+                : stopReason ? `Stopped: ${stopReason}.` : '';
+        const detail = interruption
+          ? `${interruption} ${accounts.length} ${listType} read; ${state.capture[listType].length} stored for @${subjectUsername} as a partial capture.`
+          : `Scanned ${accounts.length} ${listType} rows.${complete
+            ? ''
+            : mismatch
+              ? ` Instagram reports ${outcome.expectedCount}, so this capture stays incomplete.`
+              : outcome.reason === 'list-count-changed'
+                ? ' The profile count changed during the scan, so this capture stays incomplete.'
+                : ' The list did not reach its end, so some may be missing.'}`;
+        status(detail);
+        return { applied: true, complete, expectedCount: outcome.expectedCount,
+          found: accounts.length, stored: state.capture[listType].length, stopped, detail };
+      } finally {
+        if (manualScanController === controller) manualScanController = null;
+        renderAll();
+      }
     },
     'scan-sent': () => scanSentConversation(),
     'run-accounts': async () => {
@@ -3303,6 +3401,7 @@
       capabilities: cleanupSettings.capabilities('userscript'),
     }),
     capture: () => {
+      if (manualScanController) { status('Stop the list scan before capturing visible rows.'); return; }
       const listType = query('[data-role="list-type"]').value === 'followers' ? 'followers' : 'following';
       const visible = captureVisibleAccounts(listType);
       if (!visible.length) {
@@ -3326,6 +3425,7 @@
       status(`Captured ${visible.length} rendered ${listType} rows; ${state.capture[listType].length - before} were new.`);
     },
     'clear-capture': () => {
+      if (manualScanController) { status('Stop the list scan before clearing the checker.'); return; }
       invalidatePresence();
       state.capture = stateDefaults().capture;
       checkerResultKey = '';
@@ -3767,7 +3867,7 @@
         return GM_setValue(`instaToolboxPresenceActivityLogV1:${account.accountKey}`, value);
       },
       busy: () => Boolean(dmCleanupController || dmRunner?.snapshot().canStop
-        || relationshipController || state.run?.status === 'running' || inboxPanel?.busy()
+        || relationshipController || manualScanController || state.run?.status === 'running' || inboxPanel?.busy()
         || presenceGrowthPanel?.busy()),
       onStatus: status,
     });
@@ -3790,7 +3890,7 @@
         runBatch: startAccountRun,
         canRunBatch: () => managerTabStorageAvailable,
         busy: () => Boolean(presencePanel?.busy() || inboxPanel?.busy()
-          || relationshipController || dmCleanupController || state.run?.status === 'running'),
+          || relationshipController || manualScanController || dmCleanupController || state.run?.status === 'running'),
         onStatus: status,
         });
       } catch {
@@ -3850,7 +3950,7 @@
       },
       openWorkersInBackground: cleanupSettings.effective(cleanupPreferences, 'userscript').execution === 'background',
       busy: () => Boolean(dmCleanupController || dmRunner?.snapshot().canStop
-        || relationshipController || state.run?.status === 'running' || presencePanel?.busy()),
+        || relationshipController || manualScanController || state.run?.status === 'running' || presencePanel?.busy()),
       onStatus: status,
     });
   }

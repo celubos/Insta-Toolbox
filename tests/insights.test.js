@@ -52,7 +52,7 @@ test('Insights never reads DMs, requests a remote service, or treats an empty sa
 
 test('profile-grid permalinks remain readable without article wrappers or invented media details', () => {
   const link = (href, shown = true) => ({ isConnected: true, getClientRects: () => shown ? [{}] : [],
-    closest: () => null, getAttribute: name => name === 'href' ? href : null });
+    closest: () => null, querySelectorAll: () => [], getAttribute: name => name === 'href' ? href : null });
   const links = [link('/p/grid_one/'), link('/reel/grid_two/'), link('/p/grid_one/'),
     link('/p/hidden/', false), link('https://other.example/p/no/'), link('/explore/')];
   const report = readLoadedInsights({ document: { querySelectorAll: selector => selector === 'main a[href]' ? links : [] },
@@ -81,7 +81,7 @@ test('exact prefixed post routes deduplicate with canonical links and reject unr
 
 function nativeProfileDocument({ owner = nativeProfileContract.username, headerCopies = 1, external = false } = {}) {
   const link = (href, text = '') => ({ isConnected: true, textContent: text,
-    getClientRects: () => [{}], closest: () => null,
+    getClientRects: () => [{}], closest: () => null, querySelectorAll: () => [],
     getAttribute: name => name === 'href' ? href : name === 'role' ? 'link' : null,
   });
   const counters = nativeProfileContract.counterLinks.map(item => link(external ? `https://example.org/${owner}/` : `/${owner}/`, item.text));
@@ -108,4 +108,64 @@ test('Insights does not attach counters from another, ambiguous or external prof
       location: new URL(`https://www.instagram.com${nativeProfileContract.pathname}`) });
     assert.equal(report.profile, null);
   }
+});
+
+function mediaFixtureNode(tag, attributes = {}, children = []) {
+  const matches = (node, selector) => selector === '[aria-label]' ? node.getAttribute('aria-label') !== null
+    : selector === 'a[href]' ? node.tagName === 'A' && node.getAttribute('href') !== null
+      : selector === 'time[datetime]' ? node.tagName === 'TIME' && node.getAttribute('datetime') !== null
+        : selector === '[hidden], [aria-hidden="true"]' ? node.getAttribute('hidden') !== null || node.getAttribute('aria-hidden') === 'true'
+          : node.tagName.toLowerCase() === selector;
+  const node = { tagName: tag.toUpperCase(), isConnected: true, parentElement: null,
+    getAttribute: name => attributes[name] ?? null,
+    getClientRects: () => attributes.noRects ? [] : [{}],
+    closest(selector) {
+      for (let current = this; current; current = current.parentElement) if (matches(current, selector)) return current;
+      return null;
+    },
+    querySelectorAll(selector) {
+      return children.flatMap(child => [...(matches(child, selector) ? [child] : []), ...child.querySelectorAll(selector)]);
+    },
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; },
+  };
+  for (const child of children) child.parentElement = node;
+  return node;
+}
+
+test('native profile-grid permalinks use their own visible carousel markers only', () => {
+  const marker = (label = 'Carousel', attributes = {}) => mediaFixtureNode('svg', { 'aria-label': label, ...attributes });
+  const thumbnail = (id, children = [], href = `/fixture_owner/p/${id}/`) => mediaFixtureNode('a', { href }, [mediaFixtureNode('img'), ...children]);
+  const links = [
+    thumbnail('carousel', [marker()]),
+    thumbnail('slide', [marker('Slide 2 of 4')]),
+    thumbnail('plain'),
+    thumbnail('hidden', [mediaFixtureNode('span', { hidden: '' }, [marker()])]),
+    thumbnail('aria_hidden', [mediaFixtureNode('span', { 'aria-hidden': 'true' }, [marker()])]),
+    thumbnail('no_rect', [marker('Carousel', { noRects: true })]),
+    thumbnail('caption', [marker('A carousel of photos')]),
+    thumbnail('foreign', [marker()], 'https://example.org/fixture_owner/p/foreign/'),
+  ];
+  // A neighboring indicator outside the plain post's permalink does not describe that post.
+  mediaFixtureNode('div', {}, [links[2], marker()]);
+  const document = { querySelectorAll: selector => selector === 'main a[href]' ? links : [] };
+  const report = readLoadedInsights({ document, location: new URL(options.sourceUrl), now: () => options.capturedAt });
+  assert.deepEqual(report.posts.map(post => [post.id, post.type]), [
+    ['carousel', 'carousel'], ['slide', 'carousel'], ['plain', 'unknown'], ['hidden', 'unknown'],
+    ['aria_hidden', 'unknown'], ['no_rect', 'unknown'], ['caption', 'unknown'],
+  ]);
+  assert.deepEqual(report.counts, { photo: 0, video: 0, carousel: 2, unknown: 5 });
+  assert.equal(report.datedPosts, 0);
+  assert.deepEqual(report.hashtags, []);
+});
+
+test('article carousel and video evidence retain their existing precedence', () => {
+  const article = (id, children) => mediaFixtureNode('article', {}, [mediaFixtureNode('a', { href: `/p/${id}/` }), ...children]);
+  const articles = [
+    article('article_carousel', [mediaFixtureNode('video'), mediaFixtureNode('svg', { 'aria-label': 'Carousel' })]),
+    article('article_video', [mediaFixtureNode('video'), mediaFixtureNode('svg', { 'aria-label': 'Carousel', hidden: '' })]),
+    article('article_unknown', [mediaFixtureNode('img')]),
+  ];
+  const report = readLoadedInsights({ document: { querySelectorAll: selector => selector === 'article' ? articles : [] },
+    location: new URL(options.sourceUrl), now: () => options.capturedAt });
+  assert.deepEqual(report.posts.map(post => post.type), ['carousel', 'video', 'unknown']);
 });

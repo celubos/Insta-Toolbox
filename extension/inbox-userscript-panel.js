@@ -3,6 +3,16 @@ import { inboxReviewKey } from './inbox-coordinator.js';
 import { createSingleTabInboxController, createSingleTabInboxReview } from './inbox-single-tab.js';
 import { createUserscriptGhostBridge, userscriptGhostReviewKey } from './inbox-userscript-workers.js';
 
+function inboxReviewTargets(threadIds, labels) {
+  const byThread = new Map(labels.map(label => [label.threadId, label]));
+  return threadIds.map(threadId => {
+    const label = byThread.get(threadId);
+    const title = String(label?.title || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+    const description = [title, label?.username ? `@${label.username}` : ''].filter(Boolean).join(' · ');
+    return `Thread ${threadId}${description ? ` — ${description}` : ''}`;
+  });
+}
+
 export function mountUserscriptInboxPanel({
   container, document = globalThis.document, window = globalThis.window,
   viewer = globalThis.InstaToolboxInstagramViewer,
@@ -360,6 +370,7 @@ export function mountUserscriptInboxPanel({
             { label: 'Open tabs', value: plan.openInBackground ? 'In the background' : 'In front' },
             { label: 'Messages', value: plan.scope === 'all' ? 'All messages you sent'
               : `${plan.scope === 'newest' ? 'Newest' : 'Oldest'} ${plan.limit} in each conversation` }],
+          items: inboxReviewTargets(plan.threadIds, discovery.reviewLabels()), itemLimit: 1_000,
           binding: { action: 'inbox-unsend-workers', reviewKey: key },
         });
         if (!confirmed || epoch !== operationEpoch) { announce('Canceled. Nothing was removed.'); return; }
@@ -387,8 +398,9 @@ export function mountUserscriptInboxPanel({
         detail: 'Messages you send while cleanup is running may also be removed. Keep this Instagram tab loaded and do not send messages in these conversations until it finishes.',
         confirmLabel: 'Start cleanup',
         facts: [{ label: 'Account', value: `@${account.accountId}` },
-          { label: 'Conversations', value: plan.threadIds.join(', ') },
+          { label: 'Conversations', value: String(plan.threadIds.length) },
           { label: 'Messages', value: 'All messages you sent; one conversation at a time' }],
+        items: inboxReviewTargets(plan.threadIds, discovery.reviewLabels()), itemLimit: 1_000,
         binding: { action: 'inbox-unsend', reviewKey: key },
       });
       if (!confirmed || epoch !== operationEpoch) { announce('Canceled. Nothing was removed.'); return; }

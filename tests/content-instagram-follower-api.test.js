@@ -282,6 +282,168 @@ test('authenticated follower check requires an exact username search result', as
   );
 });
 
+for (const status of [404, 410]) {
+  test(`retired lookup HTTP ${status} resolves through the existing profile GET and reuses its first counts`, async () => {
+    const inspector = createInspector();
+    const requests = [];
+    const result = await inspector.fetchFollowerComparison({
+      username: 'target_name',
+      fetchImpl: async (input, options) => {
+        const url = new URL(input);
+        requests.push(url.pathname);
+        assert.equal(options.method, 'GET');
+        assert.equal(options.credentials, 'include');
+        assert.equal(url.origin, 'https://www.instagram.com');
+        if (url.pathname.includes('topsearch')) {
+          return status === 404
+            ? { ok: false, status, async json() { throw new SyntaxError('HTML'); } }
+            : response({ status: 'fail' }, status);
+        }
+        if (url.pathname === '/api/v1/users/web_profile_info/') {
+          assert.equal(url.searchParams.get('username'), 'target_name');
+          return response({ data: { user: { username: 'Target_Name', id: '77', pk: 77,
+            follower_count: 0, following_count: 0 } } });
+        }
+        assert.match(url.pathname, /^\/api\/v1\/friendships\/77\/(followers|following)\/$/);
+        return response({ users: [] });
+      },
+    });
+    assert.equal(result.userId, '77');
+    assert.equal(result.subjectInstagramId, '77');
+    assert.deepEqual({ ...result.complete }, { followers: true, following: true });
+    assert.deepEqual(requests, [
+      '/api/v1/web/search/topsearch/',
+      '/api/v1/users/web_profile_info/',
+      '/api/v1/friendships/77/followers/',
+      '/api/v1/friendships/77/following/',
+      '/api/v1/users/web_profile_info/',
+    ], 'reuse initial metadata, but fetch fresh totals after list traversal');
+  });
+}
+
+test('retired lookup fallback still detects profile counts changing during traversal', async () => {
+  const inspector = createInspector();
+  let profiles = 0;
+  const result = await inspector.fetchFollowerComparison({
+    username: 'target_name',
+    fetchImpl: async (input) => {
+      const url = new URL(input);
+      if (url.pathname.includes('topsearch')) return response({}, 404);
+      if (url.pathname === '/api/v1/users/web_profile_info/') {
+        profiles += 1;
+        return profileResponse({ followers: profiles === 1 ? 0 : 1, following: 0 });
+      }
+      return response({ users: [] });
+    },
+  });
+  assert.equal(profiles, 2);
+  assert.equal(result.complete.followers, false);
+  assert.equal(result.reasons.followers, 'count-changed');
+  assert.equal(result.expectedCounts.followers, 1);
+});
+
+test('retired lookup fallback rejects unbound, conflicting, or malformed profile identities before reading lists', async () => {
+  for (const profile of [
+    { username: 'similar_name', id: '77' },
+    { username: 'https://www.instagram.com/target_name/', id: '77' },
+    { username: '@target_name', id: '77' },
+    { username: 'target_name', id: '77', pk: '78' },
+    { username: 'target_name', id: '0' },
+    { username: 'target_name', id: Number.MAX_SAFE_INTEGER + 1 },
+    { username: 'target_name', id: '77', pk: 'not-an-id' },
+    { username: 'target_name' },
+    null,
+  ]) {
+    const inspector = createInspector();
+    const requests = [];
+    await assert.rejects(inspector.fetchFollowerComparison({
+      username: 'target_name',
+      fetchImpl: async (input) => {
+        const pathname = new URL(input).pathname;
+        requests.push(pathname);
+        return pathname.includes('topsearch') ? response({}, 404) : response({ data: { user: profile } });
+      },
+    }), { code: 'profile-mismatch' });
+    assert.deepEqual(requests, ['/api/v1/web/search/topsearch/', '/api/v1/users/web_profile_info/']);
+  }
+});
+
+test('lookup fallback does not run after authentication, restriction, schema, or unrelated HTTP failures', async () => {
+  for (const [status, data, responseUrl, code] of [
+    [401, {}, '', 'session-expired'],
+    [403, {}, '', 'request-failed'],
+    [429, {}, '', 'rate-limited'],
+    [500, {}, '', 'request-failed'],
+    [200, { users: [{ user: { username: 'similar_name', pk: '77' } }] }, '', 'username-not-found'],
+    [404, { message: 'challenge_required' }, '', 'challenge'],
+    [404, { message: 'feedback_required' }, '', 'action-blocked'],
+    [410, { message: 'Please wait a few minutes' }, '', 'rate-limited'],
+    [410, { message: 'login_required' }, '', 'session-expired'],
+    [404, {}, 'https://www.instagram.com/accounts/login/', 'session-expired'],
+  ]) {
+    const inspector = createInspector();
+    let requests = 0;
+    await assert.rejects(inspector.fetchFollowerComparison({
+      username: 'target_name',
+      fetchImpl: async () => { requests += 1; return { ...response(data, status), url: responseUrl }; },
+      sleepImpl: async () => assert.fail('terminal lookup failure must not retry'),
+    }), { code });
+    assert.equal(requests, 1, `HTTP ${status} ${code} must not reach profile fallback`);
+  }
+  const inspector = createInspector();
+  let invalidRequests = 0;
+  await assert.rejects(inspector.fetchFollowerComparison({
+    username: 'target_name',
+    fetchImpl: async () => {
+      invalidRequests += 1;
+      return { ok: true, status: 200, async json() { throw new SyntaxError('Malformed JSON'); } };
+    },
+  }), { code: 'invalid-response' });
+  assert.equal(invalidRequests, 1, 'a successful HTTP response with a parsing failure does not unlock fallback');
+});
+
+test('stopped lookup and unavailable fallback do not issue more account requests', async () => {
+  const inspector = createInspector();
+  const controller = new AbortController();
+  let stoppedRequests = 0;
+  await assert.rejects(inspector.fetchFollowerComparison({
+    username: 'target_name', signal: controller.signal,
+    fetchImpl: async () => { stoppedRequests += 1; controller.abort(); return response({}, 404); },
+  }), { code: 'stopped' });
+  assert.equal(stoppedRequests, 1);
+
+  let unavailableRequests = 0;
+  await assert.rejects(inspector.fetchFollowerComparison({
+    username: 'target_name',
+    fetchImpl: async () => { unavailableRequests += 1; return response({}, 404); },
+  }), error => error.code === 'request-failed' && error.httpStatus === 404);
+  assert.equal(unavailableRequests, 2, 'the metadata route cannot recursively fall back or start list traversal');
+});
+
+test('retired lookup can bind an ID while current-profile counters remain the count authority', async () => {
+  const inspector = createInspector({
+    pathname: '/target_name/', headerUsername: 'target_name',
+    profileLinks: [
+      { href: '/target_name/followers/', text: '0 followers' },
+      { href: '/target_name/following/', text: '0 following' },
+    ],
+  });
+  const requests = [];
+  const result = await inspector.fetchFollowerComparison({
+    username: 'target_name',
+    fetchImpl: async input => {
+      const pathname = new URL(input).pathname;
+      requests.push(pathname);
+      if (pathname.includes('topsearch')) return response({}, 410);
+      if (pathname === '/api/v1/users/web_profile_info/') return response({ data: { user: { username: 'target_name', pk: '77' } } });
+      return response({ users: [] });
+    },
+  });
+  assert.deepEqual({ ...result.complete }, { followers: true, following: true });
+  assert.deepEqual(requests, ['/api/v1/web/search/topsearch/', '/api/v1/users/web_profile_info/',
+    '/api/v1/friendships/77/followers/', '/api/v1/friendships/77/following/']);
+});
+
 test('open-profile background check uses exact rendered totals without profile requests or dialogs', async () => {
   const inspector = createInspector({
     pathname: '/target_name/',
@@ -352,6 +514,43 @@ for (const titled of [false, true]) {
     assert.equal(paths.length, 23);
   });
 }
+
+test('loaded profile counters cannot authorize a rounded numeric search subject', async () => {
+  const inspector = createInspector({ pathname: '/target_name/', headerUsername: 'target_name',
+    profileLinks: [{ href: '#', text: '1 followers' }, { href: '#', text: '1 following' }],
+  });
+  const paths = [];
+  await assert.rejects(inspector.fetchFollowerComparison({ username: 'target_name',
+    sleepImpl: async () => {}, fetchImpl: async input => {
+      const path = new URL(input).pathname; paths.push(path);
+      assert.equal(path, '/api/v1/web/search/topsearch/');
+      return response({ users: [{ user: { pk: 9007199254740992, username: 'target_name' } }] });
+    },
+  }), error => error.code === 'username-not-found');
+  assert.deepEqual(paths, ['/api/v1/web/search/topsearch/']);
+  assert.equal(paths.some(path => path.includes('/friendships/')), false);
+});
+
+test('loaded profile counters retain an exact large string search subject', async () => {
+  const ownerId = '9007199254740992';
+  const inspector = createInspector({ pathname: '/target_name/', headerUsername: 'target_name',
+    profileLinks: [{ href: '#', text: '1 followers' }, { href: '#', text: '1 following' }],
+  });
+  const paths = [];
+  const result = await inspector.fetchFollowerComparison({ username: 'target_name',
+    sleepImpl: async () => {}, fetchImpl: async input => {
+      const path = new URL(input).pathname; paths.push(path);
+      if (path.includes('topsearch')) return response({ users: [{ user: { pk: ownerId, username: 'target_name' } }] });
+      assert.ok(path.startsWith(`/api/v1/friendships/${ownerId}/`));
+      return response({ users: [{ username: 'fixture.account' }] });
+    },
+  });
+  assert.equal(result.userId, ownerId);
+  assert.equal(result.subjectInstagramId, ownerId);
+  assert.deepEqual({ ...result.complete }, { followers: true, following: true });
+  assert.equal(paths.filter(path => path.includes('/friendships/')).length, 2);
+  assert.equal(paths.some(path => path.includes('web_profile_info')), false);
+});
 
 test('native same-profile counter links use exact labels inside the uniquely verified profile header', async () => {
   const inspector = createInspector({ pathname: nativeProfileContract.pathname,

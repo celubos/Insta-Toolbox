@@ -105,6 +105,21 @@ function electronEvidence({ required, runtime, captured = runtime }) {
   return Object.freeze({ required, runtime, captured });
 }
 
+function productEvidence({ required, candidate, baseline }) {
+  const version = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+  const timestamp = /^\d{4}-\d{2}-\d{2}T00:00:00\.000Z$/;
+  assert.match(String(required.productVersion || ''), version, 'package product version is invalid');
+  assert.match(String(required.captureTimestamp || ''), timestamp, 'configured product capture timestamp is invalid');
+  assert.equal(candidate.productVersion, required.productVersion, 'candidate product version differs from the package pin');
+  assert.equal(candidate.captureTimestamp, required.captureTimestamp, 'candidate capture timestamp differs from the changelog');
+  assert.match(String(baseline.productVersion || ''), version, 'baseline product capture identity is invalid');
+  assert.match(String(baseline.captureTimestamp || ''), timestamp, 'baseline capture timestamp is invalid');
+  return Object.freeze({
+    candidate: Object.freeze({ productVersion: candidate.productVersion, captureTimestamp: candidate.captureTimestamp }),
+    baseline: Object.freeze({ productVersion: baseline.productVersion, captureTimestamp: baseline.captureTimestamp }),
+  });
+}
+
 async function readProductEvidenceMetadata() {
   const packageJson = JSON.parse(await readFile(path.join(repositoryRoot, 'package.json'), 'utf8'));
   const productVersion = String(packageJson.version || '').trim();
@@ -664,21 +679,22 @@ async function checkBaselines(captures, manifest) {
   }
   assert.equal(expected.schemaVersion, manifest.schemaVersion, 'baseline schema changed');
   assert.equal(expected.kind, manifest.kind, 'baseline kind changed');
-  assert.equal(expected.productVersion, manifest.productVersion, 'baseline product version changed');
-  assert.equal(expected.captureTimestamp, manifest.captureTimestamp, 'baseline capture timestamp changed');
+  const product = productEvidence({
+    required: await readProductEvidenceMetadata(), candidate: manifest, baseline: expected,
+  });
   assert.equal(expected.platform, manifest.platform, 'baseline platform changed');
   const versions = electronEvidence({
     required: manifest.requiredElectron,
     runtime: manifest.electron,
     captured: expected.electron,
   });
-  // A patched candidate must use its pinned runtime. The reviewed images keep
-  // their original capture identity and still undergo exact pixel comparison.
+  // Candidate evidence must match the current package, changelog and runtime.
+  // Reviewed images keep their capture identity and exact pixel comparison.
   manifest.baseline = {
     manifestSha256: sha256(expectedBytes),
     electron: versions.captured,
-    productVersion: expected.productVersion,
-    captureTimestamp: expected.captureTimestamp,
+    productVersion: product.baseline.productVersion,
+    captureTimestamp: product.baseline.captureTimestamp,
     capturedProductVersion: expected.capturedProductVersion || expected.productVersion,
     originalCaptureTimestamp: expected.originalCaptureTimestamp || expected.captureTimestamp,
   };
