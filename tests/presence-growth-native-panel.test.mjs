@@ -90,7 +90,10 @@ function mount(env) {
     inspectReadAccount: context => { env.readAccountCalls.push(copy(context)); return env.inspectRead(context); },
     readFollowing: () => copy(env.followingSnapshot.accounts), readFollowers: () => [],
     readFollowingSnapshot: () => copy(env.followingSnapshot),
-    readReadDraft: (actor, seed) => { env.readStorageContexts.push({ actor, seed }); return copy(env.store); },
+    readReadDraft: (actor, seed) => {
+      env.readStorageContexts.push({ actor, seed });
+      return copy(typeof env.readDraft === 'function' ? env.readDraft(actor, seed) : env.store);
+    },
     writeReadDraft: (value, actor, seed) => {
       if (env.failWrites) throw new Error('fixture-storage-write-failed');
       env.store = copy(value); env.writes.push(copy(value)); env.writeStorageContexts.push({ actor, seed });
@@ -107,6 +110,7 @@ function mount(env) {
       env.reviews.push(options); return typeof env.approval === 'function' ? env.approval(options) : env.approval ? options.binding : null;
     },
     runBatch: async run => { env.runs.push(run); },
+    busy: () => env.externalBusy === true,
     onStatus: value => env.statuses.push(value), now: () => env.clock,
   });
   const all = () => container.querySelectorAll('*');
@@ -133,6 +137,216 @@ async function waitUntil(predicate, message) {
   while (!predicate() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(predicate(), true, message);
 }
+
+function startupDraftEnvironment() {
+  const env = environment(3);
+  env.followingSnapshot.complete = false;
+  env.store = copy(createGrowthReadDraft({ actor: env.actor, followingSnapshot: env.followingSnapshot,
+    seeds: env.seeds, now: env.clock, id: 'saved-startup-draft' }));
+  env.usable = false;
+  env.profile = 'seed_a';
+  env.managerReads = 0;
+  env.readDraft = actor => {
+    if (!env.usable || actor !== env.actor) return null;
+    env.managerReads += 1;
+    return env.store?.actor === actor ? env.store : null;
+  };
+  return env;
+}
+
+const waitForContextCheck = () => new Promise(resolve => setTimeout(resolve, 550));
+
+test('a three-seed read-only draft restores after delayed actor verification without polling storage or starting work', async () => {
+  const env = startupDraftEnvironment();
+  const original = copy(env.store);
+  const app = mount(env);
+  try {
+    assert.equal(app.input.value, '');
+    assert.deepEqual(app.links(), []);
+    assert.equal(env.managerReads, 0, 'an unverified actor cannot reach account-scoped storage');
+    await waitForContextCheck();
+    assert.equal(env.managerReads, 0, 'waiting for the actor is not a storage poll');
+    env.usable = true;
+    await waitUntil(() => app.input.value.replace(/\s/g, '') === env.seeds.join(','),
+      'the same verified actor restores the saved three selected seeds');
+    assert.deepEqual(app.links(), env.seeds.map(seed => `https://www.instagram.com/${seed}/`));
+    assert.equal(app.panel.busy(), false);
+    const readsAfterRestore = env.managerReads;
+    assert.ok(readsAfterRestore > 0);
+    await waitForContextCheck();
+    assert.equal(env.managerReads, readsAfterRestore, 'an unchanged verified context does not poll stored drafts every tick');
+    assert.deepEqual(env.store, original, 'restoration changes no stored read evidence');
+    assert.deepEqual(env.writes, []);
+    assert.deepEqual(env.apiCalls, []); assert.deepEqual(env.nativeCalls, []);
+    assert.deepEqual(env.reviews, []); assert.deepEqual(env.runs, []); assert.deepEqual(env.campaigns, []);
+    app.input.value = 'my_new_choice';
+    env.usable = false;
+    await waitForContextCheck();
+    env.usable = true;
+    await waitForContextCheck();
+    assert.equal(app.input.value, 'my_new_choice', 'later actor changes never replay the startup restore over new intent');
+  } finally { app.panel.dispose(); }
+});
+
+test('delayed startup restoration rejects switched owners, changed routes and Following evidence, expiry and malformed drafts', async () => {
+  for (const change of ['new-owner', 'new-owner-with-own-draft', 'route', 'following', 'expired', 'malformed']) {
+    const env = startupDraftEnvironment();
+    const app = mount(env);
+    try {
+      if (change === 'new-owner' || change === 'new-owner-with-own-draft') env.actor = 'another_owner';
+      if (change === 'new-owner-with-own-draft') {
+        env.followingSnapshot.subjectUsername = env.actor;
+        env.store = copy(createGrowthReadDraft({ actor: env.actor, followingSnapshot: env.followingSnapshot,
+          seeds: env.seeds, now: env.clock, id: 'different-owner-draft' }));
+      }
+      if (change === 'route') env.profile = 'seed_b';
+      if (change === 'following') env.followingSnapshot.accounts.push(nativeRow('newly_followed'));
+      if (change === 'expired') env.clock += 31 * 60_000;
+      if (change === 'malformed') env.store.approvedTargets = ['candidate'];
+      const retained = copy(env.store);
+      env.usable = true;
+      await waitForContextCheck();
+      assert.equal(app.input.value, '', change);
+      assert.deepEqual(app.links(), [], change);
+      assert.deepEqual(env.store, retained, `${change}: no invalid or foreign draft is deleted or rewritten`);
+      assert.deepEqual(env.writes, [], change);
+      assert.deepEqual(env.apiCalls, [], change); assert.deepEqual(env.nativeCalls, [], change);
+      assert.deepEqual(env.reviews, [], change); assert.deepEqual(env.runs, [], change);
+    } finally { app.panel.dispose(); }
+  }
+});
+
+test('a verified empty or invalid startup lookup is consumed once and never becomes a storage polling loop', async () => {
+  for (const missing of [true, false]) {
+    const env = startupDraftEnvironment();
+    const saved = copy(env.store);
+    env.store = missing ? null : { ...saved, approvedTargets: ['candidate'] };
+    const app = mount(env);
+    try {
+      env.usable = true;
+      await waitForContextCheck();
+      assert.equal(env.managerReads, 1, 'only one verified account-scoped lookup is attempted');
+      env.store = saved;
+      await waitForContextCheck();
+      env.usable = false; await waitForContextCheck();
+      env.usable = true; await waitForContextCheck();
+      assert.equal(env.managerReads, 1, 'later timers or actor availability changes do not retry the consumed startup lookup');
+      assert.equal(app.input.value, ''); assert.deepEqual(app.links(), []);
+      assert.deepEqual(env.writes, []); assert.deepEqual(env.apiCalls, []);
+      assert.deepEqual(env.nativeCalls, []); assert.deepEqual(env.reviews, []); assert.deepEqual(env.runs, []);
+    } finally { app.panel.dispose(); }
+  }
+});
+
+test('startup restoration never overwrites seed or delay edits even when a person clears them back to defaults', async () => {
+  for (const edit of ['typed-without-event', 'typed-then-cleared', 'delay', 'delay-back-to-default']) {
+    const env = startupDraftEnvironment(); const app = mount(env);
+    try {
+      const days = app.all().find(node => node.tagName === 'select');
+      if (edit === 'typed-without-event') app.input.value = 'my_new_choice';
+      if (edit === 'typed-then-cleared') {
+        app.input.value = 'my_new_choice'; app.input.dispatch('input');
+        app.input.value = ''; app.input.dispatch('input');
+      }
+      if (edit === 'delay' || edit === 'delay-back-to-default') {
+        days.value = '10'; days.dispatch('change');
+        if (edit === 'delay-back-to-default') { days.value = '7'; days.dispatch('change'); }
+      }
+      const editedInput = app.input.value, editedDays = days.value;
+      env.usable = true;
+      await waitForContextCheck();
+      assert.equal(app.input.value, editedInput, `${edit}: the user's seed input remains authoritative`);
+      assert.equal(days.value, editedDays, `${edit}: delay choice remains unchanged`);
+      assert.deepEqual(app.links(), [], edit);
+      assert.deepEqual(env.writes, [], edit); assert.deepEqual(env.nativeCalls, [], edit);
+      assert.deepEqual(env.apiCalls, [], edit); assert.deepEqual(env.runs, [], edit);
+    } finally { app.panel.dispose(); }
+  }
+});
+
+test('an explicit new search while verification is unavailable closes the late restore opportunity', async () => {
+  const env = startupDraftEnvironment(); const app = mount(env);
+  try {
+    await app.panel.findCandidates();
+    env.usable = true;
+    await waitForContextCheck();
+    assert.equal(app.input.value, '');
+    assert.deepEqual(app.links(), []);
+    assert.deepEqual(env.apiCalls, []); assert.deepEqual(env.nativeCalls, []); assert.deepEqual(env.runs, []);
+  } finally { app.panel.dispose(); }
+});
+
+test('a newly started API search retains its own selection and read ownership instead of restoring an older draft', async () => {
+  const env = startupDraftEnvironment(); const app = mount(env);
+  let finish;
+  env.api = () => new Promise(resolve => { finish = resolve; });
+  env.usable = true;
+  app.input.value = 'seed_b';
+  const pending = app.panel.findCandidates();
+  try {
+    assert.equal(app.panel.busy(), true);
+    await waitForContextCheck();
+    assert.equal(app.input.value, 'seed_b');
+    assert.deepEqual(app.links(), []);
+    assert.equal(app.panel.busy(), true);
+    assert.equal(env.apiCalls[0].signal.aborted, false, 'late readiness cannot stop the explicit new read');
+    finish(apiResult('seed_b', env.clock)); await pending;
+    assert.equal(app.input.value, 'seed_b');
+    assert.deepEqual(env.nativeCalls, []); assert.deepEqual(env.runs, []); assert.deepEqual(env.writes, []);
+  } finally {
+    if (app.panel.busy()) { finish(apiResult('seed_b', env.clock)); await pending; }
+    app.panel.dispose();
+  }
+});
+
+test('a new due-campaign review and busy work prevent a delayed read draft from replacing current intent', async () => {
+  const busyEnv = startupDraftEnvironment(); busyEnv.externalBusy = true;
+  const busyApp = mount(busyEnv);
+  try {
+    busyEnv.usable = true; await waitForContextCheck();
+    busyEnv.externalBusy = false; await waitForContextCheck();
+    assert.equal(busyApp.input.value, ''); assert.deepEqual(busyApp.links(), []);
+    assert.deepEqual(busyEnv.apiCalls, []); assert.deepEqual(busyEnv.nativeCalls, []); assert.deepEqual(busyEnv.runs, []);
+  } finally { busyApp.panel.dispose(); }
+
+  const env = startupDraftEnvironment(); env.campaigns = [dueCampaign(env.clock)];
+  const app = mount(env); let finish;
+  env.approval = () => new Promise(resolve => { finish = resolve; });
+  env.usable = true;
+  const pending = app.panel.reviewDue();
+  try {
+    assert.equal(env.reviews.length, 1, 'the person began a separate valid campaign review');
+    await waitForContextCheck();
+    assert.equal(app.input.value, ''); assert.deepEqual(app.links(), []);
+    finish(null); await pending;
+    assert.deepEqual(env.runs, []); assert.deepEqual(env.nativeCalls, []); assert.deepEqual(env.writes, []);
+  } finally { finish?.(null); await pending; app.panel.dispose(); }
+});
+
+test('intervening busy work cancels pending restoration before the unavailable actor verifies', async () => {
+  const env = startupDraftEnvironment();
+  const original = copy(env.store);
+  const app = mount(env);
+  try {
+    assert.equal(env.externalBusy, undefined);
+    assert.equal(env.usable, false);
+    assert.equal(env.managerReads, 0);
+    env.externalBusy = true;
+    await waitForContextCheck();
+    assert.equal(env.managerReads, 0, 'busy work while unverified does not read account-scoped storage');
+    env.externalBusy = false;
+    await waitForContextCheck();
+    env.usable = true;
+    await waitForContextCheck();
+    assert.equal(env.managerReads, 0, 'observed intervening work consumes restoration before any verified storage lookup');
+    assert.deepEqual(env.readStorageContexts, [], 'the pending guard never polls stored drafts');
+    assert.equal(app.input.value, '');
+    assert.deepEqual(app.links(), []);
+    assert.deepEqual(env.store, original);
+    assert.deepEqual(env.writes, []); assert.deepEqual(env.apiCalls, []); assert.deepEqual(env.nativeCalls, []);
+    assert.deepEqual(env.reviews, []); assert.deepEqual(env.runs, []); assert.deepEqual(env.campaigns, []);
+  } finally { app.panel.dispose(); }
+});
 
 for (const seedCount of [1, 2, 3]) {
   test(`native Growth reads ${seedCount} selected seeds across reloads and keeps Follow separately reviewed`, async () => {

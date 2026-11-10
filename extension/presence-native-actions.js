@@ -1,6 +1,6 @@
 const PROFILE_PATH = /^\/([A-Za-z0-9._]{1,30})\/?$/;
 const STORY_PATH = /^\/stories\/([A-Za-z0-9._]{1,30})(?:\/([^/?#]+))?\/?$/;
-const CONTENT_PATH = /^\/(?:p|reels?)\/([^/?#]+)\/?/;
+const CONTENT_PATH = /^\/(?:p|reels?)\/([A-Za-z0-9_-]+)\/?$/;
 const STORY_TILE_LABEL = /^story by ([A-Za-z0-9._]{1,30})(?:,|$)/i;
 const RESERVED = new Set(['accounts', 'about', 'api', 'direct', 'explore', 'reels', 'settings', 'stories', 'web']);
 

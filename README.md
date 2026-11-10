@@ -117,9 +117,9 @@ pnpm run qa:overlay:check
 pnpm run verify:repo-hygiene
 ```
 
-The development matrix covers the PWA, extension, userscript, layout controls, and packaged apps. The 4.3.5 userscript is a development candidate; its final-build automated checks, installed-build acceptance and CI remain pending. Reviewed screenshot captures retain their original version and runtime identities. Automated fixtures do not prove current authenticated Instagram behavior.
+The development matrix covers the PWA, extension, userscript, layout controls, and packaged apps. The 4.3.6 userscript is a development candidate; its final-build automated checks, installed-build acceptance and CI remain pending. Official release also requires authorized maintainer dispatch and review access, which is currently unavailable. Reviewed screenshot captures retain their original version and runtime identities. Automated fixtures do not prove current authenticated Instagram behavior.
 
-See [Contributing](CONTRIBUTING.md), [Maintainer Guide](docs/MAINTAINER_GUIDE.md), [4.3.5 compatibility](docs/compatibility/4.3.5.md), and [4.3.5 acceptance](docs/acceptance/4.3.5.md). The held packages retain their [4.3.1 compatibility](docs/compatibility/4.3.1.md) and [acceptance record](docs/acceptance/4.3.1.md).
+See [Contributing](CONTRIBUTING.md), [Maintainer Guide](docs/MAINTAINER_GUIDE.md), [4.3.6 compatibility](docs/compatibility/4.3.6.md), and [4.3.6 acceptance](docs/acceptance/4.3.6.md). The held packages retain their [4.3.1 compatibility](docs/compatibility/4.3.1.md) and [acceptance record](docs/acceptance/4.3.1.md).
 
 ## License and credit
 

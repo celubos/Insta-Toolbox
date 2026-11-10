@@ -34,6 +34,47 @@ function connect(parent, ...children) {
   return parent;
 }
 
+function feedContentFixture(hrefs, { duplicateLike = false } = {}) {
+  let clicks = 0;
+  const controls = Array.from({ length: duplicateLike ? 2 : 1 }, () => element({ role: 'button',
+    children: { '[aria-label]': [element({ ariaLabel: 'Like' })] }, click: () => { clicks += 1; } }));
+  const article = element({ children: { 'a[href]': hrefs.map(href => element({ href })), '[role="button"]': controls } });
+  const document = { documentElement: {}, querySelectorAll: selector => selector === 'article' ? [article] : [] };
+  class Observer { observe() {} disconnect() {} }
+  const actions = createPresenceNativeActions({ document,
+    location: { origin: 'https://www.instagram.com', pathname: '/' },
+    inspectViewer: () => ({ accountVerified: true, usable: true, accountId: 'fixture_viewer' }),
+    getStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }), MutationObserver: Observer, timeoutMs: 500 });
+  return { actions, article, controls, get clicks() { return clicks; } };
+}
+
+test('post Like discovery ignores descendant music links while retaining one canonical post/reel identity', async () => {
+  for (const reel of ['/reel/fixture_Clip-1/', '/reels/fixture_Clip-1?source=fixture#caption']) {
+    const f = feedContentFixture(['/p/fixture_Clip-1/?source=fixture#caption', reel, '/reels/audio/123456789/']);
+    const candidate = await f.actions.find('likePosts', { seen: new Set(), assertCurrent: () => true });
+    assert.equal(candidate?.id, 'post:fixture_Clip-1');
+    assert.equal(candidate?.target.contentId, 'fixture_Clip-1');
+    assert.equal(candidate?.root, f.article); assert.equal(candidate?.control, f.controls[0]);
+    assert.equal(f.actions.inspectAvailable().likePosts, 1); assert.equal(f.clicks, 0);
+  }
+});
+
+test('audio-only and noncanonical descendant links cannot establish a post Like target', async () => {
+  for (const hrefs of [['/reels/audio/123456789/'], ['/p/fixture_post/liked_by/', '/reels/fixture_post/comments/']]) {
+    const f = feedContentFixture(hrefs);
+    assert.equal(await f.actions.find('likePosts', { assertCurrent: () => true }), null);
+    assert.equal(f.actions.inspectAvailable().likePosts, 0); assert.equal(f.clicks, 0);
+  }
+});
+
+test('music-link filtering cannot authorize ambiguous real content or duplicate Like controls', async () => {
+  for (const f of [feedContentFixture(['/p/fixture_one/', '/reels/fixture_two/', '/reels/audio/123456789/']),
+    feedContentFixture(['/p/fixture_one/', '/reel/fixture_one/', '/reels/audio/123456789/'], { duplicateLike: true })]) {
+    assert.equal(await f.actions.find('likePosts', { assertCurrent: () => true }), null);
+    assert.equal(f.actions.inspectAvailable().likePosts, 0); assert.equal(f.clicks, 0);
+  }
+});
+
 test('stories without URL slide IDs advance by active media and keep reactions bound to that slide', async () => {
   const location = { origin: 'https://www.instagram.com', pathname: '/stories/person/' };
   let source = '/fixture/slide-one.mp4';

@@ -2,6 +2,20 @@
 
 This project uses [Semantic Versioning](https://semver.org/).
 
+## 4.3.6 - 2026-11-10 (development)
+
+- Ignore nested music/audio routes when identifying a post for Live like me.
+  Match only full canonical post and reel paths so a music link cannot create
+  a second content identity and cause a valid post to be skipped.
+- Keep audio-only articles, conflicting canonical post IDs and duplicate Like
+  controls ineligible. Account, review and verified-outcome guards remain
+  unchanged.
+- Restore a saved read-only Growth seed draft when account verification becomes
+  available after page startup. Retry once through the existing context
+  observer only while the original route, account and fresh Following basis
+  still match. Edits, new work, busy state or evidence drift cancel the retry;
+  restoration never reads seeds or restores action approval.
+
 ## 4.3.5 - 2026-11-09 (development)
 
 - Start native list collection when verified rows and their actual scroll

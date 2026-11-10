@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta Toolbox
 // @namespace    https://github.com/slaveofsolace/Insta-Toolbox
-// @version      4.3.5
+// @version      4.3.6
 // @description  Mutual Checker, Presence, and DM Unsend on Instagram.
 // @author       @slaveofsolace
 // @homepageURL  https://github.com/slaveofsolace/Insta-Toolbox
@@ -9913,7 +9913,7 @@ localModules["extension/presence-native-actions.js"] = (() => {
 
 const PROFILE_PATH = /^\/([A-Za-z0-9._]{1,30})\/?$/;
 const STORY_PATH = /^\/stories\/([A-Za-z0-9._]{1,30})(?:\/([^/?#]+))?\/?$/;
-const CONTENT_PATH = /^\/(?:p|reels?)\/([^/?#]+)\/?/;
+const CONTENT_PATH = /^\/(?:p|reels?)\/([A-Za-z0-9_-]+)\/?$/;
 const STORY_TILE_LABEL = /^story by ([A-Za-z0-9._]{1,30})(?:,|$)/i;
 const RESERVED = new Set(['accounts', 'about', 'api', 'direct', 'explore', 'reels', 'settings', 'stories', 'web']);
 
@@ -11899,6 +11899,9 @@ function mountPresenceGrowthPanel({
   let disposed = false;
   let readGeneration = 0;
   let readingSeed = '';
+  let restorePending = true;
+  let restoreCancelled = false;
+  const preserveNewIntent = () => { restorePending = false; restoreCancelled = true; };
   const selection = () => [...new Set(seedInput.value.split(/[\s,]+/).map(growthUsername).filter(Boolean))];
   const setProgress = (message) => { progress.textContent = message; onStatus(message); };
   const account = () => {
@@ -12027,6 +12030,7 @@ function mountPresenceGrowthPanel({
   }
 
   async function findCandidates() {
+    preserveNewIntent();
     if (controller || busy()) return;
     const owner = account();
     const following = readFollowing();
@@ -12090,6 +12094,7 @@ function mountPresenceGrowthPanel({
   }
 
   async function readCurrentSeed() {
+    preserveNewIntent();
     if (controller || busy() || disposed || typeof readSeedNative !== 'function') return;
     const valid = currentDraft(), seed = readCurrentProfile();
     if (persistedDraft && valid?.status === 'stopped' && valid.seeds.every(name => growthDraftSeedDone(valid, name))) {
@@ -12141,6 +12146,7 @@ function mountPresenceGrowthPanel({
   }
 
   function stopSearch() {
+    preserveNewIntent();
     controller?.abort();
     readGeneration += 1;
     clearCandidates();
@@ -12154,6 +12160,7 @@ function mountPresenceGrowthPanel({
   }
 
   function discardReadDraft() {
+    preserveNewIntent();
     controller?.abort(); readGeneration += 1;
     if (persistedDraft && same(storedDraft(), readDraft)) storeDraft(null);
     readDraft = null; persistedDraft = false; clearCandidates();
@@ -12162,6 +12169,7 @@ function mountPresenceGrowthPanel({
   }
 
   async function reviewFollow() {
+    preserveNewIntent();
     const owner = account();
     const discovery = currentDraft();
     const targets = [...candidatesList.querySelectorAll('input:checked')].map((input) => input.value);
@@ -12196,6 +12204,7 @@ function mountPresenceGrowthPanel({
   }
 
   async function reviewDue() {
+    preserveNewIntent();
     const owner = account();
     const entry = campaigns().map((campaign) => ({ campaign,
       targets: dueGrowthUnfollows(campaign, { account: owner, now: now() }) }))
@@ -12228,27 +12237,66 @@ function mountPresenceGrowthPanel({
   cancel.addEventListener('click', stopSearch);
   readCurrent.addEventListener('click', () => launch(readCurrentSeed));
   restart.addEventListener('click', () => launch(async () => discardReadDraft()));
-  seedInput.addEventListener('input', () => { if (readDraft && !same(selection(), readDraft.seeds)) discardReadDraft(); });
+  const editSeeds = () => {
+    preserveNewIntent();
+    if (readDraft && !same(selection(), readDraft.seeds)) discardReadDraft();
+  };
+  seedInput.addEventListener('input', editSeeds);
+  seedInput.addEventListener('change', editSeeds);
+  days.addEventListener('change', preserveNewIntent);
   follow.addEventListener('click', () => launch(reviewFollow));
   due.addEventListener('click', () => launch(reviewDue));
+  const startupInput = seedInput.value, startupDays = days.value;
+  let startupProfile = '', startupFollowing = null;
   try {
-    const saved = readReadDraft();
-    const restored = validateGrowthReadDraft(saved, { actor: account(), followingSnapshot: readFollowingSnapshot(), now: now() });
-    if (restored) {
+    startupProfile = readCurrentProfile();
+    const snapshot = readFollowingSnapshot();
+    startupFollowing = growthFollowingSnapshot(snapshot, { actor: growthUsername(snapshot?.subjectUsername), now: now() });
+  } catch { /* No verified startup snapshot means there is no draft to restore. */ }
+  restorePending = Boolean(startupFollowing);
+  const untouchedStartup = () => !restoreCancelled && !disposed && !controller && !busy() && !readDraft && !persistedDraft
+    && !candidates.length && seedInput.value === startupInput && days.value === startupDays && readCurrentProfile() === startupProfile;
+  function restoreSavedDraft() {
+    if (!restorePending) return false;
+    try {
+      if (!untouchedStartup()) { restorePending = false; return false; }
+      const owner = account();
+      if (!owner) return false;
+      if (owner !== startupFollowing.subjectUsername) { restorePending = false; return false; }
+      const current = growthFollowingSnapshot(readFollowingSnapshot(), { actor: owner, now: now() });
+      if (!current || !same(current, startupFollowing)) { restorePending = false; return false; }
+      // Retry only when the startup actor becomes verified. Once storage can be
+      // read, consume this opportunity even when no valid draft exists.
+      restorePending = false;
+      const saved = readReadDraft(owner);
+      const restored = validateGrowthReadDraft(saved, { actor: account(), followingSnapshot: readFollowingSnapshot(), now: now() });
+      if (!restored || restored.actor !== owner || !untouchedStartup()
+        || !same(growthFollowingSnapshot(readFollowingSnapshot(), { actor: owner, now: now() }), startupFollowing)) return false;
       readDraft = restored; persistedDraft = true; seedInput.value = restored.seeds.join(', '); root.open = true;
       setProgress(restored.status === 'stopped' ? 'Search stopped. Choose Read current seed to continue.'
         : 'Open the next selected profile, then choose Read current seed.');
       applyDraftCandidates();
+      return true;
+    } catch {
+      restorePending = false;
+      setProgress('Read your Following list in Mutual Checker before starting a new search.');
+      return false;
     }
-  } catch { setProgress('Read your Following list in Mutual Checker before starting a new search.'); }
+  }
+  restoreSavedDraft();
   const stopReadingOnPagehide = () => { if (controller) stopSearch(); };
   window?.addEventListener?.('pagehide', stopReadingOnPagehide);
   const contextStamp = () => `${readCurrentProfile()}|${account()}|${Boolean(readDraft && readDraft.expiresAt <= now())}`;
   let lastContext = contextStamp();
   const routeRefresh = globalThis.setInterval(() => {
     try {
+      if (restorePending && !untouchedStartup()) preserveNewIntent();
       const context = contextStamp();
-      if (!disposed && persistedDraft && context !== lastContext) { lastContext = context; render(); }
+      if (!disposed && context !== lastContext) {
+        lastContext = context;
+        restoreSavedDraft();
+        if (persistedDraft) render();
+      }
     } catch { controller?.abort(); }
   }, 250);
   routeRefresh.unref?.();

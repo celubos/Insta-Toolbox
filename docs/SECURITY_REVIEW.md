@@ -1,6 +1,6 @@
 # Security review
 
-Last reviewed: 2026-11-09
+Last reviewed: 2026-11-10
 
 ## Boundaries
 
@@ -105,7 +105,7 @@ Provenance-verified partial comparisons remain visible and downloadable with unc
 
 ## Local app and web delivery
 
-The PWA service worker uses network-first same-origin GET handling, caches only successful same-origin responses, bypasses the HTTP cache for service-worker update checks, and removes earlier cache generations. Version 4.1.4 used `insta-toolbox-v414`; the 4.3.5 candidate uses `insta-toolbox-v435`. Persisted workspace and settings keys are unchanged. Public web/PWA delivery remains on hold at 4.3.1.
+The PWA service worker uses network-first same-origin GET handling, caches only successful same-origin responses, bypasses the HTTP cache for service-worker update checks, and removes earlier cache generations. Version 4.1.4 used `insta-toolbox-v414`; the 4.3.6 candidate uses `insta-toolbox-v436`. Persisted workspace and settings keys are unchanged. Public web/PWA delivery remains on hold at 4.3.1.
 
 The loopback development server accepts only loopback Host headers and serves an explicit asset allowlist. Repository metadata, tests, documentation, and Git internals are not served. Framing protection is sent as HTTP headers because `frame-ancestors` is ineffective in a meta policy.
 
@@ -123,7 +123,7 @@ When release credentials are available, remove the library-validation exception,
 
 Earlier reviews fixed structural profile-control binding, pre-existing-dialog confusion, missing extension reservations, malformed migration fields, discard races, weak message identity, unbound or noninteractive DM controls, synthetic confirmation acceptance, and incomplete oldest-edge traversal. Regression fixtures cover these boundaries.
 
-Historical releases retain their own acceptance records. They are not evidence that the current 4.3.5 candidate passed authenticated acceptance. Current authenticated compatibility, human screen-reader use, Windows publisher trust, Apple notarization, and physical Intel Mac behavior require fresh acceptance.
+Historical releases retain their own acceptance records. They are not evidence that the current 4.3.6 candidate passed authenticated acceptance. Current authenticated compatibility, human screen-reader use, Windows publisher trust, Apple notarization, and physical Intel Mac behavior require fresh acceptance.
 
 ## Dependencies and supply chain
 
@@ -157,9 +157,29 @@ Growth drafts retain a native loading-timeout reason only as partial evidence,
 without creating candidates or action authority. Assembly succeeded; the source
 suite passed 1,286 tests, package safety passed 31 tests, and rendering passed
 45 overlay and 11 browser/PWA states with unchanged images and tolerances.
-Production native browser, background and sandbox acceptance, installation,
-authenticated acceptance and exact-candidate CI remain pending in
+All eight candidate CI checks passed. Selected installed Insights and
+diagnostics exports were checked. A configured up-to-30-minute workload expired
+naturally with six story activities and no verified post Like. Primary timeout
+recovery preserved the saved comparison; complete comparison and Growth draft
+restoration did not pass. The full live matrix remains incomplete in
 [the 4.3.5 acceptance record](./acceptance/4.3.5.md).
+
+The 4.3.6 repair matches only full canonical post/reel paths for post-Like
+identity. Nested music/audio routes cannot create a second identity; audio-only
+articles, conflicting canonical IDs and duplicate Like controls stay
+ineligible. Existing context, authority and verified-outcome checks remain
+unchanged. Growth now retries only read-only saved seed-draft restoration once
+after delayed account verification, through the existing observer and bound to
+the initial route, actor and fresh Following basis/digest. Edits, work, busy
+state or drift cancel it; seed reads and action approval are never restored
+automatically. Both code changes passed independent review; Growth restoration
+passed 51 focused cases, including intervening busy-state cancellation.
+The final generated build passed 1,297 source tests, 31 package safety checks,
+50 browser gates, 15 sandbox journeys, seven background cases and 45 overlay
+plus 11 PWA states with unchanged baselines. Installation, live acceptance and
+exact-candidate CI remain pending in [4.3.6 acceptance](./acceptance/4.3.6.md).
+Official release is also held because authorized maintainer dispatch and
+review access are currently unavailable; existing protections remain required.
 Fixtures do not prove current authenticated Instagram behavior.
 
 Partial mutual comparisons are available for display, export, and Follow / Unfollow target review. Target reviews and their existing confirmation show an uncertainty notice; missing records are not proof of a non-mutual relationship. Captures must belong to the signed-in account, and each profile's current relationship is checked before acting. Schema-1 comparison exports preserve existing fields and add `partial`, `labels`, and `warning`; completeness flags are not promoted by downloading.
