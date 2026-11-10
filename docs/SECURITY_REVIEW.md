@@ -105,7 +105,7 @@ Provenance-verified partial comparisons remain visible and downloadable with unc
 
 ## Local app and web delivery
 
-The PWA service worker uses network-first same-origin GET handling, caches only successful same-origin responses, bypasses the HTTP cache for service-worker update checks, and removes earlier cache generations. Version 4.1.4 used `insta-toolbox-v414`; the 4.3.3 candidate uses `insta-toolbox-v433`. Persisted workspace and settings keys are unchanged. Public web/PWA delivery remains on hold at 4.3.1.
+The PWA service worker uses network-first same-origin GET handling, caches only successful same-origin responses, bypasses the HTTP cache for service-worker update checks, and removes earlier cache generations. Version 4.1.4 used `insta-toolbox-v414`; the 4.3.4 candidate uses `insta-toolbox-v434`. Persisted workspace and settings keys are unchanged. Public web/PWA delivery remains on hold at 4.3.1.
 
 The loopback development server accepts only loopback Host headers and serves an explicit asset allowlist. Repository metadata, tests, documentation, and Git internals are not served. Framing protection is sent as HTTP headers because `frame-ancestors` is ineffective in a meta policy.
 
@@ -123,7 +123,7 @@ When release credentials are available, remove the library-validation exception,
 
 Earlier reviews fixed structural profile-control binding, pre-existing-dialog confusion, missing extension reservations, malformed migration fields, discard races, weak message identity, unbound or noninteractive DM controls, synthetic confirmation acceptance, and incomplete oldest-edge traversal. Regression fixtures cover these boundaries.
 
-Historical releases retain their own acceptance records. They are not evidence that the current 4.3.3 candidate passed authenticated acceptance. Current authenticated compatibility, human screen-reader use, Windows publisher trust, Apple notarization, and physical Intel Mac behavior require fresh acceptance.
+Historical releases retain their own acceptance records. They are not evidence that the current 4.3.4 candidate passed authenticated acceptance. Current authenticated compatibility, human screen-reader use, Windows publisher trust, Apple notarization, and physical Intel Mac behavior require fresh acceptance.
 
 ## Dependencies and supply chain
 
@@ -134,14 +134,25 @@ CI actions are pinned to full commit SHAs. Pull requests receive dependency revi
 The historical 4.1.4 development matrix contained 1009 tests; its results remain
 in [the 4.1.4 acceptance record](./acceptance/4.1.4.md).
 
-The 4.3.3 candidate passed 1,275 source tests, 50 production extension browser
-gates, 7 background gates, 45 overlay states and 11 PWA states. Reviewed visual
-baselines and tolerances remain unchanged. Final-source CI, installation and authenticated acceptance are pending.
-The production dependency audit (`pnpm audit --prod --audit-level high`) found
-no known vulnerabilities.
-Current results and release gates are tracked in
-[the 4.3.3 acceptance record](./acceptance/4.3.3.md). Fixtures do not prove
-current authenticated Instagram behavior.
+The historical 4.3.3 candidate passed 1,275 source tests, 50 production extension
+browser gates, 7 background gates, 15 sandbox journeys, 45 overlay states and
+11 PWA states. Its production dependency audit found no known vulnerabilities,
+and all eight candidate CI checks passed. Installed-build testing nevertheless
+found that a native dialog could be scanned before its initial rows loaded;
+authenticated acceptance failed and no official release was published. See
+[the 4.3.3 acceptance record](./acceptance/4.3.3.md) for that evidence.
+
+The 4.3.4 candidate adds an abortable initial native-list readiness wait, bounded
+to 20 seconds, without changing manual scan defaults. Hidden loading indicators
+are ignored. A timeout preserves the saved comparison and any observed partial
+rows, leaves the current dialog open with retry guidance, and cannot advance to
+the next list. Owner, account, dialog and fresh ending-count checks remain
+required. The final-build source suite passed 1,280 tests, package safety passed
+31 tests, and rendering passed 45 overlay and 11 PWA states with unchanged
+baselines. Production browser, sandbox, background, installation, authenticated
+acceptance and CI remain pending in
+[the 4.3.4 acceptance record](./acceptance/4.3.4.md).
+Fixtures do not prove current authenticated Instagram behavior.
 
 Partial mutual comparisons are available for display, export, and Follow / Unfollow target review. Target reviews and their existing confirmation show an uncertainty notice; missing records are not proof of a non-mutual relationship. Captures must belong to the signed-in account, and each profile's current relationship is checked before acting. Schema-1 comparison exports preserve existing fields and add `partial`, `labels`, and `warning`; completeness flags are not promoted by downloading.
 

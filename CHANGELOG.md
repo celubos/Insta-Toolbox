@@ -2,6 +2,16 @@
 
 This project uses [Semantic Versioning](https://semver.org/).
 
+## 4.3.4 - 2026-11-09 (development)
+
+- Wait for native profile lists to finish their initial loading before scanning
+  rows. A mounted dialog alone does not establish readiness or an empty list.
+- Keep Stop responsive during the bounded readiness wait. If initial loading
+  times out, preserve observed rows separately, keep the saved comparison and
+  leave the current list open with retry guidance instead of advancing.
+- Ignore hidden loading indicators and keep exact owner, dialog and fresh
+  ending-count checks. Manual list scans retain their existing default timing.
+
 ## 4.3.3 - 2026-11-09 (development)
 
 - Read the exact open profile's native Followers and Following lists when both

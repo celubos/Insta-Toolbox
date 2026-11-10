@@ -174,8 +174,8 @@ Read the reason shown in the active tool. Challenge, rate-limit, wrong-thread, c
 
 ## Acceptance and support
 
-- [4.3.3 userscript candidate acceptance](acceptance/4.3.3.md)
-- [4.3.3 userscript compatibility](compatibility/4.3.3.md)
+- [4.3.4 userscript candidate acceptance](acceptance/4.3.4.md)
+- [4.3.4 userscript compatibility](compatibility/4.3.4.md)
 - [4.3.1 acceptance record](acceptance/4.3.1.md)
 - [4.3.1 compatibility](compatibility/4.3.1.md)
 - [Operator acceptance guide](OPERATOR_ACCEPTANCE.md)

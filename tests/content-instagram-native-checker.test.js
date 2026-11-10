@@ -8,7 +8,7 @@ const source = await readFile(new URL('../extension/content-instagram.js', impor
 
 function fixture({ pathname = '/fixture_owner/', counts = { followers: 2, following: 1 },
   rows = { followers: ['fixture_one', 'fixture_two'], following: ['fixture_two'] }, onOpen, onClose,
-  recycled = false, fastSettle = false } = {}) {
+  recycled = false, fastSettle = false, fakeClock = false } = {}) {
   const calls = [], requests = [], progress = [];
   let active = null, owner = 'fixture_viewer', headers = 1, hidden = false, counterVisible = true, bodyText = '';
   const location = { origin: 'https://www.instagram.com', pathname, href: `https://www.instagram.com${pathname}` };
@@ -41,9 +41,12 @@ function fixture({ pathname = '/fixture_owner/', counts = { followers: 2, follow
     querySelectorAll: selector => selector === 'main header' ? Array(headers).fill(header)
       : selector === '[role="dialog"]' ? active ? [active] : []
         : selector === 'a[role="link"], a[href="#"]' ? controls : [] };
-  const context = vm.createContext({ URL, AbortController, document, location, clearTimeout,
-    setTimeout: fastSettle ? (callback, ms) => setTimeout(callback, Math.min(ms, 1)) : setTimeout,
-    getComputedStyle: element => ({ display: element === header && hidden ? 'none' : 'block', visibility: 'visible',
+  let clock = Date.now();
+  class Clock extends Date { static now() { return clock; } }
+  const context = vm.createContext({ URL, AbortController, document, location, clearTimeout, Date: fakeClock ? Clock : Date,
+    setTimeout: (callback, ms) => setTimeout(() => { if (fakeClock) clock += ms; callback(); }, fastSettle ? Math.min(ms, 1) : ms),
+    getComputedStyle: element => ({ display: element === header && hidden ? 'none' : element.style?.display || 'block',
+      visibility: element.style?.visibility || 'visible', opacity: element.style?.opacity ?? '1',
       overflowY: element.isScroller ? 'auto' : 'visible' }),
     InstaToolboxInstagramViewer: { inspect: () => ({ accountVerified: Boolean(owner), accountId: owner }) },
     chrome: { runtime: { onMessage: { addListener() {} } } } });
@@ -200,4 +203,111 @@ test('native Stop aborts an outstanding collector settle promptly and preserves 
   });
   assert.ok(Date.now() - started < 250, 'Stop must interrupt the native 500ms settle');
   assert.deepEqual(f.calls, ['open:followers']);
+});
+
+test('native checker waits for delayed first rows and a later scroll owner before advancing lists', async () => {
+  const names = Array.from({ length: 17 }, (_, index) => `delayed_fixture_${index}`);
+  const timers = [];
+  const f = fixture({ counts: { followers: 17, following: 1 }, rows: { followers: names, following: [names[0]] },
+    recycled: true, fastSettle: true,
+    onOpen(type, api) {
+      if (type !== 'followers') return;
+      const modal = api.modal, original = modal.querySelectorAll;
+      let rowsReady = false, scrollerReady = false;
+      modal.querySelectorAll = selector => selector === 'a[href^="/"]' && !rowsReady ? []
+        : selector === 'div, ul, section' && !scrollerReady ? [] : original(selector);
+      timers.push(setTimeout(() => { rowsReady = true; }, 25));
+      timers.push(setTimeout(() => { scrollerReady = true; }, 80));
+    } });
+  try {
+    const result = await f.run();
+    assert.equal(result.followers.length, 17, 'a mounted empty modal must not become a zero-row finished read');
+    assert.equal(result.complete.followers, true); assert.equal(result.complete.following, true);
+    assert.ok(f.progress.some(event => event.listType === 'followers' && event.found === 3));
+  } finally { timers.forEach(clearTimeout); }
+});
+
+function initialLoadingFixture({ counts = { followers: 2, following: 1 },
+  rows = { followers: ['loading_fixture_one', 'loading_fixture_two'], following: ['loading_fixture_two'] },
+  hiddenLoader = false, loaderVisible = true, hideRows = false, fakeClock = false, onOpen = null } = {}) {
+  let showRows = !hideRows, loading = loaderVisible;
+  const loader = { isConnected: true, getClientRects: () => [{}], getAttribute: () => null,
+    style: hiddenLoader ? { display: 'none' } : {} };
+  const f = fixture({ counts, rows, fastSettle: true, fakeClock,
+    onOpen(type, api) {
+      if (type !== 'followers') return;
+      const modal = api.modal, original = modal.querySelectorAll;
+      modal.querySelectorAll = selector => selector.includes('[role="progressbar"]') ? loading ? [loader] : []
+        : selector === 'a[href^="/"]' && !showRows ? [] : original(selector);
+      onOpen?.(api);
+    } });
+  f.showRows = () => { showRows = true; };
+  f.finishLoading = () => { loading = false; };
+  return f;
+}
+
+test('an exact fixed list waits for its rendered loader and verified zero remains genuinely empty', async () => {
+  for (const empty of [false, true]) {
+    const f = initialLoadingFixture(empty ? { counts: { followers: 0, following: 0 }, rows: { followers: [], following: [] } } : {});
+    const pending = f.run();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.deepEqual(f.calls, ['open:followers'], 'a visible loading indicator must prevent advancing to Following');
+    f.finishLoading();
+    const result = await pending;
+    assert.equal(result.followers.length, empty ? 0 : 2);
+    assert.equal(result.complete.followers, true); assert.equal(result.complete.following, true);
+  }
+});
+
+test('a hidden stale loader cannot hold an otherwise exact native list until timeout', async () => {
+  const f = initialLoadingFixture({ hiddenLoader: true, fakeClock: true });
+  const result = await f.run();
+  assert.equal(result.followers.length, 2); assert.equal(result.complete.followers, true);
+  assert.deepEqual(f.calls, ['open:followers', 'close:followers', 'open:following', 'close:following']);
+});
+
+test('initial loading timeout never opens Following and retains scoped rows with its explicit reason', async () => {
+  for (const hideRows of [false, true]) {
+    const f = initialLoadingFixture({ fakeClock: true, hideRows });
+    await assert.rejects(f.run(), error => {
+      assert.equal(error.code, 'native-list-loading-timeout');
+      assert.match(error.message, /followers list is still loading.*finish loading, close it, then retry the read from the same profile/);
+      if (hideRows) assert.equal(error.partialResult, undefined);
+      else {
+        assert.equal(error.partialResult.followers.length, 2);
+        assert.equal(error.partialResult.complete.followers, false); assert.equal(error.partialResult.complete.following, false);
+        assert.equal(error.partialResult.verified.following, false);
+        assert.equal(error.partialResult.reasons.followers, 'native-list-loading-timeout');
+        const diagnostics = f.context.InstaToolboxInstagramInspector.normalizeFollowerDiagnostics(error.partialResult);
+        assert.equal(diagnostics.reasons.followers, 'native-list-loading-timeout');
+      }
+      return true;
+    });
+    assert.deepEqual(f.calls, ['open:followers']);
+  }
+});
+
+test('Stop and native context drift during initial loading preserve rows without later native clicks', async () => {
+  for (const kind of ['stop', 'profile', 'dialog']) {
+    const controller = new AbortController(); const f = initialLoadingFixture();
+    let mutation;
+    try {
+      const pending = f.run({ signal: controller.signal, onProgress(event) {
+        if (event.phase !== 'native-reading' || !event.found || mutation) return;
+        mutation = setTimeout(() => {
+          if (kind === 'stop') controller.abort();
+          else if (kind === 'profile') f.location.pathname = '/foreign_fixture/';
+          else f.modal = { ...f.modal };
+        }, 10);
+      } });
+      await assert.rejects(pending, error => {
+        assert.equal(error.partialResult.followers.length, 2);
+        assert.equal(error.partialResult.complete.followers, false);
+        assert.equal(error.partialResult.following.length, 0);
+        if (kind === 'stop') assert.equal(error.code, 'stopped');
+        return true;
+      });
+      assert.deepEqual(f.calls, ['open:followers']);
+    } finally { clearTimeout(mutation); }
+  }
 });

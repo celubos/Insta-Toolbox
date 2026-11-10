@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta Toolbox
 // @namespace    https://github.com/slaveofsolace/Insta-Toolbox
-// @version      4.3.3
+// @version      4.3.4
 // @description  Mutual Checker, Presence, and DM Unsend on Instagram.
 // @author       @slaveofsolace
 // @homepageURL  https://github.com/slaveofsolace/Insta-Toolbox
@@ -4350,7 +4350,7 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
   function normalizeFollowerDiagnostics(value) {
     const reasons = new Set(['pagination-complete', 'instagram-limited-list', 'cursor-missing',
       'count-mismatch', 'count-unverified', 'count-changed', 'profile-count-disagreement', 'account-limit', 'page-limit',
-      'native-list-complete', 'native-list-truncated', 'stopped', 'native-context-changed']);
+      'native-list-complete', 'native-list-truncated', 'stopped', 'native-context-changed', 'native-list-loading-timeout']);
     const count = (number) => Number.isSafeInteger(number) && number >= 0 ? number : null;
     return {
       expectedCounts: Object.fromEntries(['followers', 'following'].map((type) => [type, count(value?.expectedCounts?.[type])])),
@@ -4382,6 +4382,7 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
         'native-list-truncated': 'The native list ended before all accounts could be verified.',
         stopped: 'The native read was stopped; this is a partial capture.',
         'native-context-changed': 'The native profile or list changed during the read.',
+        'native-list-loading-timeout': 'The native list did not finish its initial loading before the read deadline.',
       };
       return [`${label}: ${count}. ${explanations[reason]}`];
     });
@@ -5681,7 +5682,8 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
 
   // Scrolls the open followers/following dialog to enumerate the full list.
   // Read-only: it only scrolls an already-open list and reads rendered rows.
-  async function collectAccountList({ maxScrolls = 1_200, settleMs = 500, listType = '', signal, onProgress, validateContext = null } = {}) {
+  async function collectAccountList({ maxScrolls = 1_200, settleMs = 500, listType = '', signal, onProgress,
+    validateContext = null, initialReadinessMs = 0 } = {}) {
     const session = inspectSession();
     if (session.sessionExpired || session.challenge || session.actionBlocked || session.rateLimited) {
       return { ...session, accounts: [], complete: false, reason: 'session-stop' };
@@ -5746,10 +5748,48 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
       return true;
     };
     const settle = (ms) => sleep(ms, signal);
+    const readinessMs = Math.max(0, Math.min(RELATIONSHIP_REQUEST_TIMEOUT_MS, Math.trunc(Number(initialReadinessMs) || 0)));
+    const initialLoading = () => {
+      const indicators = [...root.querySelectorAll('[role="progressbar"], svg[aria-label*="Loading" i], [aria-busy="true"]')];
+      if (root.getAttribute('aria-busy') === 'true') indicators.push(root);
+      return indicators.some(node => {
+        if (node.isConnected !== true || !node.getClientRects?.().length) return false;
+        for (let current = node; current; current = current.parentElement) {
+          const style = getComputedStyle(current);
+          if (current.hidden || current.getAttribute?.('aria-hidden') === 'true' || style.display === 'none'
+            || ['hidden', 'collapse'].includes(style.visibility)
+            || (style.opacity !== undefined && style.opacity !== '' && Number(style.opacity) === 0)) return false;
+        }
+        return true;
+      });
+    };
+    const awaitInitialReadiness = async () => {
+      const deadline = Date.now() + readinessMs;
+      let emptySince = null;
+      while (true) {
+        const context = currentContext();
+        if (!context) return false;
+        if (context.dialog !== root) { stopReason = 'list-changed'; return false; }
+        scroller = scrollableWithin(root);
+        if (!harvest() || !currentContext()) return false;
+        const loading = initialLoading();
+        const empty = !loading && expectedCountAtStart === 0 && accounts.size === 0;
+        if (!empty) emptySince = null;
+        else emptySince ??= Date.now();
+        // A mounted dialog can precede both rows and its scrolling owner.
+        // Exact small lists need no scroller; an exact zero must survive a
+        // rendering turn without a visible loader. Neither changes end proof.
+        if (!loading && (accounts.size > 0 && (scroller || accounts.size === expectedCountAtStart)
+          || emptySince !== null && Date.now() - emptySince >= 100)) return true;
+        if (Date.now() >= deadline) { stopReason = 'list-loading-timeout'; return false; }
+        await settle(Math.min(100, deadline - Date.now()));
+      }
+    };
     let complete = false;
     let stagnantRounds = 0;
     const scan = async () => {
       if (!harvest() || !currentContext()) return;
+      if (readinessMs && !await awaitInitialReadiness()) return;
       // Recycled rows cannot all exist in the DOM at once. Start at the top and
       // retain each window before advancing by less than one viewport.
       if (scroller) {
@@ -5988,6 +6028,7 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
         let scanned;
         try {
           scanned = await collectAccountList({ listType: type, signal: listController.signal,
+            initialReadinessMs: RELATIONSHIP_REQUEST_TIMEOUT_MS,
             validateContext() {
               try { assertContext(modal); }
               catch (error) { contextError = error; return false; }
@@ -6005,6 +6046,9 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
         }
         if (contextError) throw contextError;
         assertContext(modal);
+        if (scanned.reason === 'list-loading-timeout') {
+          fail('native-list-loading-timeout', `Instagram's ${type} list is still loading. Let this list finish loading, close it, then retry the read from the same profile.`);
+        }
         if (!lists[type] || ['profile-changed', 'list-changed', 'list-closed', 'session-stop', 'stopped'].includes(scanned.reason) && !limited) {
           fail('native-dialog-changed', 'The native list changed before the check finished.');
         }
@@ -6031,7 +6075,8 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
       return result();
     } catch (error) {
       if (types.some(type => lists[type]?.accounts.length)) {
-        error.partialResult = result(signal?.aborted || error?.code === 'stopped' ? 'stopped' : 'native-context-changed');
+        error.partialResult = result(signal?.aborted || error?.code === 'stopped' ? 'stopped'
+          : error?.code === 'native-list-loading-timeout' ? 'native-list-loading-timeout' : 'native-context-changed');
       }
       throw error;
     }
