@@ -117,9 +117,9 @@ pnpm run qa:overlay:check
 pnpm run verify:repo-hygiene
 ```
 
-The development matrix covers the PWA, extension, userscript, layout controls, and packaged apps. Version 4.3.9 repairs repeated account-navigation scans inside native list dialogs. Two large-list regressions and 222 neighboring checks pass; installed retesting must resolve the observed stalls. Version 4.3.8 completed a timed Live Like Me run with 377 verified activities and retained all 95 earlier history records plus 381 run events. Its passing local matrix and all eight candidate CI checks did not establish complete native-list acceptance. Official release remains held and also requires authorized maintainer dispatch/review access, which is unavailable. Fixtures do not prove authenticated Instagram behavior.
+The development matrix covers the PWA, extension, userscript, layout controls, and packaged apps. Version 4.3.10 preserves partial conversation discovery across Instagram page reloads and requires a fresh review before cleanup. Installed 4.3.9 completed native list scans, Presence controls, serial-tab history retention, loaded-post Insights and one approved message removal. Its Ghost discovery lost state during a full-page navigation, so complete acceptance remains held. The timed 377-activity Live Like Me result belongs to 4.3.8. Official release also requires authorized maintainer dispatch/review access, which is unavailable. Fixtures do not prove authenticated Instagram behavior.
 
-See [Contributing](CONTRIBUTING.md), [Maintainer Guide](docs/MAINTAINER_GUIDE.md), [4.3.9 compatibility](docs/compatibility/4.3.9.md), and [4.3.9 acceptance](docs/acceptance/4.3.9.md). The held packages retain their [4.3.1 compatibility](docs/compatibility/4.3.1.md) and [acceptance record](docs/acceptance/4.3.1.md).
+See [Contributing](CONTRIBUTING.md), [Maintainer Guide](docs/MAINTAINER_GUIDE.md), [4.3.10 compatibility](docs/compatibility/4.3.10.md), and [4.3.10 acceptance](docs/acceptance/4.3.10.md). The held packages retain their [4.3.1 compatibility](docs/compatibility/4.3.1.md) and [acceptance record](docs/acceptance/4.3.1.md).
 
 ## License and credit
 

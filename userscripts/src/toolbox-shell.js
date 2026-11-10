@@ -9,6 +9,7 @@
   const LEGACY_QUEUE_KEY = 'instaToolboxManualQueueV1';
   const TAB_RUN_FIELD = 'instaToolboxAccountRunV1';
   const TAB_CHECKER_FIELD = 'instaToolboxCheckerDraftV1';
+  const TAB_INBOX_DISCOVERY_FIELD = 'instaToolboxInboxDiscoveryV1';
   const ACTIONABLE_STATUSES = new Set(['pending', 'ready', 'failed', 'paused']);
   const RESERVED = new Set([
     'accounts', 'about', 'api', 'developer', 'direct', 'emails', 'explore',
@@ -4043,6 +4044,19 @@
       cancelConfirmation: () => confirmationController?.cancel(),
       load: () => inspectInboxAccount().accountVerified ? inboxCheckpoints.load() : null,
       save: checkpoint => inboxCheckpoints.save(checkpoint),
+      discoveryCheckpointStorage: managerTabStorageAvailable ? {
+        read: () => managerTab?.[TAB_INBOX_DISCOVERY_FIELD] || null,
+        write: async value => {
+          managerTab = { ...managerTab };
+          if (value === null) delete managerTab[TAB_INBOX_DISCOVERY_FIELD];
+          else managerTab[TAB_INBOX_DISCOVERY_FIELD] = value;
+          await GM_saveTab(managerTab);
+          const saved = await readManagerTab();
+          if (!saved || JSON.stringify(saved[TAB_INBOX_DISCOVERY_FIELD] ?? null) !== JSON.stringify(value)) {
+            throw new Error('inbox-discovery-save-failed');
+          }
+        },
+      } : null,
       workerTransport: typeof GM_openInTab === 'function'
         && typeof GM_addValueChangeListener === 'function'
         && typeof GM_removeValueChangeListener === 'function' ? {

@@ -2,6 +2,20 @@
 
 This project uses [Semantic Versioning](https://semver.org/).
 
+## 4.3.10 - 2026-11-10 (development)
+
+- Preserve bounded conversation observations in private tab storage before
+  opening the next chat. Instagram page reloads can no longer silently erase
+  all earlier discoveries. Restoring is explicit, partial and time limited.
+- Discard selections and approvals on reload. Recovered names are historical;
+  cleanup requires a new exact review and managed tabs that reverify the
+  current account, thread and message ownership. No cleanup resumes itself.
+- Cancel pending restoration when Stop is pressed, including after a previous
+  cleanup. Add replacement-document, expiry, account-change and Stop coverage.
+- Retain the verified 4.3.9 list, Presence, export and one-message results under
+  their original version. Installed recovery and Ghost execution acceptance
+  remain required. Official publication remains held.
+
 ## 4.3.9 - 2026-11-10 (development)
 
 - Avoid repeatedly searching native-list profile avatars for account navigation.

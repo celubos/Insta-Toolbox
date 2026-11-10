@@ -170,7 +170,8 @@ function fixture(options = {}) {
   const container = document.createElement('section');
   const panel = mountUserscriptInboxPanel({ container, document, window, viewer, runner,
     workerTransport: options.workerTransport, defaultWorkerCount: options.defaultWorkerCount,
-    discoveryTiming: { routeTimeoutMs: 100, settleMs: 1 },
+    discoveryCheckpointStorage: options.discoveryCheckpointStorage, messageOptions: options.messageOptions,
+    discoveryTiming: { routeTimeoutMs: 100, settleMs: 1, now: options.now },
     confirmAction: async value => { confirmations.push(value); return options.confirm ? options.confirm(value) : null; },
     cancelConfirmation: () => options.onCancelConfirmation?.(),
     load: options.load,
@@ -644,4 +645,113 @@ test('the exact review target payload retains all 1000 thread IDs before optiona
   assert.deepEqual(Array.from(items, value => /^Thread ([0-9]+)/.exec(value)[1]), ids);
   assert.ok(items.every(value => value.length < 1_000));
   assert.equal(items.at(-1), `Thread ${ids.at(-1)} — ${'A'.repeat(120)} · @fixture.friend`);
+});
+
+
+function readOnlyDiscoveryStore() {
+  let saved = null;
+  const writes = [];
+  return { writes,
+    read: async () => saved && structuredClone(saved),
+    write: async value => { saved = value && structuredClone(value); writes.push(structuredClone(value)); },
+  };
+}
+function unopenedWorkerTransport() {
+  const writes = [], opened = [];
+  return { writes, opened,
+    storage: { get: async () => null, set: async (...args) => { writes.push(args); }, listen: () => 1, unlisten: () => {} },
+    openTab: async (...args) => { opened.push(args); throw new Error('Unapproved recovery must not open workers'); },
+  };
+}
+
+test('replacement document restores only partial observations and requires a fresh exact worker review', { timeout: 10_000 }, async t => {
+  const store = readOnlyDiscoveryStore();
+  const before = fixture({ discoveryCheckpointStorage: store,
+    labels: { '101': { title: 'Earlier observed chat', username: 'fixture.friend' } } });
+  t.after(() => before.dispose()); await before.find(); await before.select(0);
+  before.fire('pagehide'); before.dispose();
+  const transport = unopenedWorkerTransport();
+  const after = fixture({ discoveryCheckpointStorage: store, workerTransport: transport,
+    messageOptions: () => ({ scope: 'newest', limit: 1 }) });
+  t.after(() => after.dispose()); await after.panel.ready;
+  assert.equal(after.button('Restore found conversations').hidden, false);
+  assert.equal(after.selection().children.length, 0, 'nothing is restored or selected automatically');
+  await after.button('Restore found conversations').click();
+  assert.deepEqual(after.navigation, [], 'restoration does not click native inbox rows');
+  assert.equal(after.selection().children.length, 2);
+  assert.match(after.visibleText(), /Partial inventory; names may have changed/);
+  assert.match(after.visibleText(), /Earlier observed chat/);
+  assert.equal(after.selection().all().filter(node => node.tagName === 'INPUT' && node.checked).length, 0);
+  await after.select(0); await after.button('Review 1 conversation').click();
+  const review = after.confirmations[0];
+  assert.deepEqual(reviewedThreadIds(review), ['101']);
+  assert.match(review.detail, /interrupted partial discovery.*Names may have changed/);
+  assert.equal(review.facts.find(item => item.label === 'Messages').value, 'Newest 1 in each conversation');
+  assert.equal(review.binding.action, 'inbox-unsend-workers');
+  assert.deepEqual(transport.writes, []); assert.deepEqual(transport.opened, []);
+  assert.deepEqual(after.starts, []); assert.deepEqual(after.dispatches, []);
+  assert.equal(after.panel.snapshot(), null);
+  const persisted = JSON.stringify(store.writes);
+  assert.equal(/approval|reviewKey|selected|token|pendingMutation/.test(persisted), false);
+});
+
+test('recovered observations cannot enable the single-tab runner without fresh native evidence', { timeout: 10_000 }, async t => {
+  const store = readOnlyDiscoveryStore();
+  const before = fixture({ discoveryCheckpointStorage: store });
+  t.after(() => before.dispose()); await before.find(); before.dispose();
+  const after = fixture({ discoveryCheckpointStorage: store });
+  t.after(() => after.dispose()); await after.panel.ready;
+  await after.button('Restore found conversations').click(); await after.select(0);
+  assert.equal(after.button('Review 1 conversation').disabled, true);
+  assert.match(after.visibleText(), /Managed worker tabs are required for recovered results/);
+  await after.button('Review 1 conversation').fire('click');
+  assert.deepEqual(after.confirmations, []); assert.deepEqual(after.starts, []); assert.deepEqual(after.dispatches, []);
+  assert.match(after.statuses.at(-1), /require managed worker tabs/);
+});
+
+for (const invalidation of ['expiry', 'account change', 'Stop']) {
+  test('recovery '+invalidation+' during confirmation prevents worker startup and authority writes', { timeout: 10_000 }, async t => {
+    const store = readOnlyDiscoveryStore();
+    const before = fixture({ discoveryCheckpointStorage: store });
+    t.after(() => before.dispose()); await before.find(); before.dispose();
+    const gate = deferred(), transport = unopenedWorkerTransport();
+    let observedNow = Date.now();
+    const after = fixture({ discoveryCheckpointStorage: store, workerTransport: transport, now: () => observedNow,
+      confirm: async value => { await gate.promise; return { ...value.binding }; } });
+    t.after(() => after.dispose()); await after.panel.ready;
+    await after.button('Restore found conversations').click(); await after.select(1);
+    const pending = after.button('Review 1 conversation').click();
+    assert.equal(after.confirmations.length, 1);
+    if (invalidation === 'expiry') {
+      observedNow += 21 * 60_000;
+    } else if (invalidation === 'account change') {
+      const original = after.viewer.inspect;
+      after.viewer.inspect = () => ({ ...original(), accountId: 'another.owner', accountKey: accountKey('another.owner') });
+    } else await after.button('Stop all').click();
+    gate.resolve(); await pending;
+    assert.deepEqual(transport.writes, []); assert.deepEqual(transport.opened, []);
+    assert.deepEqual(after.starts, []); assert.deepEqual(after.dispatches, []);
+    assert.equal(after.panel.snapshot(), null); assert.equal(after.panel.busy(), false);
+    assert.match(after.statuses.at(-1), invalidation === 'expiry' ? /expired/ : invalidation === 'account change' ? /account changed/ : /Canceled/);
+  });
+}
+
+
+test('Stop cancels a deferred restore even after an earlier cleanup created a controller', { timeout: 10_000 }, async t => {
+  const store = readOnlyDiscoveryStore();
+  const before = fixture({ discoveryCheckpointStorage: store });
+  t.after(() => before.dispose()); await before.find(); before.dispose();
+  const gate = deferred(); let delayRead = false;
+  const storage = { write: store.write, read: async () => { if (delayRead) await gate.promise; return store.read(); } };
+  const f = fixture({ discoveryCheckpointStorage: storage, confirm: value => ({ ...value.binding }) });
+  t.after(() => f.dispose()); await f.find(); await f.select(0);
+  await f.button('Review 1 conversation').click();
+  assert.equal(f.panel.snapshot().status, 'completed');
+  const priorDispatches = [...f.dispatches]; delayRead = true;
+  const restoring = f.button('Restore found conversations').click();
+  assert.equal(f.panel.busy(), true);
+  await f.button('Stop all').click(); gate.resolve(); await restoring;
+  assert.equal(f.selection().children.length, 0, 'stopped restoration cannot publish a late inventory');
+  assert.deepEqual(f.dispatches, priorDispatches);
+  assert.equal(f.panel.busy(), false);
 });

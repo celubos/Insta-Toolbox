@@ -158,6 +158,44 @@ export async function acceptUserscriptGhostWorkers({ fixtureAssets, resultsRoot,
       throw new Error(`${error.message} ${JSON.stringify(state)}`);
     }
     assert.equal(opened.length, 0, 'review must not open execution tabs');
+    const savedDiscovery = structuredClone(tabStorage.get(web.id)?.instaToolboxInboxDiscoveryV1);
+    assert.equal(savedDiscovery?.conversations.length, 12, 'native observations were saved before the next navigation');
+    assert.equal(store.has('instaToolboxGhostJobV1'), false, 'an open review is not execution authority');
+    // Replace the document through an actual renderer navigation, retaining only
+    // the manager's tab storage. The old review and native DOM are destroyed.
+    await withTimeout(web.loadURL(web.getURL()), 'Ghost coordinator document replacement');
+    await waitForPageValue(web, `Boolean(${PANEL}) && !${button('Restore found conversations')}.hidden && !${button('Restore found conversations')}.disabled`, 'saved Ghost observations available after reload');
+    const replacement = await evaluate(`({
+      selected:[...(${PANEL}).querySelectorAll('[aria-label="Conversations to clean up"] input:checked')].length,
+      reviewOpen:${ROOT}.querySelector('[data-role="action-confirmation"]').open,
+      rows:(${PANEL}).querySelector('[aria-label="Conversations to clean up"]').children.length
+    })`);
+    assert.deepEqual(replacement, { selected: 0, reviewOpen: false, rows: 0 });
+    assert.equal(opened.length, 0, 'reloading cannot resume cleanup');
+    await evaluate(`(() => {
+      const root=${ROOT}, panel=${PANEL};
+      if(root.querySelector('.panel').hidden)root.querySelector('.launcher').click();
+      root.querySelector('[data-view="messages"]').click();
+      ${button('Restore found conversations')}.click();
+    })()`);
+    await waitForPageValue(web, `(${PANEL}).querySelector('[aria-label="Conversations to clean up"]').children.length===12 && !${button('Select all found')}.disabled`, 'Ghost read-only inventory restored');
+    const recovered = await evaluate(`({
+      selected:[...(${PANEL}).querySelectorAll('[aria-label="Conversations to clean up"] input:checked')].length,
+      text:(${PANEL}).textContent
+    })`);
+    assert.equal(recovered.selected, 0, 'the previous selection is discarded');
+    assert.match(recovered.text, /Partial inventory; names may have changed/);
+    await evaluate(`(() => {
+      const panel=${PANEL};
+      const workers=panel.querySelector('[aria-label="Managed worker tabs"]');workers.value='10';workers.dispatchEvent(new Event('change',{bubbles:true}));
+      const mode=panel.querySelector('[aria-label="Worker tab opening"]');mode.value='background';mode.dispatchEvent(new Event('change',{bubbles:true}));
+      ${button('Select all found')}.click();
+      ${button('Review 12 conversations')}.click();
+    })()`);
+    await waitForPageValue(web, `${ROOT}.querySelector('[data-role="action-confirmation"]').open`, 'fresh recovered Ghost review');
+    const recoveredReviewText = await evaluate(`${ROOT}.querySelector('[data-role="action-confirmation"]').textContent`);
+    assert.match(recoveredReviewText, /interrupted partial discovery/);
+    assert.equal(opened.length, 0, 'restoration and a fresh review do not open workers');
     const point = await evaluate(`(() => {const node=${ROOT}.querySelector('[data-action="confirm-accept"]');node.scrollIntoView({block:'center'});const r=node.getBoundingClientRect();return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};})()`);
     web.focus();
     for (const type of ['mouseDown', 'mouseUp']) web.sendInputEvent({ type, ...point, button: 'left', clickCount: 1 });
@@ -194,7 +232,8 @@ export async function acceptUserscriptGhostWorkers({ fixtureAssets, resultsRoot,
     assert.deepEqual(problems, []);
     const directory = path.join(resultsRoot, 'userscript-ghost-workers'); await mkdir(directory, { recursive: true });
     await writeFile(path.join(directory, 'result.json'), JSON.stringify({ version: releaseVersion, fixtureOnly: true,
-      transport: 'fixture GM API shim; real renderer windows and Web Locks', peakWorkers, opened, tabEvents, outcomes,
+      transport: 'fixture GM API shim; real renderer windows and Web Locks',
+      documentReplacement: { restoredObservations: savedDiscovery.conversations.length, selectionRestored: false, approvalRestored: false, partial: true }, peakWorkers, opened, tabEvents, outcomes,
       tasks: job.tasks.map(({ threadId, status, messageRemovals }) => ({ threadId, status, messageRemovals })) }, null, 2));
     console.log('Accepted generated userscript Ghost: redirected inbox workers recover exact threads through native rows, 12 conversations in ten-then-two batches, verified removals and received messages preserved.');
   } finally {

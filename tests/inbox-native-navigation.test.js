@@ -715,3 +715,57 @@ test('Stop, freeze and expiry during pane readiness clean up without accepting a
     assert.equal(f.events.size, 0);
   }
 });
+
+test('discovery waits for saved observations before another native navigation', { timeout: 1500 }, async () => {
+  const f = fixture({ pages: [['101', '102']], label: { title: 'Synthetic friend' } });
+  let release, entered;
+  const saved = new Promise(resolve => { release = resolve; });
+  const first = new Promise(resolve => { entered = resolve; });
+  const checkpoints = [];
+  const adapter = f.adapter({ onCheckpoint: async (value, labels) => {
+    checkpoints.push({ value, labels });
+    if (checkpoints.length === 1) { entered(); await saved; }
+  } });
+  const pending = adapter.run();
+  await first;
+  assert.equal(f.rowClicks, 1);
+  assert.deepEqual(checkpoints[0].value.conversations.map(row => row.threadId), ['101']);
+  assert.equal(checkpoints[0].labels[0].threadId, '101');
+  assert.equal(Object.hasOwn(checkpoints[0].value, 'navigationEvidence'), false);
+  release();
+  const result = await pending;
+  assert.equal(result.stopped, false);
+  assert.equal(f.rowClicks, 2);
+  assert.equal(checkpoints.length, 2);
+});
+
+test('failed observation persistence stops before a second native click', async () => {
+  const f = fixture({ pages: [['101', '102']] });
+  const adapter = f.adapter({ onCheckpoint: async () => { throw new Error('storage offline'); } });
+  const result = await adapter.run();
+  assert.equal(result.stopped, true);
+  assert.equal(result.reason, 'inbox-discovery-save-failed');
+  assert.equal(f.rowClicks, 1);
+  assert.deepEqual(result.conversations.map(row => row.threadId), ['101']);
+});
+
+test('Stop and account drift during an observation write prevent further native navigation', { timeout: 2500 }, async () => {
+  for (const mutation of ['stop', 'account']) {
+    const f = fixture({ pages: [['101', '102']] });
+    let release, entered;
+    const saved = new Promise(resolve => { release = resolve; });
+    const first = new Promise(resolve => { entered = resolve; });
+    const adapter = f.adapter({ onCheckpoint: async () => { entered(); await saved; } });
+    const pending = adapter.run(); await first;
+    if (mutation === 'stop') adapter.stop(); else f.changeAccount();
+    release(); const result = await pending;
+    assert.equal(result.stopped, true, mutation);
+    assert.equal(result.reason, mutation === 'stop' ? 'cancelled' : 'account-changed');
+    assert.equal(f.rowClicks, 1, mutation);
+  }
+});
+
+test('discovery rejects a non-function observation checkpoint adapter', () => {
+  const f = fixture();
+  assert.throws(() => f.adapter({ onCheckpoint: {} }), /checkpoint-adapter-invalid/);
+});

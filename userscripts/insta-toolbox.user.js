@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta Toolbox
 // @namespace    https://github.com/slaveofsolace/Insta-Toolbox
-// @version      4.3.9
+// @version      4.3.10
 // @description  Mutual Checker, Presence, and DM Unsend on Instagram.
 // @author       @slaveofsolace
 // @homepageURL  https://github.com/slaveofsolace/Insta-Toolbox
@@ -6944,7 +6944,7 @@ function createNativeInboxDiscovery({
   sections = ['primary'], expiresAt, now = Date.now, signal,
   maxThreads = 1_000, maxSamples = 1_000, maxVisits = 20_000,
   routeTimeoutMs = 8_000, settleMs = 400, paginationTimeoutMs = routeTimeoutMs,
-  proveTerminal = null, resolveSection = null, onProgress = null,
+  proveTerminal = null, resolveSection = null, onProgress = null, onCheckpoint = null,
   targetThreadId = null,
 } = {}) {
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(accountId || '') || typeof resolveAccount !== 'function') throw new Error('account-identity-required');
@@ -6956,6 +6956,7 @@ function createNativeInboxDiscovery({
   if (proveTerminal !== null && typeof proveTerminal !== 'function') throw new Error('terminal-adapter-invalid');
   if (resolveSection !== null && typeof resolveSection !== 'function') throw new Error('section-adapter-invalid');
   if (onProgress !== null && typeof onProgress !== 'function') throw new Error('progress-adapter-invalid');
+  if (onCheckpoint !== null && typeof onCheckpoint !== 'function') throw new Error('checkpoint-adapter-invalid');
   if (targetThreadId !== null && !/^[A-Za-z0-9_-]{1,128}$/.test(targetThreadId)) throw new Error('thread-identity-invalid');
   const sectionState = [...new Set(sections)].map((section) => ({ section, samples: 0, complete: false, reason: 'not-scanned' }));
   const inventory = new Map();
@@ -7276,7 +7277,16 @@ function createNativeInboxDiscovery({
           displayLabels.delete(threadId);
           if (threadId === targetThreadId || error.message !== 'navigation-timeout') throw error;
         }
-        windowIds.push(threadId); publish();
+        windowIds.push(threadId);
+        if (onCheckpoint) {
+          // Read-only observations must survive a document replacement before
+          // another native click. Navigation evidence and approval stay local.
+          const labels = [...displayLabels].map(([id, label]) => ({ threadId: id, ...label }));
+          try { await onCheckpoint(snapshot(), labels); }
+          catch { throw new Error('inbox-discovery-save-failed'); }
+          guard();
+        }
+        publish();
         // A worker only needs to find its assigned conversation. Do not make
         // every worker rescan the entire inbox before it can begin.
         if (threadId === targetThreadId) return;
@@ -7903,18 +7913,72 @@ const ORIGIN = 'https://www.instagram.com';
 const visible = (node) => Boolean(node?.isConnected && !node.closest?.('[hidden], [aria-hidden="true"]')
   && node.getClientRects?.().length);
 const copy = (value) => structuredClone(value);
+const CHECKPOINT_KIND = 'insta-toolbox-inbox-discovery';
+const DISCOVERY_TTL_MS = 20 * 60_000;
+const SECTIONS = ['primary', 'general', 'requests'];
+const invalidCheckpoint = () => { throw new Error('inbox-discovery-checkpoint-invalid'); };
+
+// Only bounded observations cross documents. Unknown fields never become
+// selection, approval, native row evidence, or a verified message pane.
+function readOnlyCheckpoint(value, at) {
+  if (!value || value.version !== 1 || value.kind !== CHECKPOINT_KIND
+    || typeof value.accountId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(value.accountId)
+    || ![value.startedAt, value.savedAt, value.expiresAt].every(time => Number.isSafeInteger(time) && time >= 0)
+    || value.startedAt > value.savedAt || value.savedAt > at || value.savedAt >= value.expiresAt
+    || value.expiresAt - value.startedAt > DISCOVERY_TTL_MS) invalidCheckpoint();
+  if (value.expiresAt <= at) throw new Error('inbox-discovery-recovery-expired');
+  if (!Array.isArray(value.sections) || !value.sections.length || value.sections.length > SECTIONS.length) invalidCheckpoint();
+  const sections = value.sections.map(entry => {
+    if (!entry || !SECTIONS.includes(entry.section) || !Number.isSafeInteger(entry.samples)
+      || entry.samples < 0 || entry.samples > 1_000) invalidCheckpoint();
+    return { section: entry.section, samples: entry.samples };
+  });
+  const sectionNames = new Set(sections.map(entry => entry.section));
+  if (sectionNames.size !== sections.length || !Array.isArray(value.conversations)
+    || !value.conversations.length || value.conversations.length > 1_000) invalidCheckpoint();
+  const ids = new Set();
+  const conversations = value.conversations.map(entry => {
+    if (!entry || typeof entry.threadId !== 'string' || !/^[0-9]{1,128}$/.test(entry.threadId)
+      || ids.has(entry.threadId) || !Array.isArray(entry.sections) || !entry.sections.length
+      || entry.sections.length > SECTIONS.length || new Set(entry.sections).size !== entry.sections.length
+      || !entry.sections.every(section => sectionNames.has(section)
+        && sections.some(item => item.section === section && item.samples > 0))) invalidCheckpoint();
+    ids.add(entry.threadId);
+    return { threadId: entry.threadId, sections: [...entry.sections] };
+  });
+  if (!Array.isArray(value.labels) || value.labels.length > conversations.length) invalidCheckpoint();
+  const labeled = new Set();
+  const labels = value.labels.map(entry => {
+    if (!entry || !ids.has(entry.threadId) || labeled.has(entry.threadId)
+      || typeof entry.title !== 'string' || entry.title.length > 160
+      || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u202a-\u202e\u2066-\u2069]/.test(entry.title)
+      || (entry.username !== null && (typeof entry.username !== 'string'
+        || !/^[A-Za-z0-9._]{1,30}$/.test(entry.username)))) invalidCheckpoint();
+    const title = entry.title.replace(/\s+/g, ' ').trim();
+    if (!title) invalidCheckpoint();
+    labeled.add(entry.threadId);
+    return { threadId: entry.threadId, title, username: entry.username?.toLowerCase() || null };
+  });
+  return { version: 1, kind: CHECKPOINT_KIND, accountId: value.accountId,
+    startedAt: value.startedAt, expiresAt: value.expiresAt, savedAt: value.savedAt,
+    sections, conversations, labels };
+}
 
 // Inventory, review, and captured native navigation never approve cleanup.
 function createUserscriptInboxDiscovery({
   document = globalThis.document, window = globalThis.window,
   viewer = globalThis.InstaToolboxInstagramViewer, now = Date.now, onProgress = null,
-  routeTimeoutMs = 8_000, settleMs = 400,
+  routeTimeoutMs = 8_000, settleMs = 400, checkpointStorage = null,
 } = {}) {
   if (!document || !window?.location || typeof viewer?.inspect !== 'function'
     || typeof viewer.accountKey !== 'function' || typeof now !== 'function'
-    || (onProgress !== null && typeof onProgress !== 'function')) throw new Error('inbox-discovery-unavailable');
+    || (onProgress !== null && typeof onProgress !== 'function')
+    || (checkpointStorage !== null && (typeof checkpointStorage?.read !== 'function'
+      || typeof checkpointStorage?.write !== 'function'))) throw new Error('inbox-discovery-unavailable');
   let active = null, inventory = null, captured = null, navigator = null, opening = null;
-  let state = { status: 'idle', reason: null, inventory: null, executionAvailable: false };
+  let restoring = null, recovery = null, operationEpoch = 0;
+  let state = { status: 'idle', reason: null, inventory: null, executionAvailable: false,
+    recovered: false, recoveryExpiresAt: null };
   const snapshot = () => copy(state);
   const inboxReady = () => /^\/direct\/(?:inbox\/?|t\/\d+\/?)$/.test(window.location.pathname)
     && [...document.querySelectorAll('[aria-label="Thread list"]')].filter(visible).length === 1;
@@ -7924,8 +7988,8 @@ function createUserscriptInboxDiscovery({
     return snapshot();
   };
   function rejectContext(reason) {
-    navigator?.stop(); navigator = null; captured = null; inventory = null;
-    publish({ status: 'needs-attention', reason, inventory: null });
+    navigator?.stop(); navigator = null; captured = null; inventory = null; recovery = null;
+    publish({ status: 'needs-attention', reason, inventory: null, recovered: false, recoveryExpiresAt: null });
     throw new Error(reason);
   }
   function context() {
@@ -7937,6 +8001,18 @@ function createUserscriptInboxDiscovery({
     if (evidence.restriction) return rejectContext('inbox-account-restricted');
     return { accountId: key, verified: true, restriction: null };
   }
+  async function writeCheckpoint(value) {
+    try { await checkpointStorage.write(value); }
+    catch { throw new Error('inbox-discovery-checkpoint-unavailable'); }
+  }
+  function validateInventory() {
+    if (active || opening || restoring) throw new Error('inbox-discovery-active');
+    if (!inventory) throw new Error('inbox-discovery-required');
+    const current = context();
+    if (current.accountId !== inventory.accountId) return rejectContext('inbox-account-changed');
+    if (recovery && now() >= recovery.expiresAt) throw new Error('inbox-discovery-recovery-expired');
+    return current;
+  }
   function section() {
     const roots = [...document.querySelectorAll('[aria-label="Thread list"]')].filter(visible);
     if (roots.length !== 1) return null;
@@ -7947,6 +8023,8 @@ function createUserscriptInboxDiscovery({
     return nativeInboxSection(label);
   }
   const stop = () => {
+    operationEpoch += 1;
+    if (restoring) { restoring.abort(); restoring = null; return true; }
     if (opening) { opening.abort(); return true; }
     if (navigator) { navigator.stop(); navigator = null; return true; }
     if (!active) return false;
@@ -7955,6 +8033,46 @@ function createUserscriptInboxDiscovery({
   };
   return Object.freeze({
     snapshot, stop,
+    async hasReadOnlyCheckpoint() {
+      if (!checkpointStorage) return false;
+      try { readOnlyCheckpoint(await checkpointStorage.read(), now()); return true; }
+      catch { return false; }
+    },
+    async restoreReadOnly() {
+      if (active || opening || restoring) throw new Error('inbox-discovery-active');
+      if (!checkpointStorage) throw new Error('inbox-discovery-checkpoint-unavailable');
+      const identity = context(), epoch = ++operationEpoch;
+      const controller = new AbortController(); restoring = controller;
+      navigator?.stop(); navigator = null; captured = null; inventory = null; recovery = null;
+      const interrupted = () => stop();
+      window.addEventListener?.('pagehide', interrupted);
+      document.addEventListener?.('freeze', interrupted);
+      try {
+        let value;
+        try { value = await checkpointStorage.read(); }
+        catch { throw new Error('inbox-discovery-checkpoint-unavailable'); }
+        if (controller.signal.aborted || epoch !== operationEpoch) throw new Error('cancelled');
+        const current = context();
+        if (current.accountId !== identity.accountId) return rejectContext('inbox-account-changed');
+        const saved = readOnlyCheckpoint(value, now());
+        if (saved.accountId !== current.accountId) return rejectContext('inbox-account-changed');
+        recovery = saved;
+        inventory = { version: 1, accountId: current.accountId, complete: false, stopped: true,
+          reason: 'recovered-observation', visits: 0, needsInboxReturn: !inboxReady(),
+          sections: saved.sections.map(entry => ({ ...entry, complete: false, reason: 'recovered-observation' })),
+          conversations: copy(saved.conversations) };
+        return publish({ status: 'ready', reason: 'recovered-observation', inventory,
+          recovered: true, recoveryExpiresAt: saved.expiresAt, executionAvailable: false });
+      } catch (error) {
+        if (epoch === operationEpoch) publish({ status: 'needs-attention', reason: error.message,
+          inventory: null, recovered: false, recoveryExpiresAt: null });
+        throw error;
+      } finally {
+        if (restoring === controller) restoring = null;
+        window.removeEventListener?.('pagehide', interrupted);
+        document.removeEventListener?.('freeze', interrupted);
+      }
+    },
     availableSections() {
       const roots = [...document.querySelectorAll('[aria-label="Thread list"]')].filter(visible);
       if (roots.length !== 1) return [];
@@ -7967,6 +8085,10 @@ function createUserscriptInboxDiscovery({
     reviewLabels() {
       const current = context();
       if (state.inventory && current.accountId !== state.inventory.accountId) return rejectContext('inbox-account-changed');
+      if (recovery) {
+        if (now() >= recovery.expiresAt) throw new Error('inbox-discovery-recovery-expired');
+        return recovery.labels.map(label => ({ ...label, kind: label.username ? 'profile' : 'chat-title', source: 'recovered-observation' }));
+      }
       return (active || captured)?.reviewLabels() || [];
     },
     async discover({ navigationAcknowledged = false, sections = null, expiresAt = now() + 20 * 60_000,
@@ -7974,7 +8096,22 @@ function createUserscriptInboxDiscovery({
       if (active || opening) throw new Error('inbox-discovery-active');
       if (navigationAcknowledged !== true) throw new Error('navigation-acknowledgment-required');
       if (!Number.isFinite(expiresAt) || expiresAt <= now() || expiresAt > now() + 20 * 60_000) throw new Error('discovery-expired');
-      const identity = context();
+      const identity = context(), startedAt = now(), epoch = ++operationEpoch;
+      restoring?.abort(); restoring = null;
+      navigator?.stop(); navigator = null; captured = null; inventory = null; recovery = null;
+      publish({ status: 'discovering', reason: null, inventory: null, recovered: false, recoveryExpiresAt: null });
+      if (checkpointStorage) {
+        const controller = new AbortController(); opening = controller;
+        try {
+          await writeCheckpoint(null);
+          if (controller.signal.aborted || signal?.aborted || epoch !== operationEpoch) throw new Error('cancelled');
+          if (context().accountId !== identity.accountId) return rejectContext('inbox-account-changed');
+          if (now() >= expiresAt) throw new Error('discovery-expired');
+        } catch (error) {
+          publish({ status: 'needs-attention', reason: error.message, inventory: null });
+          throw error;
+        } finally { if (opening === controller) opening = null; }
+      }
       if (!inboxReady()) {
         const links = [...document.querySelectorAll('a[href]')].filter(node => {
           if (!visible(node)) return false;
@@ -8008,13 +8145,19 @@ function createUserscriptInboxDiscovery({
         } finally { opening = null; }
       }
       if (sections === null) sections = this.availableSections();
-      navigator?.stop(); navigator = null; captured = null; inventory = null;
       const operation = createNativeInboxDiscovery({
         accountId: identity.accountId, resolveAccount: context,
         navigationAcknowledged, document, window, sections, expiresAt, now,
         routeTimeoutMs, settleMs, resolveSection: section,
         targetThreadId, signal,
         onProgress: (value) => publish({ inventory: value }),
+        onCheckpoint: checkpointStorage ? async (value, labels) => {
+          if (epoch !== operationEpoch || signal?.aborted) throw new Error('cancelled');
+          const saved = readOnlyCheckpoint({ version: 1, kind: CHECKPOINT_KIND, accountId: identity.accountId,
+            startedAt, expiresAt, savedAt: now(), sections: value.sections,
+            conversations: value.conversations, labels }, now());
+          await writeCheckpoint(saved);
+        } : null,
       });
       active = operation;
       const interrupted = () => { operation.stop(); publish({ status: 'stopping', reason: 'page-interrupted' }); };
@@ -8066,20 +8209,25 @@ function createUserscriptInboxDiscovery({
       return navigator;
     },
     review({ threadIds, scope = 'all', limit = null } = {}) {
-      if (active) throw new Error('inbox-discovery-active');
-      if (!inventory) throw new Error('inbox-discovery-required');
-      const current = context();
-      if (current.accountId !== inventory.accountId) {
-        return rejectContext('inbox-account-changed');
-      }
+      const current = validateInventory();
       const available = new Set(inventory.conversations.map((entry) => entry.threadId));
       if (!Array.isArray(threadIds) || !threadIds.length
         || !threadIds.every((id) => available.has(id))) throw new Error('thread-not-discovered');
       return createInboxReview({ accountId: current.accountId, threadIds, scope, limit,
         speed: 'standard', workerCount: 1, removeOwnReactions: false,
+        ...(recovery ? { expiresAt: recovery.expiresAt } : {}),
         discovery: { sections: inventory.sections.filter((entry) => entry.samples > 0).map((entry) => entry.section),
           complete: inventory.complete === true },
       }, now());
+    },
+    validateReview(review) {
+      const current = validateInventory();
+      if (!review || review.accountId !== current.accountId) throw new Error('inbox-review-changed');
+      if (!Number.isFinite(review.expiresAt) || now() >= review.expiresAt) throw new Error('inbox-review-expired');
+      const available = new Set(inventory.conversations.map(entry => entry.threadId));
+      if (!Array.isArray(review.threadIds) || !review.threadIds.length || review.threadIds.length > 1_000
+        || !review.threadIds.every(id => available.has(id))) throw new Error('thread-not-discovered');
+      return true;
     },
   });
 }
@@ -8993,7 +9141,7 @@ function mountUserscriptInboxPanel({
   viewer = globalThis.InstaToolboxInstagramViewer,
   runner = globalThis.InstaToolboxDmThreadUnsender,
   confirmAction, cancelConfirmation = () => {}, save, load = async () => null,
-  workerTransport = null,
+  workerTransport = null, discoveryCheckpointStorage = null,
   defaultWorkerCount = 10,
   openWorkersInBackground = true,
   discoveryTiming = {},
@@ -9006,6 +9154,7 @@ function mountUserscriptInboxPanel({
   const rows = new Map();
   let inventory = null, controller = null, active = false, checkpoint = null, operationEpoch = 0;
   let loading = true, loadFailed = false, needsReconciliation = false, unsubscribe = null;
+  let savedDiscoveryAvailable = false;
   const create = (tag, text, className) => {
     const node = document.createElement(tag);
     if (text) node.textContent = text;
@@ -9018,6 +9167,8 @@ function mountUserscriptInboxPanel({
   startGhost.setAttribute('data-ghost-start', '');
   const find = create('button', 'Find conversations', 'button quiet');
   find.type = 'button';
+  const restoreDiscovery = create('button', 'Restore found conversations', 'button quiet');
+  restoreDiscovery.type = 'button'; restoreDiscovery.hidden = true;
   const section = create('select');
   section.setAttribute('aria-label', 'Inbox section');
   for (const [value, label] of [['all', 'All available'], ['primary', 'Primary'], ['general', 'General'], ['requests', 'Requests']]) {
@@ -9080,7 +9231,7 @@ function mountUserscriptInboxPanel({
   const actions = create('div', null, 'toolbar'); actions.append(selectAll, review, resume, pause, skip, stop);
   advanced.append(section, acknowledgment, controls, filterLabel, filterStatus,
     list, workersLabel, workerModeLabel, workerNote);
-  container.append(startGhost, note, inventoryStatus, advanced, supportNote, recovery, actions, storageNote, results);
+  container.append(startGhost, restoreDiscovery, note, inventoryStatus, advanced, supportNote, recovery, actions, storageNote, results);
 
   function context() {
     const value = viewer.inspect({ document, location: window.location });
@@ -9126,6 +9277,9 @@ function mountUserscriptInboxPanel({
   }
   function updateControls() {
     inventoryStatus.hidden = !inventoryStatus.textContent;
+    restoreDiscovery.hidden = !savedDiscoveryAvailable;
+    startGhost.hidden = savedDiscoveryAvailable;
+    restoreDiscovery.disabled = active || loading || loadFailed || busy();
     list.hidden = !rows.size;
     filterLabel.hidden = !rows.size; filter.disabled = active;
     const query = filter.value.trim().toLowerCase();
@@ -9138,7 +9292,8 @@ function mountUserscriptInboxPanel({
       if (matches) shown += 1; else if (selected.has(id)) hiddenSelected += 1;
     }
     filterStatus.textContent = query
-      ? `${shown} shown${hiddenSelected ? ` · ${hiddenSelected} selected outside this filter` : ''}${query.startsWith('@') ? '. Only verified profile links match @usernames.' : ''}` : '';
+      ? `${shown} shown${hiddenSelected ? ` · ${hiddenSelected} selected outside this filter` : ''}${query.startsWith('@')
+        ? discovery.snapshot().recovered ? '. Names came from earlier observations and may have changed.' : '. Only verified profile links match @usernames.' : ''}` : '';
     filterStatus.hidden = !filterStatus.textContent;
     results.hidden = !checkpoint?.tasks?.length;
     storageNote.hidden = !storageNote.textContent;
@@ -9152,7 +9307,8 @@ function mountUserscriptInboxPanel({
     selectAll.textContent = query ? 'Select visible matches' : 'Select all found';
     review.hidden = !inventory?.conversations.length;
     review.disabled = active || loading || loadFailed || !selected.size || !window.navigator?.locks?.request
-      || (needsReconciliation && !reconciled.checked);
+      || (needsReconciliation && !reconciled.checked)
+      || (discovery.snapshot().recovered && !ghostBridge);
     review.textContent = `Review ${selected.size} conversation${selected.size === 1 ? '' : 's'}`;
     const remaining = remainingThreads();
     resume.hidden = Boolean(ghostBridge) || active || !remaining.length;
@@ -9196,12 +9352,15 @@ function mountUserscriptInboxPanel({
     }
     if (!inventory) { selected.clear(); rows.clear(); list.replaceChildren(); }
     const finding = value.status === 'discovering';
-    inventoryStatus.textContent = finding ? `Found ${threads.length} conversations…`
-      : `${threads.length} conversations found.${inventory?.complete ? '' : ' This may not include your whole inbox.'}`;
+    inventoryStatus.textContent = value.recovered
+      ? `${threads.length} conversations restored from this tab. Partial inventory; names may have changed. Select exact threads and review them again.${ghostBridge ? '' : ' Managed worker tabs are required for recovered results.'}`
+      : finding ? `Found ${threads.length} conversations…`
+        : `${threads.length} conversations found.${inventory?.complete ? '' : ' This may not include your whole inbox.'}`;
     if (value.reason) inventoryStatus.textContent += ` ${friendlyReason(value.reason)}`;
     updateControls();
   }
   const discovery = createUserscriptInboxDiscovery({ document, window, viewer, onProgress: showInventory,
+    checkpointStorage: discoveryCheckpointStorage, now: discoveryTiming.now ?? Date.now,
     routeTimeoutMs: discoveryTiming.routeTimeoutMs ?? 8_000, settleMs: discoveryTiming.settleMs ?? 400 });
   function friendlyReason(reason) {
     const labels = {
@@ -9220,6 +9379,11 @@ function mountUserscriptInboxPanel({
       'conversation-load-timeout': 'The assigned conversation did not finish loading.',
       'removal-not-proven': 'Instagram did not confirm the last removal. Review the conversation before continuing.',
       'approval-expired': 'This cleanup approval expired. Review the conversations again.',
+      'inbox-discovery-save-failed': 'Found conversations could not be saved. Discovery stopped before opening another chat.',
+      'inbox-discovery-checkpoint-invalid': 'Saved discovery is invalid. Find conversations again.',
+      'inbox-discovery-checkpoint-unavailable': 'No saved discovery is available for this tab. Find conversations again.',
+      'inbox-discovery-recovery-expired': 'Saved discovery expired. Find conversations again.',
+      'inbox-recovered-workers-required': 'Recovered conversations require managed worker tabs. Find conversations again for a fresh single-tab review.',
       cancelled: 'Stopped.', 'end-unverified': '', 'repeated-window-unverified': '',
     };
     return labels[reason] ?? String(reason || '').replaceAll('-', ' ');
@@ -9271,10 +9435,27 @@ function mountUserscriptInboxPanel({
       ? 'Previous cleanup was interrupted. Check its last conversation; nothing resumes automatically.'
       : 'Previous cleanup. Find conversations to start a new review.';
   }
-  const ready = Promise.resolve().then(loadCheckpoint).catch(() => {
+  const ready = Promise.resolve().then(async () => {
+    await loadCheckpoint();
+    savedDiscoveryAvailable = await discovery.hasReadOnlyCheckpoint();
+    if (savedDiscoveryAvailable) inventoryStatus.textContent = 'Previously found conversations are saved in this tab. Restore them to select and review again. Nothing resumes automatically.';
+  }).catch(() => {
     loadFailed = true;
     storageNote.textContent = 'Saved cleanup progress could not be read. Reload before starting another cleanup.';
   }).finally(() => { loading = false; updateControls(); });
+  restoreDiscovery.addEventListener('click', async () => {
+    if (active || loading || loadFailed || busy()) return;
+    const epoch = ++operationEpoch;
+    active = true; inventory = null; selected.clear(); rows.clear(); filter.value = ''; list.replaceChildren();
+    unsubscribe?.(); unsubscribe = null; controller = null; updateControls();
+    try {
+      await discovery.restoreReadOnly();
+      if (epoch !== operationEpoch) return;
+      savedDiscoveryAvailable = false; advanced.open = true;
+      announce('Restored partial discovery. Names may have changed; select exact threads for a new review.');
+    } catch (error) { if (epoch === operationEpoch) announce(friendlyReason(error.message)); }
+    finally { active = false; updateControls(); }
+  });
   async function findConversations({ all = false } = {}) {
     if (active || loading || loadFailed || busy()) return;
     if (!all && !acknowledged.checked) { announce('Confirm that opening conversations may mark them read.'); acknowledged.focus(); return; }
@@ -9321,6 +9502,8 @@ function mountUserscriptInboxPanel({
     try {
       const options = messageOptions();
       const captured = discovery.review({ threadIds, scope: options.scope, limit: options.limit });
+      const recovered = discovery.snapshot().recovered === true;
+      if (recovered && !ghostBridge) throw new Error('inbox-recovered-workers-required');
       if (ghostBridge) {
         const account = context();
         const plan = ghostBridge.createReview({
@@ -9337,7 +9520,7 @@ function mountUserscriptInboxPanel({
           title: `Clean up ${plan.threadIds.length} conversation${plan.threadIds.length === 1 ? '' : 's'}?`,
           message: plan.scope === 'all' ? 'Permanently unsend your messages in the selected conversations.'
             : `Permanently unsend the ${plan.scope} ${plan.limit} message${plan.limit === 1 ? '' : 's'} you sent in each selected conversation?`,
-          detail: `Keep the inbox tab open. Up to ${plan.workerCount} conversation tabs open together, finish, and close before the next batch. Unsend clicks share the account pacing.`,
+          detail: `${recovered ? 'These thread IDs were recovered from an interrupted partial discovery. Names may have changed. ' : ''}Keep the inbox tab open. Up to ${plan.workerCount} conversation tabs open together, finish, and close before the next batch. Unsend clicks share the account pacing.`,
           confirmLabel: 'Start Ghost mode',
           facts: [{ label: 'Account', value: account.accountLabel ? `@${account.accountLabel}` : 'Current signed-in account' },
             { label: 'Conversations', value: String(plan.threadIds.length) },
@@ -9352,6 +9535,7 @@ function mountUserscriptInboxPanel({
         if (confirmed.action !== 'inbox-unsend-workers' || confirmed.reviewKey !== key || busy()) {
           throw new Error('inbox-review-changed');
         }
+        discovery.validateReview(captured);
         controller = ghostBridge.createManager(plan);
         needsReconciliation = false; recovery.hidden = true; reconciled.checked = false;
         unsubscribe = controller.subscribe(value => {
@@ -13292,6 +13476,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
   const LEGACY_QUEUE_KEY = 'instaToolboxManualQueueV1';
   const TAB_RUN_FIELD = 'instaToolboxAccountRunV1';
   const TAB_CHECKER_FIELD = 'instaToolboxCheckerDraftV1';
+  const TAB_INBOX_DISCOVERY_FIELD = 'instaToolboxInboxDiscoveryV1';
   const ACTIONABLE_STATUSES = new Set(['pending', 'ready', 'failed', 'paused']);
   const RESERVED = new Set([
     'accounts', 'about', 'api', 'developer', 'direct', 'emails', 'explore',
@@ -17326,6 +17511,19 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
       cancelConfirmation: () => confirmationController?.cancel(),
       load: () => inspectInboxAccount().accountVerified ? inboxCheckpoints.load() : null,
       save: checkpoint => inboxCheckpoints.save(checkpoint),
+      discoveryCheckpointStorage: managerTabStorageAvailable ? {
+        read: () => managerTab?.[TAB_INBOX_DISCOVERY_FIELD] || null,
+        write: async value => {
+          managerTab = { ...managerTab };
+          if (value === null) delete managerTab[TAB_INBOX_DISCOVERY_FIELD];
+          else managerTab[TAB_INBOX_DISCOVERY_FIELD] = value;
+          await GM_saveTab(managerTab);
+          const saved = await readManagerTab();
+          if (!saved || JSON.stringify(saved[TAB_INBOX_DISCOVERY_FIELD] ?? null) !== JSON.stringify(value)) {
+            throw new Error('inbox-discovery-save-failed');
+          }
+        },
+      } : null,
       workerTransport: typeof GM_openInTab === 'function'
         && typeof GM_addValueChangeListener === 'function'
         && typeof GM_removeValueChangeListener === 'function' ? {

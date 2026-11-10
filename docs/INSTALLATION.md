@@ -174,21 +174,24 @@ Read the reason shown in the active tool. Challenge, rate-limit, wrong-thread, c
 
 ## Acceptance and support
 
-Version 4.3.9 is a development repair for repeated account-navigation scans
-inside native list dialogs. It adds no permissions or action authority.
-Version 4.3.8 installed activation and all eight candidate CI checks passed;
-its timed Presence run completed 377 activities and retained all earlier
-history. Native list scans became unresponsive, so complete acceptance and
-official publication remain held. Current live retesting and protected
-current-main promotion remain required.
+Version 4.3.10 retains partial conversation discoveries when Instagram reloads.
+Choose Restore found conversations, select exact threads and review again.
+Names came from earlier observations and may have changed. Restore never
+resumes cleanup. Recovered results require managed worker tabs and expire at
+the original discovery deadline. No new permissions are requested.
+
+Installed 4.3.9 verified native list scans, Presence controls, history retention,
+Insights and an approved one-message Unsend. Ghost discovery lost its inventory
+on full-page navigation. Installed recovery and Ghost execution still require
+acceptance; official publication and protected current-main promotion remain held.
 
 The four manager-storage grants introduced in 4.3.8 access this userscript's
 private history storage. The 500-entry display/export limit is not a global
 physical-storage cap. Identity, author and stable installation URLs remain
 unchanged.
 
-- [4.3.9 userscript candidate acceptance](acceptance/4.3.9.md)
-- [4.3.9 userscript compatibility](compatibility/4.3.9.md)
+- [4.3.10 userscript candidate acceptance](acceptance/4.3.10.md)
+- [4.3.10 userscript compatibility](compatibility/4.3.10.md)
 - [4.3.1 acceptance record](acceptance/4.3.1.md)
 - [4.3.1 compatibility](compatibility/4.3.1.md)
 - [Operator acceptance guide](OPERATOR_ACCEPTANCE.md)
