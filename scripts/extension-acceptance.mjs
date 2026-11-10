@@ -203,6 +203,29 @@ async function resizeViewport(webContents, viewport) {
   );
 }
 
+async function applyViewportZoom(webContents, viewport) {
+  const expected = { width: viewport.width / viewport.zoom, height: viewport.height / viewport.zoom };
+  const label = `${viewport.label}: native zoom CSS viewport`;
+  webContents.setZoomFactor(viewport.zoom);
+  try {
+    await withTimeout(waitForPageValue(
+      webContents,
+      `innerWidth === ${expected.width} && innerHeight === ${expected.height}`,
+      label,
+    ), label, 12_000);
+  } catch (error) {
+    let actual;
+    try {
+      actual = await withTimeout(webContents.executeJavaScript(
+        '({ width: innerWidth, height: innerHeight })', true,
+      ), `${label}: diagnostic dimensions`, 2_000);
+    } catch (diagnosticError) {
+      actual = { unavailable: diagnosticError.message };
+    }
+    throw new Error(`${label}: expected ${JSON.stringify(expected)}, actual ${JSON.stringify(actual)}, zoom ${webContents.getZoomFactor()}.`, { cause: error });
+  }
+}
+
 async function loadFixture(webContents, baseUrl, mode) {
   const url = `${baseUrl}/fixture.html?mode=${encodeURIComponent(mode)}&shadow=open`;
   await withTimeout(webContents.loadURL(url), `${mode}: fixture load`);
@@ -2003,7 +2026,7 @@ async function acceptToolboxLayout(webContents, baseUrl) {
         media: 'screen',
         features: [{ name: 'prefers-color-scheme', value: viewport.theme }],
       }), `${viewport.label}: emulate theme`);
-      webContents.setZoomFactor(viewport.zoom);
+      await withTimeout(applyViewportZoom(webContents, viewport), `${viewport.label}: apply native zoom`);
       await withTimeout(webContents.executeJavaScript(`new Promise((resolve) => {
         requestAnimationFrame(() => requestAnimationFrame(() => {
           if (${Number.isFinite(viewport.panelWidth)}) {
@@ -2114,7 +2137,7 @@ async function acceptToolboxLayout(webContents, baseUrl) {
         media: 'screen',
         features: [{ name: 'prefers-color-scheme', value: viewport.theme }],
       }), `${viewport.label}: emulate theme`);
-      webContents.setZoomFactor(viewport.zoom);
+      await withTimeout(applyViewportZoom(webContents, viewport), `${viewport.label}: apply native zoom`);
       await withTimeout(webContents.executeJavaScript(`new Promise((resolve) => {
         const host = document.querySelector('#insta-toolbox-userscript-root');
         const shadow = host.shadowRoot;
