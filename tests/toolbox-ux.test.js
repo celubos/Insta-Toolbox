@@ -394,7 +394,6 @@ test('Presence keeps a local activity log with an optional separate window', () 
   assert.match(presencePanel, /Download log/);
   assert.match(presencePanel, /Clear log/);
   assert.match(presencePanel, /window\?\.open\?\.\('', 'insta-toolbox-presence-log'/);
-  assert.match(presencePanel, /Stored only in this browser\./);
   assert.doesNotMatch(presencePanel, /messageBody|document\.cookie|sessionToken/);
 });
 

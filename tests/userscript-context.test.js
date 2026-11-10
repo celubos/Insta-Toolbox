@@ -75,3 +75,54 @@ test('a new Presence run clears the previous result without discarding current-r
   context.onPresenceUpdate({ runId: 'next-run', status: 'waiting' });
   assert.deepEqual(rendered, [null, 'Presence activity could not be saved.']);
 });
+
+test('log adapters use the captured actor key instead of the viewer at delayed write time', () => {
+  const start = source.indexOf('      readLog: accountKey =>');
+  const end = source.indexOf('      onAccountReady:', start);
+  assert.ok(start >= 0 && end > start);
+  const stores = new Map([['instaToolboxPresenceActivityLogV1:fixture-a', { entries: ['a-history'] }],
+    ['instaToolboxPresenceActivityLogV1:fixture-b', { entries: ['b-history'] }]]);
+  const context = vm.createContext({ nativeActions: { inspectContext: () => ({ accountKey: 'fixture-b' }) },
+    GM_getValue: (key, fallback) => structuredClone(stores.get(key) ?? fallback),
+    GM_setValue: (key, value) => stores.set(key, structuredClone(value)) });
+  vm.runInContext(`globalThis.logAdapters = { ${source.slice(start, end)} };`, context);
+  assert.deepEqual(context.logAdapters.readLog('fixture-a'), { entries: ['a-history'] });
+  context.logAdapters.writeLog({ entries: ['a-history', 'a-late-result'] }, 'fixture-a');
+  assert.deepEqual(stores.get('instaToolboxPresenceActivityLogV1:fixture-a'), { entries: ['a-history', 'a-late-result'] });
+  assert.deepEqual(stores.get('instaToolboxPresenceActivityLogV1:fixture-b'), { entries: ['b-history'] });
+  assert.throws(() => context.logAdapters.readLog(), /account-unverified/);
+  assert.throws(() => context.logAdapters.writeLog({ entries: [] }), /account-unverified/);
+});
+
+test('late verified history refreshes only stale idle Presence guidance and preserves existing progress and view', () => {
+  const start = source.indexOf('      onAccountReady: () => {');
+  const end = source.indexOf('\n      busy:', start);
+  assert.ok(start >= 0 && end > start);
+  const fields = { context: { dataset: {} }, 'context-title': { textContent: 'Verify your signed-in account' },
+    'context-detail': { textContent: 'retained workflow message' }, 'context-cta': { dataset: {} } };
+  const notice = { message: 'retained workflow message', tone: 'warning' };
+  const context = vm.createContext({ preferences: { view: 'account' }, contextStatus: notice,
+    engine: { inspectSession: () => ({}) }, presenceSession: null,
+    presencePanel: { busy: () => false }, presenceGrowthPanel: null, inboxPanel: null,
+    relationshipController: null, manualScanController: null, dmCleanupController: null, accountActionController: null,
+    dmRunner: { snapshot: () => ({ status: 'idle', canStop: false }) }, state: { run: { status: 'idle' } },
+    inspectPresenceAccount: () => ({ accountVerified: true }),
+    query: selector => fields[selector.match(/data-role="([^"]+)"/)?.[1]],
+    setText: (role, value) => { fields[role].textContent = value; } });
+  const renderer = source.slice(source.indexOf('  function renderContext()'), source.indexOf('  // --- Section 3:'));
+  const callback = source.slice(start + '      onAccountReady: '.length, end).trim().replace(/,$/, '');
+  vm.runInContext(`${logic}\n${renderer}\nglobalThis.notifyAccountReady = ${callback};`, context);
+  context.notifyAccountReady();
+  assert.equal(fields['context-title'].textContent, 'Presence ready');
+  assert.equal(fields['context-detail'].textContent, notice.message); assert.equal(context.contextStatus, notice);
+  assert.equal(context.preferences.view, 'account');
+  fields['context-title'].textContent = 'Verify your signed-in account';
+  context.relationshipController = {};
+  context.notifyAccountReady(); assert.equal(fields['context-title'].textContent, 'Verify your signed-in account');
+  context.relationshipController = null;
+  context.dmRunner = { snapshot: () => ({ status: 'preparing', canStop: false }) };
+  context.notifyAccountReady(); assert.equal(fields['context-title'].textContent, 'Verify your signed-in account');
+  context.dmRunner = null; context.preferences.view = 'messages';
+  context.notifyAccountReady(); assert.equal(fields['context-title'].textContent, 'Verify your signed-in account');
+  assert.equal(context.preferences.view, 'messages'); assert.equal(fields['context-detail'].textContent, notice.message);
+});

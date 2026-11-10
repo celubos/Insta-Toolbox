@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta Toolbox
 // @namespace    https://github.com/slaveofsolace/Insta-Toolbox
-// @version      4.3.6
+// @version      4.3.7
 // @description  Mutual Checker, Presence, and DM Unsend on Instagram.
 // @author       @slaveofsolace
 // @homepageURL  https://github.com/slaveofsolace/Insta-Toolbox
@@ -4182,6 +4182,7 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
     maxDurationMs = RELATIONSHIP_MAX_DURATION_MS,
     maxPages = RELATIONSHIP_MAX_PAGES,
     now = Date.now,
+    onNativeReadContext = null,
     onProgress = null,
     random = Math.random,
     requestAttempts = RELATIONSHIP_REQUEST_ATTEMPTS,
@@ -4232,6 +4233,7 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
         maxDurationMs: boundedDuration,
         maxPages: boundedPages,
         now,
+        onNativeReadContext,
         onProgress,
         random,
         requestAttempts: boundedAttempts,
@@ -5683,7 +5685,7 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
   // Scrolls the open followers/following dialog to enumerate the full list.
   // Read-only: it only scrolls an already-open list and reads rendered rows.
   async function collectAccountList({ maxScrolls = 1_200, settleMs = 500, listType = '', signal, onProgress,
-    validateContext = null, initialReadinessMs = 0 } = {}) {
+    validateContext = null, initialReadinessMs = 0, initialReadinessDeadline = null } = {}) {
     const session = inspectSession();
     if (session.sessionExpired || session.challenge || session.actionBlocked || session.rateLimited) {
       return { ...session, accounts: [], complete: false, reason: 'session-stop' };
@@ -5790,7 +5792,8 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
       });
     };
     const awaitInitialReadiness = async () => {
-      const deadline = Date.now() + readinessMs;
+      const deadline = Math.min(Date.now() + readinessMs,
+        Number.isFinite(initialReadinessDeadline) ? initialReadinessDeadline : Infinity);
       let emptySince = null;
       while (true) {
         const context = currentContext();
@@ -5937,7 +5940,8 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
 
   // Used by explicit userscript native reads after both existing lookup GETs
   // explicitly retire. These are native reads, never authenticated API evidence.
-  async function collectNativeFollowerComparison({ username, signal, onProgress, now, startedAt, maxDurationMs, maxAccounts }) {
+  async function collectNativeFollowerComparison({ username, signal, onProgress, onNativeReadContext,
+    now, startedAt, maxDurationMs, maxAccounts }) {
     const types = ['followers', 'following'];
     const lists = {};
     const initialPath = location.pathname;
@@ -6033,10 +6037,32 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
         if (controls.length !== 1 || !Number.isSafeInteger(exactProfileListCount(type, { requireScoped: true }))) {
           fail('native-list-control-unavailable', `Open the exact @${username} profile with a single visible ${type} control, then try again.`);
         }
+        const readinessDeadline = Date.now() + RELATIONSHIP_REQUEST_TIMEOUT_MS;
+        const captureGuard = globalThis.InstaToolboxInstagramViewer?.captureNativeListReadGuard;
+        const openingGuard = typeof captureGuard === 'function' ? captureGuard({ document, location,
+          profileHeader: header, username, listType: type, actor: viewer, readSession: inspectSession,
+          deadline: readinessDeadline,
+          isActive() {
+            assertRelationshipRunActive(signal, startedAt, now, maxDurationMs);
+            return true;
+          } }) : null;
+        if (typeof captureGuard === 'function' && !openingGuard) {
+          fail('profile-mismatch', 'The native read could not retain its exact account and profile context.');
+        }
+        if (openingGuard) onNativeReadContext?.({ phase: 'opening',
+          validate: () => openingGuard.check().phase !== 'invalid' });
         assertContext();
         controls[0].click();
         const modal = await waitFor(() => {
           assertRelationshipRunActive(signal, startedAt, now, maxDurationMs);
+          if (openingGuard) {
+            const opening = openingGuard.check();
+            if (opening.phase === 'invalid') fail('native-dialog-changed', 'The account, profile, or native opening dialog changed. Read stopped.');
+            if (opening.phase === 'timeout') fail('native-list-loading-timeout', `Instagram's ${type} list is still loading. Let it finish loading, close it, then retry from this profile.`);
+            if (opening.phase !== 'ready') return null;
+            assertContext(opening.dialog);
+            return opening.dialog;
+          }
           const open = dialogs();
           if (!open.length) return null;
           if (open.length !== 1 || accountListDialog(type)?.dialog !== open[0]) {
@@ -6044,12 +6070,15 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
           }
           assertContext(open[0]);
           return open[0];
-        }, 6_000, signal);
+        }, Math.max(1, readinessDeadline - Date.now()), signal);
         if (!modal) {
           assertRelationshipRunActive(signal, startedAt, now, maxDurationMs);
-          fail('native-list-unavailable', `Instagram did not open ${type}. Open that list normally and try again.`);
+          fail('native-list-loading-timeout', `Instagram's ${type} list is still loading. Let it finish loading, close it, then retry from this profile.`);
         }
         assertContext(modal);
+        // The caller must recheck normal actor-scoped storage continuity before
+        // this fully qualified list can yield any observed rows.
+        onNativeReadContext?.({ phase: 'ready' });
         const listController = new AbortController();
         const stopList = () => listController.abort();
         signal?.addEventListener?.('abort', stopList, { once: true });
@@ -6059,6 +6088,7 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
         try {
           scanned = await collectAccountList({ listType: type, signal: listController.signal,
             initialReadinessMs: RELATIONSHIP_REQUEST_TIMEOUT_MS,
+            initialReadinessDeadline: readinessDeadline,
             validateContext() {
               try { assertContext(modal); }
               catch (error) { contextError = error; return false; }
@@ -6109,6 +6139,8 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
           : error?.code === 'native-list-loading-timeout' ? 'native-list-loading-timeout' : 'native-context-changed');
       }
       throw error;
+    } finally {
+      onNativeReadContext?.(null);
     }
   }
 
@@ -6409,34 +6441,47 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
         && !url.search && !url.hash ? url.pathname : '';
     } catch { return ''; }
   }
-  function nativeListBackdrop({ document, location, context }) {
+  function nativeListBackdrop({ document, location, context }, { capture = false, opening = false } = {}) {
     const owner = username(context?.username), type = context?.listType;
     const header = context?.profileHeader, dialog = context?.dialog;
     if (!owner || !['followers', 'following'].includes(type)
       || !new RegExp(`^/${owner.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/?$`, 'i').test(location.pathname)) return null;
     const backdrop = header?.closest?.('[aria-hidden="true"]');
-    const rendered = (node, allowed = null) => {
+    const rendered = (node, allowed = null, fadingDialog = null) => {
       if (!node?.isConnected || !node.getClientRects?.().length || typeof getComputedStyle !== 'function') return false;
       for (let parent = node; parent; parent = parent.parentElement) {
         const style = getComputedStyle(parent);
         if (parent.hidden || (parent.getAttribute?.('aria-hidden') === 'true' && parent !== allowed)
           || style.display === 'none' || ['hidden', 'collapse'].includes(style.visibility)
-          || (style.opacity !== undefined && style.opacity !== '' && Number(style.opacity) === 0)) return false;
+          || (style.opacity !== undefined && style.opacity !== '' && Number(style.opacity) === 0
+            && parent !== fadingDialog)) return false;
       }
       return true;
     };
-    if (!backdrop || backdrop === header || backdrop.contains(dialog) || !rendered(header, backdrop) || !rendered(dialog)) return null;
-    const dialogs = [...document.querySelectorAll('[role="dialog"]')].filter(node => rendered(node));
-    if (dialogs.length !== 1 || dialogs[0] !== dialog) return null;
-    const labels = [dialog.getAttribute('aria-label'),
-      ...[...dialog.querySelectorAll('[role="heading"], h1, h2')].filter(node => rendered(node)).map(node => node.textContent),
-      String(dialog.textContent || '').split(/\r?\n/).map(line => line.trim()).find(Boolean)];
+    if (capture ? backdrop || !rendered(header) : !backdrop || backdrop === header
+      || backdrop.contains(dialog) || !rendered(header, backdrop) || !rendered(dialog, null, opening ? dialog : null)) return null;
+    const dialogs = [...document.querySelectorAll('[role="dialog"]')]
+      .filter(node => rendered(node, null, capture || opening ? node : null));
+    if (capture ? dialogs.length !== 0 : dialogs.length !== 1 || dialogs[0] !== dialog) return null;
+    const labels = capture ? [] : [dialog.getAttribute('aria-label'),
+      ...[...dialog.querySelectorAll('[role="heading"], h1, h2')]
+        .filter(node => rendered(node, null, opening ? dialog : null)).map(node => node.textContent),
+      String((opening && typeof dialog.innerText === 'string' ? dialog.innerText : dialog.textContent) || '')
+        .split(/\r?\n/).map(line => line.trim()).find(Boolean)];
     const types = new Set(labels.map(label => String(label || '').normalize('NFKC').trim().toLowerCase().match(/^(followers|following)(?:\s|$)/)?.[1]).filter(Boolean));
-    if (types.size !== 1 || !types.has(type)) return null;
+    if (!capture && (types.size > 1 || types.size === 1 && !types.has(type))) return null;
+    const typed = types.size === 1 && types.has(type);
+    const ready = typed && (!opening || rendered(dialog));
+    if (!capture && (opening || !ready) && (!opening || (typed ? labels.slice(0, -1) : labels).some(label => {
+      const text = String(label || '').normalize('NFKC').trim();
+      return text && !/^loading[.\s\u2026]*$/i.test(text)
+        && !new RegExp(`^${type}(?:\\s|$)`, 'i').test(text);
+    }))) return null;
     const headers = [...document.querySelectorAll('main header')].filter(node => rendered(node, backdrop));
     if (headers.length !== 1 || headers[0] !== header
       || ![...header.querySelectorAll('a[href], h1, h2, [role="heading"]')]
         .some(node => rendered(node, backdrop) && username(node.textContent) === owner)) return null;
+    const countControls = [], totals = [];
     for (const listType of ['followers', 'following']) {
       const controls = [...header.querySelectorAll('a[role="link"], a[href="#"]')].filter(node => {
         if (!rendered(node, backdrop) || !new RegExp(`\\s${listType}$`, 'i').test(String(node.textContent || '').trim())) return false;
@@ -6454,20 +6499,21 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
         if (Number.isSafeInteger(count)) counts.add(count);
       }
       if (counts.size !== 1) return null;
+      countControls.push(control); totals.push([...counts][0]);
     }
-    return { backdrop, shown: node => rendered(node, backdrop)
+    return { backdrop, controls: countControls, totals, ready, shown: node => rendered(node, backdrop)
       && node.closest?.('[aria-hidden="true"]') === backdrop };
   }
-  function inspect({ document = globalThis.document, location = globalThis.location,
+  function inspectCurrent({ document = globalThis.document, location = globalThis.location,
     session = globalThis.InstaToolboxInstagramInspector?.inspectSession?.() || {},
-    reactionDialog = false, nativeListDialog = null } = {}) {
+    reactionDialog = false, nativeListDialog = null } = {}, opening = false, evidence = null) {
     const unavailable = { accountVerified: false, usable: false, accountId: null, threadId: null };
     if (location?.origin !== origin) return { ...unavailable, reason: 'instagram-origin-required' };
     const threadId = String(location.pathname).match(/^\/direct\/t\/([0-9]+)\/?$/)?.[1] || null;
     const restriction = session.sessionExpired || session.challenge || session.actionBlocked || session.rateLimited;
     if (restriction) return { ...unavailable, threadId, restriction: true, reason: 'instagram-restricted' };
     const nativeBackdrop = nativeListDialog === null ? null
-      : nativeListBackdrop({ document, location, context: nativeListDialog });
+      : nativeListBackdrop({ document, location, context: nativeListDialog }, { opening });
     if (nativeListDialog !== null && !nativeBackdrop) return { ...unavailable, threadId, reason: 'native-list-context-unavailable' };
     const rawLists = [...document.querySelectorAll('[aria-label="Thread list"]')];
     const dialogs = reactionDialog ? [...document.querySelectorAll('[role="dialog"]')]
@@ -6495,6 +6541,7 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
     if (list && headings.length !== 1) return { ...unavailable, threadId, reason: 'account-picker-ambiguous' };
     const pickerAccount = list ? username(headings[0].textContent) : null;
     if (list && !pickerAccount) return { ...unavailable, threadId, reason: 'account-name-unavailable' };
+    const navigation = new Map();
     const profiles = [...document.querySelectorAll('a[role="link"][href]')].filter((link) => {
       if (!shown(link) || list?.contains(link)
         || link.getAttribute('aria-label')?.startsWith('Open the profile page of')) return false;
@@ -6511,7 +6558,9 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
         const messages = links.some(node => /^\/direct\/t\/\d+\/?$/.test(pathOf(node))
           && (node.getAttribute('aria-label') === 'Messages' || node.querySelector?.('[aria-label="Messages"]')));
         if (paths.has('/') && (paths.has('/reels/') || paths.has('/reels'))
-          && (paths.has('/direct/inbox/') || paths.has('/direct/inbox') || messages)) return true;
+          && (paths.has('/direct/inbox/') || paths.has('/direct/inbox') || messages)) {
+          navigation.set(link, { rail, picture: pictures[0] }); return true;
+        }
       }
       return false;
     });
@@ -6520,13 +6569,74 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
     const profileControls = profiles.filter(link => !profiles.some(other =>
       other !== link && other.contains(link) && pathOf(other) === pathOf(link)));
     if (profileControls.length !== 1) return { ...unavailable, threadId, reason: 'account-navigation-unavailable' };
+    if (evidence) Object.assign(evidence, { profile: profileControls[0], ...navigation.get(profileControls[0]) });
     const accountId = pickerAccount || username(pathOf(profileControls[0]).split('/')[1]);
     return { accountVerified: true, accountId, threadId, usable: Boolean(threadId),
       accountKey: accountKey(accountId), identityKind: 'verified-viewer-username',
       restriction: false, evidence: list ? 'visible-account-picker-and-navigation' : 'visible-account-navigation' };
   }
+  const inspect = options => inspectCurrent(options);
+
+  // This capability permits waiting for one native read's opening surface.
+  // It does not return an account identity or authorize storage or actions.
+  function captureNativeListReadGuard({ document = globalThis.document, location = globalThis.location,
+    profileHeader, username: owner, listType, actor, readSession, isActive,
+    deadline = Infinity, now = Date.now } = {}) {
+    if (typeof readSession !== 'function' || typeof isActive !== 'function' || !username(actor)) return null;
+    const initialPath = location.pathname;
+    const context = { profileHeader, username: owner, listType, dialog: null };
+    let captured, originalNavigation;
+    try {
+      if (isActive() !== true || now() >= deadline) return null;
+      const evidence = {}, value = inspectCurrent({ document, location, session: readSession() }, false, evidence);
+      captured = nativeListBackdrop({ document, location, context }, { capture: true });
+      if (!captured || value.accountVerified !== true || value.accountId !== actor
+        || ['profile', 'rail', 'picture'].some(key => !captured.shown(evidence[key]))) return null;
+      originalNavigation = evidence;
+    } catch { return null; }
+    const originalAncestors = new Set();
+    for (let node = profileHeader; node; node = node.parentElement) originalAncestors.add(node);
+    let retainedDialog = null, retainedBackdrop = null, invalid = false;
+    const refuse = () => { invalid = true; return Object.freeze({ phase: 'invalid', dialog: null }); };
+    return Object.freeze({ check() {
+      if (invalid) return refuse();
+      try {
+        if (isActive() !== true || location.origin !== origin || location.pathname !== initialPath) return refuse();
+        // An empty dialog still has geometry. Do not infer its absence from text.
+        const rendered = node => {
+          if (!node?.isConnected || !node.getClientRects?.().length) return false;
+          for (let parent = node; parent; parent = parent.parentElement) {
+            const style = getComputedStyle(parent);
+            if (parent.hidden || parent.getAttribute?.('aria-hidden') === 'true' || style.display === 'none'
+              || ['hidden', 'collapse'].includes(style.visibility)
+              || (style.opacity !== undefined && style.opacity !== '' && Number(style.opacity) === 0
+                && parent !== node)) return false;
+          }
+          return true;
+        };
+        const dialogs = [...document.querySelectorAll('[role="dialog"]')].filter(rendered);
+        if (dialogs.length > 1 || retainedDialog && dialogs[0] !== retainedDialog) return refuse();
+        if (dialogs.length) retainedDialog ||= dialogs[0];
+        context.dialog = retainedDialog;
+        const profile = nativeListBackdrop({ document, location, context },
+          retainedDialog ? { opening: true } : { capture: true });
+        if (!profile || profile.backdrop && (!originalAncestors.has(profile.backdrop)
+          || retainedBackdrop && profile.backdrop !== retainedBackdrop)
+          || profile.controls.some((control, index) => control !== captured.controls[index]
+          || profile.totals[index] !== captured.totals[index])) return refuse();
+        retainedBackdrop ||= profile.backdrop;
+        const evidence = {}, value = inspectCurrent({ document, location, session: readSession(),
+          ...(retainedDialog ? { nativeListDialog: context } : {}) }, true, evidence);
+        if (value.accountVerified !== true || value.accountId !== actor
+          || ['profile', 'rail', 'picture'].some(key => evidence[key] !== originalNavigation[key]
+            || !profile.shown(evidence[key]))) return refuse();
+        if (profile.ready && inspectCurrent({ document, location, session: readSession(), nativeListDialog: context }).accountId !== actor) return refuse();
+        return Object.freeze({ phase: now() >= deadline ? 'timeout' : profile.ready ? 'ready' : 'opening', dialog: retainedDialog });
+      } catch { return refuse(); }
+    } });
+  }
   Object.defineProperty(globalThis, 'InstaToolboxInstagramViewer', {
-    configurable: false, writable: false, value: Object.freeze({ inspect, accountKey }),
+    configurable: false, writable: false, value: Object.freeze({ inspect, accountKey, captureNativeListReadGuard }),
   });
 })();
 
@@ -10963,6 +11073,7 @@ function mountPresenceSessionPanel({
   writePreferences = () => {},
   readLog = () => null,
   writeLog = () => {},
+  onAccountReady = () => {},
   busy = () => false,
   onStatus = () => {},
   document = globalThis.document,
@@ -10974,7 +11085,7 @@ function mountPresenceSessionPanel({
     || typeof inspectAccount !== 'function' || typeof confirmAction !== 'function'
     || typeof readPreferences !== 'function' || typeof writePreferences !== 'function'
     || typeof readLog !== 'function' || typeof writeLog !== 'function'
-    || typeof busy !== 'function' || typeof onStatus !== 'function' || typeof now !== 'function') {
+    || typeof onAccountReady !== 'function' || typeof busy !== 'function' || typeof onStatus !== 'function' || typeof now !== 'function') {
     throw new Error('presence-panel-adapter-required');
   }
 
@@ -11121,12 +11232,63 @@ function mountPresenceSessionPanel({
   let logWindow = null;
   const loggedEvents = new Set();
   const listeners = [];
-  const activityLog = createPresenceActivityLog({
-    read: readLog,
-    write: writeLog,
-    onWriteError: () => onStatus('Presence activity could not be saved. Existing history is unchanged.'),
-    now,
-  });
+  const logs = new Map();
+  const runLogs = new Map();
+  let visibleLog = null;
+  let unsubscribeLog = null;
+  let currentRunLog = null;
+  let logReadFailed = false;
+  const verifiedLogAccount = (value) => {
+    try {
+      const account = value === undefined ? inspectAccount() : value;
+      return account?.accountVerified === true && account.usable === true
+        && typeof account.accountId === 'string' && clean(account.accountId)
+        && typeof account.accountKey === 'string' && clean(account.accountKey)
+        ? { accountId: clean(account.accountId), accountKey: clean(account.accountKey) } : null;
+    } catch { return null; }
+  };
+  const sameLogAccount = (left, right) => Boolean(left && right
+    && left.accountId === right.accountId && left.accountKey === right.accountKey);
+  function scopedLog(account) {
+    if (!account) return null;
+    const existing = logs.get(account.accountKey);
+    if (existing) return sameLogAccount(existing.account, account) ? existing : null;
+    let binding;
+    try {
+      const owner = Object.freeze({ ...account });
+      const log = createPresenceActivityLog({ read: () => readLog(owner.accountKey),
+        write: value => writeLog(value, owner.accountKey), now,
+        onWriteError: () => {
+          if (visibleLog === binding) onStatus('Presence activity could not be saved. Existing history is unchanged.');
+        } });
+      binding = Object.freeze({ account: owner, log });
+      logs.set(owner.accountKey, binding);
+      logReadFailed = false;
+      return binding;
+    } catch {
+      logReadFailed = true;
+      onStatus('Presence history could not be loaded. Existing history is unchanged.');
+      return null;
+    }
+  }
+  function refreshLog() {
+    if (disposed) return null;
+    const account = verifiedLogAccount();
+    if (!account) logReadFailed = false;
+    const next = scopedLog(account);
+    if (next !== visibleLog) {
+      unsubscribeLog?.();
+      visibleLog = next;
+      unsubscribeLog = next?.log.subscribe(record => {
+        if (visibleLog !== next) return;
+        if (sameLogAccount(verifiedLogAccount(), next.account)) renderLog(record);
+        else refreshLog();
+      }) || null;
+      if (!next) renderLog();
+      if (next) { try { onAccountReady(next.account); } catch { /* History does not authorize or block a run. */ } }
+    } else renderLog();
+    return next;
+  }
   const listen = (node, type, handler) => {
     node.addEventListener(type, handler);
     listeners.push(() => node.removeEventListener(type, handler));
@@ -11218,6 +11380,7 @@ function mountPresenceSessionPanel({
   }
   function render(snapshot = session.snapshot()) {
     if (disposed) return;
+    refreshLog();
     logResultEntries(snapshot);
     const [title, detail] = describe(snapshot);
     const active = ['running', 'searching', 'waiting', 'quiet', 'paused', 'stopping'].includes(snapshot.status);
@@ -11264,9 +11427,12 @@ function mountPresenceSessionPanel({
     const label = entry.target || PRESENCE_ACTION_LABELS[entry.action] || 'Presence';
     return { label, detail: `${time} · ${entry.outcome}${entry.detail ? ` · ${entry.detail}` : ''}` };
   }
-  function renderLog(record = activityLog.snapshot()) {
+  function renderLog(record = visibleLog?.log.snapshot() || { entries: [] }) {
     if (disposed) return;
     logRecent.replaceChildren();
+    logEmpty.textContent = visibleLog ? 'No Presence activity yet.' : logReadFailed
+      ? 'Presence history could not be loaded. Existing history is unchanged.'
+      : 'Verify your account to load its local Presence history.';
     logEmpty.hidden = record.entries.length > 0;
     for (const entry of record.entries.slice(0, 5)) {
       const row = create('li');
@@ -11276,9 +11442,10 @@ function mountPresenceSessionPanel({
     }
     clearLog.disabled = record.entries.length === 0;
     exportLog.disabled = record.entries.length === 0;
+    openLog.disabled = !visibleLog;
     renderLogWindow(record);
   }
-  function downloadRecord(record = activityLog.exportRecord(), targetWindow = window) {
+  function downloadRecord(record, targetWindow = window) {
     const blob = new targetWindow.Blob([`${JSON.stringify(record, null, 2)}\n`], { type: 'application/json' });
     const href = targetWindow.URL.createObjectURL(blob);
     const link = targetWindow.document.createElement('a');
@@ -11287,21 +11454,23 @@ function mountPresenceSessionPanel({
     link.click();
     targetWindow.setTimeout(() => targetWindow.URL.revokeObjectURL(href), 0);
   }
-  function renderLogWindow(record = activityLog.snapshot()) {
+  function renderLogWindow(record = visibleLog?.log.snapshot() || { entries: [] }) {
     if (!logWindow || logWindow.closed) return;
     const target = logWindow.document;
     const styleNode = target.createElement('style');
     styleNode.textContent = 'html{color-scheme:light dark}body{margin:0;padding:24px;background:#101114;color:#f4f1e8;font:15px/1.5 system-ui,sans-serif}main{max-width:760px;margin:auto}h1{font-size:22px;margin:0 0 4px}p{color:#b8b8bd;margin:0 0 20px}ol{list-style:none;margin:0;padding:0;border-top:1px solid #34363d}li{padding:12px 0;border-bottom:1px solid #34363d}strong,small{display:block;overflow-wrap:anywhere}small{color:#b8b8bd;margin-top:2px}.actions{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 20px}button{min-height:44px;padding:8px 14px;border:1px solid #545760;border-radius:8px;background:#202228;color:inherit;font:inherit;cursor:pointer}button:focus-visible{outline:2px solid #d94d7c;outline-offset:2px}@media(forced-colors:active){button{border-color:CanvasText}}';
     const main = target.createElement('main');
     const title = target.createElement('h1'); title.textContent = 'Presence activity';
-    const note = target.createElement('p'); note.textContent = 'Stored only in this browser.';
+    const displayedLog = visibleLog;
+    const note = target.createElement('p'); note.textContent = displayedLog
+      ? `Stored only in this browser for @${displayedLog.account.accountId}.` : 'Verify your account to load its local Presence history.';
     const buttons = target.createElement('div'); buttons.className = 'actions';
     const download = target.createElement('button'); download.type = 'button'; download.textContent = 'Download log';
     download.disabled = record.entries.length === 0;
-    download.addEventListener('click', () => downloadRecord(activityLog.exportRecord(), logWindow));
+    download.addEventListener('click', () => exportHistory(displayedLog, logWindow));
     const clear = target.createElement('button'); clear.type = 'button'; clear.textContent = 'Clear log';
     clear.disabled = record.entries.length === 0;
-    clear.addEventListener('click', () => { if (logWindow.confirm('Clear the local Presence activity log?')) activityLog.clear(); });
+    clear.addEventListener('click', () => clearHistory(displayedLog, logWindow));
     buttons.append(download, clear);
     const list = target.createElement('ol');
     for (const entry of record.entries) {
@@ -11319,14 +11488,31 @@ function mountPresenceSessionPanel({
     target.title = 'Insta Toolbox · Presence activity';
     target.body.replaceChildren(main);
   }
-  function appendLog(value) {
-    try { activityLog.append(value); } catch { onStatus('Presence ran, but its activity log could not be updated.'); }
+  function exportHistory(expected = visibleLog, targetWindow = window) {
+    const binding = refreshLog();
+    if (!binding || expected !== binding) return false;
+    downloadRecord(binding.log.exportRecord(), targetWindow);
+    return true;
   }
-  function logResultEntries(snapshot) {
+  function clearHistory(expected = visibleLog, targetWindow = window) {
+    const binding = refreshLog();
+    if (!binding || expected !== binding) return false;
+    if (!targetWindow?.confirm?.(`Clear the local Presence activity log for @${binding.account.accountId}?`)) return false;
+    if (!sameLogAccount(verifiedLogAccount(), binding.account)) { refreshLog(); return false; }
+    binding.log.clear();
+    return true;
+  }
+  function appendLog(value, binding) {
+    if (!binding) return;
+    try { binding.log.append(value); } catch { onStatus('Presence ran, but its activity log could not be updated.'); }
+  }
+  const logRunFor = snapshot => snapshot.accountId ? runLogs.get(snapshot.accountId) : currentRunLog;
+  function logResultEntries(snapshot, run = logRunFor(snapshot)) {
+    if (!run || snapshot.accountId && snapshot.accountId !== run.accountId) return;
     for (const entry of [...(snapshot.results || [])].reverse()) {
       if (!entry.eventId || loggedEvents.has(entry.eventId)) continue;
       appendLog({ eventId: entry.eventId, at: entry.at, kind: 'action', action: entry.action,
-        target: entry.label, outcome: entry.status, detail: entry.reason });
+        target: entry.label, outcome: entry.status, detail: entry.reason }, run.binding);
       loggedEvents.add(entry.eventId);
     }
   }
@@ -11341,6 +11527,7 @@ function mountPresenceSessionPanel({
       onStatus('Instagram account could not be verified. Reload Instagram and try again.');
       return false;
     }
+    refreshLog();
     const reviewedSignature = signature(options);
     const expiresAt = now() + (options.mode === 'live'
       ? options.liveDurationMinutes * 60_000 : 15 * 60_000);
@@ -11390,8 +11577,11 @@ function mountPresenceSessionPanel({
       return false;
     }
     const review = session.createReview({ accountId: account.accountId, options, expiresAt });
+    const runLog = Object.freeze({ accountId: current.accountId, binding: scopedLog(verifiedLogAccount(current)) });
+    currentRunLog = runLog;
+    runLogs.set(runLog.accountId, runLog);
     appendLog({ eventId: `${review.reviewedDigest}:started`, at: now(), kind: 'session',
-      outcome: 'started', detail: options.mode === 'live' ? 'Live like me started' : 'Presence started' });
+      outcome: 'started', detail: options.mode === 'live' ? 'Live like me started' : 'Presence started' }, runLog.binding);
     render(session.snapshot());
     let outcome;
     try {
@@ -11402,24 +11592,24 @@ function mountPresenceSessionPanel({
         ? 'Another Presence or Ghost run is already active.'
         : 'Presence could not start safely in this browser.');
       appendLog({ eventId: `${review.reviewedDigest}:start-failed`, at: now(), kind: 'session',
-        outcome: 'needs-attention', detail: clean(error?.message) || 'Presence could not start' });
+        outcome: 'needs-attention', detail: clean(error?.message) || 'Presence could not start' }, runLog.binding);
       return false;
     }
-    logResultEntries(outcome);
+    logResultEntries(outcome, runLog);
     appendLog({ eventId: `${review.reviewedDigest}:${outcome.status}`, at: now(), kind: 'session',
       outcome: ['completed', 'stopped', 'expired', 'needs-attention'].includes(outcome.status)
-        ? outcome.status : 'needs-attention', detail: describe(outcome)[0] });
+        ? outcome.status : 'needs-attention', detail: describe(outcome)[0] }, runLog.binding);
     render(outcome);
     onStatus(describe(outcome).join('. '));
     return outcome.status === 'completed';
   }
 
   load();
-  const unsubscribeLog = activityLog.subscribe(renderLog);
+  listen(logDetails, 'toggle', () => { if (logDetails.open) refreshLog(); });
   listen(start, 'click', () => { void begin(); });
-  listen(pause, 'click', () => { if (session.pause()) { const state = session.snapshot(); appendLog({ eventId: `${state.runId}:paused:${now()}`, at: now(), kind: 'session', outcome: 'paused', detail: 'Paused' }); render(); onStatus('Presence paused.'); } });
-  listen(resume, 'click', () => { if (session.resume()) { const state = session.snapshot(); appendLog({ eventId: `${state.runId}:resumed:${now()}`, at: now(), kind: 'session', outcome: 'resumed', detail: 'Resumed' }); render(); onStatus('Presence resumed.'); } });
-  listen(stop, 'click', () => { if (session.stop()) { const state = session.snapshot(); appendLog({ eventId: `${state.runId}:stopped:${now()}`, at: now(), kind: 'session', outcome: 'stopped', detail: 'Stop requested' }); render(); onStatus('Stopping Presence.'); } });
+  listen(pause, 'click', () => { if (session.pause()) { const state = session.snapshot(); appendLog({ eventId: `${state.runId}:paused:${now()}`, at: now(), kind: 'session', outcome: 'paused', detail: 'Paused' }, logRunFor(state)?.binding); render(); onStatus('Presence paused.'); } });
+  listen(resume, 'click', () => { if (session.resume()) { const state = session.snapshot(); appendLog({ eventId: `${state.runId}:resumed:${now()}`, at: now(), kind: 'session', outcome: 'resumed', detail: 'Resumed' }, logRunFor(state)?.binding); render(); onStatus('Presence resumed.'); } });
+  listen(stop, 'click', () => { if (session.stop()) { const state = session.snapshot(); appendLog({ eventId: `${state.runId}:stopped:${now()}`, at: now(), kind: 'session', outcome: 'stopped', detail: 'Stop requested' }, logRunFor(state)?.binding); render(); onStatus('Stopping Presence.'); } });
   const saveChanges = () => {
     try { save(); } catch { onStatus('Choose an action limit from 1 to 50 for One session.'); }
     render();
@@ -11428,21 +11618,21 @@ function mountPresenceSessionPanel({
   listen(limit, 'change', saveChanges);
   for (const input of [mode, duration, breaks, burst, quiet]) listen(input, 'change', saveChanges);
   listen(openLog, 'click', () => {
+    if (!refreshLog()) return;
     logWindow = window?.open?.('', 'insta-toolbox-presence-log', 'popup=yes,width=620,height=760,resizable=yes,scrollbars=yes') || null;
     if (!logWindow) { onStatus('Allow pop-ups to open the Presence log window.'); return; }
     logWindow.addEventListener?.('load', () => renderLogWindow(), { once: true });
     renderLogWindow();
     window.setTimeout?.(() => renderLogWindow(), 0);
   });
-  listen(exportLog, 'click', () => downloadRecord());
-  listen(clearLog, 'click', () => {
-    if (window?.confirm?.('Clear the local Presence activity log?')) activityLog.clear();
-  });
+  listen(exportLog, 'click', () => exportHistory());
+  listen(clearLog, 'click', () => clearHistory());
   render();
 
   return Object.freeze({
     begin,
     render,
+    refreshLog: () => Boolean(refreshLog()),
     stop: () => session.stop(),
     busy: () => ['running', 'searching', 'waiting', 'quiet', 'paused', 'stopping']
       .includes(session.snapshot().status),
@@ -11451,7 +11641,7 @@ function mountPresenceSessionPanel({
       if (disposed) return;
       session.stop();
       disposed = true;
-      unsubscribeLog();
+      unsubscribeLog?.();
       listeners.splice(0).forEach((remove) => remove());
       root.remove();
     },
@@ -11899,6 +12089,7 @@ function mountPresenceGrowthPanel({
   let disposed = false;
   let readGeneration = 0;
   let readingSeed = '';
+  let readOpening = null;
   let restorePending = true;
   let restoreCancelled = false;
   const preserveNewIntent = () => { restorePending = false; restoreCancelled = true; };
@@ -11913,6 +12104,7 @@ function mountPresenceGrowthPanel({
       ? growthUsername(value.accountId) : '';
   };
   const campaigns = () => {
+    if (readOpening) return [];
     const saved = readCampaigns();
     return (Array.isArray(saved) ? saved : [])
     .filter((item) => item?.schemaVersion === 1 && item.account === account()
@@ -11927,8 +12119,9 @@ function mountPresenceGrowthPanel({
   const ordered = value => Array.isArray(value) ? value.map(ordered)
     : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, ordered(value[key])])) : value;
   const same = (left, right) => JSON.stringify(ordered(left)) === JSON.stringify(ordered(right));
-  const storedDraft = () => readReadDraft(readDraft?.actor || account(), readingSeed);
+  const storedDraft = () => readOpening ? null : readReadDraft(readDraft?.actor || account(), readingSeed);
   const currentDraft = ({ stored = true, profile = '' } = {}) => {
+    if (readOpening) return null;
     try {
       const valid = validateGrowthReadDraft(readDraft, {
         actor: account(), followingSnapshot: readFollowingSnapshot(), now: now(),
@@ -11939,7 +12132,18 @@ function mountPresenceGrowthPanel({
       return valid;
     } catch { return null; }
   };
+  const openingDraft = () => {
+    try {
+      if (!readOpening || !controller || controller.signal.aborted || readOpening.generation !== readGeneration
+        || !readingSeed || readOpening.validate() !== true || readCurrentProfile() !== readingSeed) return null;
+      const valid = validateGrowthReadDraft(readDraft, {
+        actor: readDraft?.actor, followingSnapshot: readFollowingSnapshot(), now: now(),
+      });
+      return valid && same(selection(), valid.seeds) ? valid : null;
+    } catch { return null; }
+  };
   function storeDraft(value, previous = persistedDraft ? readDraft : storedDraft()) {
+    if (readOpening) throw new Error('Wait for Instagram to verify the native list before saving this read.');
     if (typeof writeReadDraft !== 'function') throw new Error('Your userscript manager could not keep this read. Start a new search after reloading.');
     if (!same(storedDraft(), previous)) throw new Error('This search changed in another tab. Reopen Grow through mutuals before reading again.');
     writeReadDraft(value, readDraft?.actor || account(), readingSeed);
@@ -11988,8 +12192,8 @@ function mountPresenceGrowthPanel({
   }
 
   function render() {
-    const owner = account();
-    const savedCampaigns = campaigns();
+    const owner = readOpening ? '' : account();
+    const savedCampaigns = readOpening ? [] : campaigns();
     const nextDue = savedCampaigns.map((campaign) => ({ campaign,
       targets: dueGrowthUnfollows(campaign, { account: owner, now: now() }) }))
       .find(({ targets }) => targets.length);
@@ -12004,7 +12208,7 @@ function mountPresenceGrowthPanel({
       ? `${nextDue.targets.length} campaign follow${nextDue.targets.length === 1 ? '' : 's'} due for review.`
       : 'No campaign unfollows due yet. Reopen Instagram after your chosen wait to review them.';
     due.disabled = !nextDue || Boolean(controller) || busy() || !canRunBatch();
-    const valid = readDraft ? currentDraft() : null;
+    const valid = readDraft ? readOpening ? openingDraft() : currentDraft() : null;
     renderReadSteps(valid);
     if (readDraft && !valid) { clearCandidates(); controller?.abort(); }
     cancel.hidden = !controller && !(persistedDraft && valid?.status === 'active');
@@ -12110,7 +12314,8 @@ function mountPresenceGrowthPanel({
     readingSeed = seed;
     clearCandidates(); render();
     const assertCurrent = () => {
-      if (disposed || active.signal.aborted || generation !== readGeneration || !currentDraft({ profile: seed })) {
+      if (disposed || active.signal.aborted || generation !== readGeneration
+        || !(readOpening ? openingDraft() : currentDraft({ profile: seed }))) {
         active.abort(); throw new Error('Search stopped or its account, profile, Following list, or selected seeds changed.');
       }
     };
@@ -12122,6 +12327,22 @@ function mountPresenceGrowthPanel({
       const result = await readSeedNative(seed, active.signal, update => {
         assertCurrent();
         setProgress(`Reading ${label(seed)}${update?.listType ? ` · ${update.listType}: ${Math.max(0, Number(update.found) || 0)} read` : '…'}`);
+      }, context => {
+        if (controller !== active || generation !== readGeneration) return;
+        if (context?.phase === 'opening') {
+          if (typeof context.validate !== 'function') throw new Error('The native opening context could not be verified.');
+          // Check the ordinary actor and stored draft before entering the wait,
+          // including before navigating from one completed list to the next.
+          assertCurrent();
+          readOpening = { validate: context.validate, generation };
+          assertCurrent();
+          setProgress('Waiting for Instagram to finish opening this list…');
+        } else {
+          readOpening = null;
+          // Qualification must restore ordinary storage continuity before rows
+          // are observed. Cleanup alone never accesses account-scoped storage.
+          if (context?.phase === 'ready') assertCurrent();
+        }
       });
       assertCurrent();
       storeDraft(recordGrowthSeedRead(readDraft, { seed, result, startedAt, now: now() }));
@@ -12129,7 +12350,7 @@ function mountPresenceGrowthPanel({
       else setProgress(`Read ${label(seed)}. Open the next selected profile and choose Read current seed.`);
     } catch (error) {
       // Interrupted observations stay read-only and never become follow targets.
-      if (error?.partialResult && currentDraft({ stored: true })) {
+      if (!readOpening && error?.partialResult && currentDraft({ stored: true })) {
         try {
           storeDraft(recordGrowthSeedRead(readDraft, { seed, result: error.partialResult, startedAt, now: now(), partial: true }));
         } catch { /* Keep the previously verified reads if this partial record is invalid. */ }
@@ -12139,7 +12360,7 @@ function mountPresenceGrowthPanel({
         : searchFailure(error));
     } finally {
       globalThis.clearInterval(monitor);
-      if (controller === active) controller = null;
+      if (controller === active) { controller = null; readOpening = null; }
       readingSeed = '';
       render();
     }
@@ -12150,7 +12371,7 @@ function mountPresenceGrowthPanel({
     controller?.abort();
     readGeneration += 1;
     clearCandidates();
-    const valid = currentDraft();
+    const valid = readOpening ? null : currentDraft();
     if (persistedDraft && valid) {
       try { storeDraft(stopGrowthReadDraft(valid, { now: now() })); }
       catch (error) { setProgress(String(error?.message || 'Search stopped.')); }
@@ -12162,7 +12383,7 @@ function mountPresenceGrowthPanel({
   function discardReadDraft() {
     preserveNewIntent();
     controller?.abort(); readGeneration += 1;
-    if (persistedDraft && same(storedDraft(), readDraft)) storeDraft(null);
+    if (!readOpening && persistedDraft && same(storedDraft(), readDraft)) storeDraft(null);
     readDraft = null; persistedDraft = false; clearCandidates();
     setProgress('Choose one to three accounts from your Following list, then find mutual connections.');
     render();
@@ -13915,6 +14136,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
     renderCheckerSteps();
     renderListScanControls();
     renderDmSummary();
+    presencePanel?.refreshLog();
     renderContext();
     renderRun();
     renderLimits();
@@ -16406,16 +16628,23 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
       confirmAction: confirmRun,
       readPreferences: () => GM_getValue('instaToolboxPresenceSessionV1', null),
       writePreferences: value => GM_setValue('instaToolboxPresenceSessionV1', value),
-      readLog: () => {
-        const account = nativeActions.inspectContext();
-        return account.accountKey
-          ? GM_getValue(`instaToolboxPresenceActivityLogV1:${account.accountKey}`, null)
-          : null;
+      readLog: accountKey => {
+        if (typeof accountKey !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(accountKey)) throw new Error('presence-log-account-unverified');
+        return GM_getValue(`instaToolboxPresenceActivityLogV1:${accountKey}`, null);
       },
-      writeLog: value => {
-        const account = nativeActions.inspectContext();
-        if (!account.accountKey) throw new Error('presence-log-account-unverified');
-        return GM_setValue(`instaToolboxPresenceActivityLogV1:${account.accountKey}`, value);
+      writeLog: (value, accountKey) => {
+        if (typeof accountKey !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(accountKey)) throw new Error('presence-log-account-unverified');
+        return GM_setValue(`instaToolboxPresenceActivityLogV1:${accountKey}`, value);
+      },
+      onAccountReady: () => {
+        const dm = dmRunner?.snapshot();
+        if (preferences.view !== 'account'
+          || query('[data-role="context-title"]')?.textContent !== 'Verify your signed-in account'
+          || presencePanel?.busy() || presenceGrowthPanel?.busy() || inboxPanel?.busy()
+          || relationshipController || manualScanController || dmCleanupController || accountActionController
+          || dm?.canStop || ['preparing', 'running', 'waiting', 'stopping'].includes(dm?.status)
+          || state.run?.status === 'running') return;
+        renderContext();
       },
       busy: () => Boolean(dmCleanupController || dmRunner?.snapshot().canStop
         || relationshipController || manualScanController || state.run?.status === 'running' || inboxPanel?.busy()
@@ -16477,9 +16706,10 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
           username, signal, onProgress, maxAccounts: 2_000,
           maxDurationMs: 4 * 60_000, retryRateLimits: false,
         }),
-        readSeedNative: (username, signal, onProgress) => engine.fetchFollowerComparison({
+        readSeedNative: (username, signal, onProgress, onNativeReadContext) => engine.fetchFollowerComparison({
           username, signal, onProgress, maxAccounts: 2_000,
           maxDurationMs: 4 * 60_000, retryRateLimits: false, allowNativeListFallback: true,
+          onNativeReadContext,
         }),
         readCampaigns: () => readGrowthCampaigns(inspectPresenceAccount().accountId),
         writeCampaigns: (campaigns) => writeGrowthCampaigns(inspectPresenceAccount().accountId, campaigns),

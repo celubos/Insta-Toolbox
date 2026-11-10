@@ -22,6 +22,7 @@ export function mountPresenceSessionPanel({
   writePreferences = () => {},
   readLog = () => null,
   writeLog = () => {},
+  onAccountReady = () => {},
   busy = () => false,
   onStatus = () => {},
   document = globalThis.document,
@@ -33,7 +34,7 @@ export function mountPresenceSessionPanel({
     || typeof inspectAccount !== 'function' || typeof confirmAction !== 'function'
     || typeof readPreferences !== 'function' || typeof writePreferences !== 'function'
     || typeof readLog !== 'function' || typeof writeLog !== 'function'
-    || typeof busy !== 'function' || typeof onStatus !== 'function' || typeof now !== 'function') {
+    || typeof onAccountReady !== 'function' || typeof busy !== 'function' || typeof onStatus !== 'function' || typeof now !== 'function') {
     throw new Error('presence-panel-adapter-required');
   }
 
@@ -180,12 +181,63 @@ export function mountPresenceSessionPanel({
   let logWindow = null;
   const loggedEvents = new Set();
   const listeners = [];
-  const activityLog = createPresenceActivityLog({
-    read: readLog,
-    write: writeLog,
-    onWriteError: () => onStatus('Presence activity could not be saved. Existing history is unchanged.'),
-    now,
-  });
+  const logs = new Map();
+  const runLogs = new Map();
+  let visibleLog = null;
+  let unsubscribeLog = null;
+  let currentRunLog = null;
+  let logReadFailed = false;
+  const verifiedLogAccount = (value) => {
+    try {
+      const account = value === undefined ? inspectAccount() : value;
+      return account?.accountVerified === true && account.usable === true
+        && typeof account.accountId === 'string' && clean(account.accountId)
+        && typeof account.accountKey === 'string' && clean(account.accountKey)
+        ? { accountId: clean(account.accountId), accountKey: clean(account.accountKey) } : null;
+    } catch { return null; }
+  };
+  const sameLogAccount = (left, right) => Boolean(left && right
+    && left.accountId === right.accountId && left.accountKey === right.accountKey);
+  function scopedLog(account) {
+    if (!account) return null;
+    const existing = logs.get(account.accountKey);
+    if (existing) return sameLogAccount(existing.account, account) ? existing : null;
+    let binding;
+    try {
+      const owner = Object.freeze({ ...account });
+      const log = createPresenceActivityLog({ read: () => readLog(owner.accountKey),
+        write: value => writeLog(value, owner.accountKey), now,
+        onWriteError: () => {
+          if (visibleLog === binding) onStatus('Presence activity could not be saved. Existing history is unchanged.');
+        } });
+      binding = Object.freeze({ account: owner, log });
+      logs.set(owner.accountKey, binding);
+      logReadFailed = false;
+      return binding;
+    } catch {
+      logReadFailed = true;
+      onStatus('Presence history could not be loaded. Existing history is unchanged.');
+      return null;
+    }
+  }
+  function refreshLog() {
+    if (disposed) return null;
+    const account = verifiedLogAccount();
+    if (!account) logReadFailed = false;
+    const next = scopedLog(account);
+    if (next !== visibleLog) {
+      unsubscribeLog?.();
+      visibleLog = next;
+      unsubscribeLog = next?.log.subscribe(record => {
+        if (visibleLog !== next) return;
+        if (sameLogAccount(verifiedLogAccount(), next.account)) renderLog(record);
+        else refreshLog();
+      }) || null;
+      if (!next) renderLog();
+      if (next) { try { onAccountReady(next.account); } catch { /* History does not authorize or block a run. */ } }
+    } else renderLog();
+    return next;
+  }
   const listen = (node, type, handler) => {
     node.addEventListener(type, handler);
     listeners.push(() => node.removeEventListener(type, handler));
@@ -277,6 +329,7 @@ export function mountPresenceSessionPanel({
   }
   function render(snapshot = session.snapshot()) {
     if (disposed) return;
+    refreshLog();
     logResultEntries(snapshot);
     const [title, detail] = describe(snapshot);
     const active = ['running', 'searching', 'waiting', 'quiet', 'paused', 'stopping'].includes(snapshot.status);
@@ -323,9 +376,12 @@ export function mountPresenceSessionPanel({
     const label = entry.target || PRESENCE_ACTION_LABELS[entry.action] || 'Presence';
     return { label, detail: `${time} · ${entry.outcome}${entry.detail ? ` · ${entry.detail}` : ''}` };
   }
-  function renderLog(record = activityLog.snapshot()) {
+  function renderLog(record = visibleLog?.log.snapshot() || { entries: [] }) {
     if (disposed) return;
     logRecent.replaceChildren();
+    logEmpty.textContent = visibleLog ? 'No Presence activity yet.' : logReadFailed
+      ? 'Presence history could not be loaded. Existing history is unchanged.'
+      : 'Verify your account to load its local Presence history.';
     logEmpty.hidden = record.entries.length > 0;
     for (const entry of record.entries.slice(0, 5)) {
       const row = create('li');
@@ -335,9 +391,10 @@ export function mountPresenceSessionPanel({
     }
     clearLog.disabled = record.entries.length === 0;
     exportLog.disabled = record.entries.length === 0;
+    openLog.disabled = !visibleLog;
     renderLogWindow(record);
   }
-  function downloadRecord(record = activityLog.exportRecord(), targetWindow = window) {
+  function downloadRecord(record, targetWindow = window) {
     const blob = new targetWindow.Blob([`${JSON.stringify(record, null, 2)}\n`], { type: 'application/json' });
     const href = targetWindow.URL.createObjectURL(blob);
     const link = targetWindow.document.createElement('a');
@@ -346,21 +403,23 @@ export function mountPresenceSessionPanel({
     link.click();
     targetWindow.setTimeout(() => targetWindow.URL.revokeObjectURL(href), 0);
   }
-  function renderLogWindow(record = activityLog.snapshot()) {
+  function renderLogWindow(record = visibleLog?.log.snapshot() || { entries: [] }) {
     if (!logWindow || logWindow.closed) return;
     const target = logWindow.document;
     const styleNode = target.createElement('style');
     styleNode.textContent = 'html{color-scheme:light dark}body{margin:0;padding:24px;background:#101114;color:#f4f1e8;font:15px/1.5 system-ui,sans-serif}main{max-width:760px;margin:auto}h1{font-size:22px;margin:0 0 4px}p{color:#b8b8bd;margin:0 0 20px}ol{list-style:none;margin:0;padding:0;border-top:1px solid #34363d}li{padding:12px 0;border-bottom:1px solid #34363d}strong,small{display:block;overflow-wrap:anywhere}small{color:#b8b8bd;margin-top:2px}.actions{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 20px}button{min-height:44px;padding:8px 14px;border:1px solid #545760;border-radius:8px;background:#202228;color:inherit;font:inherit;cursor:pointer}button:focus-visible{outline:2px solid #d94d7c;outline-offset:2px}@media(forced-colors:active){button{border-color:CanvasText}}';
     const main = target.createElement('main');
     const title = target.createElement('h1'); title.textContent = 'Presence activity';
-    const note = target.createElement('p'); note.textContent = 'Stored only in this browser.';
+    const displayedLog = visibleLog;
+    const note = target.createElement('p'); note.textContent = displayedLog
+      ? `Stored only in this browser for @${displayedLog.account.accountId}.` : 'Verify your account to load its local Presence history.';
     const buttons = target.createElement('div'); buttons.className = 'actions';
     const download = target.createElement('button'); download.type = 'button'; download.textContent = 'Download log';
     download.disabled = record.entries.length === 0;
-    download.addEventListener('click', () => downloadRecord(activityLog.exportRecord(), logWindow));
+    download.addEventListener('click', () => exportHistory(displayedLog, logWindow));
     const clear = target.createElement('button'); clear.type = 'button'; clear.textContent = 'Clear log';
     clear.disabled = record.entries.length === 0;
-    clear.addEventListener('click', () => { if (logWindow.confirm('Clear the local Presence activity log?')) activityLog.clear(); });
+    clear.addEventListener('click', () => clearHistory(displayedLog, logWindow));
     buttons.append(download, clear);
     const list = target.createElement('ol');
     for (const entry of record.entries) {
@@ -378,14 +437,31 @@ export function mountPresenceSessionPanel({
     target.title = 'Insta Toolbox · Presence activity';
     target.body.replaceChildren(main);
   }
-  function appendLog(value) {
-    try { activityLog.append(value); } catch { onStatus('Presence ran, but its activity log could not be updated.'); }
+  function exportHistory(expected = visibleLog, targetWindow = window) {
+    const binding = refreshLog();
+    if (!binding || expected !== binding) return false;
+    downloadRecord(binding.log.exportRecord(), targetWindow);
+    return true;
   }
-  function logResultEntries(snapshot) {
+  function clearHistory(expected = visibleLog, targetWindow = window) {
+    const binding = refreshLog();
+    if (!binding || expected !== binding) return false;
+    if (!targetWindow?.confirm?.(`Clear the local Presence activity log for @${binding.account.accountId}?`)) return false;
+    if (!sameLogAccount(verifiedLogAccount(), binding.account)) { refreshLog(); return false; }
+    binding.log.clear();
+    return true;
+  }
+  function appendLog(value, binding) {
+    if (!binding) return;
+    try { binding.log.append(value); } catch { onStatus('Presence ran, but its activity log could not be updated.'); }
+  }
+  const logRunFor = snapshot => snapshot.accountId ? runLogs.get(snapshot.accountId) : currentRunLog;
+  function logResultEntries(snapshot, run = logRunFor(snapshot)) {
+    if (!run || snapshot.accountId && snapshot.accountId !== run.accountId) return;
     for (const entry of [...(snapshot.results || [])].reverse()) {
       if (!entry.eventId || loggedEvents.has(entry.eventId)) continue;
       appendLog({ eventId: entry.eventId, at: entry.at, kind: 'action', action: entry.action,
-        target: entry.label, outcome: entry.status, detail: entry.reason });
+        target: entry.label, outcome: entry.status, detail: entry.reason }, run.binding);
       loggedEvents.add(entry.eventId);
     }
   }
@@ -400,6 +476,7 @@ export function mountPresenceSessionPanel({
       onStatus('Instagram account could not be verified. Reload Instagram and try again.');
       return false;
     }
+    refreshLog();
     const reviewedSignature = signature(options);
     const expiresAt = now() + (options.mode === 'live'
       ? options.liveDurationMinutes * 60_000 : 15 * 60_000);
@@ -449,8 +526,11 @@ export function mountPresenceSessionPanel({
       return false;
     }
     const review = session.createReview({ accountId: account.accountId, options, expiresAt });
+    const runLog = Object.freeze({ accountId: current.accountId, binding: scopedLog(verifiedLogAccount(current)) });
+    currentRunLog = runLog;
+    runLogs.set(runLog.accountId, runLog);
     appendLog({ eventId: `${review.reviewedDigest}:started`, at: now(), kind: 'session',
-      outcome: 'started', detail: options.mode === 'live' ? 'Live like me started' : 'Presence started' });
+      outcome: 'started', detail: options.mode === 'live' ? 'Live like me started' : 'Presence started' }, runLog.binding);
     render(session.snapshot());
     let outcome;
     try {
@@ -461,24 +541,24 @@ export function mountPresenceSessionPanel({
         ? 'Another Presence or Ghost run is already active.'
         : 'Presence could not start safely in this browser.');
       appendLog({ eventId: `${review.reviewedDigest}:start-failed`, at: now(), kind: 'session',
-        outcome: 'needs-attention', detail: clean(error?.message) || 'Presence could not start' });
+        outcome: 'needs-attention', detail: clean(error?.message) || 'Presence could not start' }, runLog.binding);
       return false;
     }
-    logResultEntries(outcome);
+    logResultEntries(outcome, runLog);
     appendLog({ eventId: `${review.reviewedDigest}:${outcome.status}`, at: now(), kind: 'session',
       outcome: ['completed', 'stopped', 'expired', 'needs-attention'].includes(outcome.status)
-        ? outcome.status : 'needs-attention', detail: describe(outcome)[0] });
+        ? outcome.status : 'needs-attention', detail: describe(outcome)[0] }, runLog.binding);
     render(outcome);
     onStatus(describe(outcome).join('. '));
     return outcome.status === 'completed';
   }
 
   load();
-  const unsubscribeLog = activityLog.subscribe(renderLog);
+  listen(logDetails, 'toggle', () => { if (logDetails.open) refreshLog(); });
   listen(start, 'click', () => { void begin(); });
-  listen(pause, 'click', () => { if (session.pause()) { const state = session.snapshot(); appendLog({ eventId: `${state.runId}:paused:${now()}`, at: now(), kind: 'session', outcome: 'paused', detail: 'Paused' }); render(); onStatus('Presence paused.'); } });
-  listen(resume, 'click', () => { if (session.resume()) { const state = session.snapshot(); appendLog({ eventId: `${state.runId}:resumed:${now()}`, at: now(), kind: 'session', outcome: 'resumed', detail: 'Resumed' }); render(); onStatus('Presence resumed.'); } });
-  listen(stop, 'click', () => { if (session.stop()) { const state = session.snapshot(); appendLog({ eventId: `${state.runId}:stopped:${now()}`, at: now(), kind: 'session', outcome: 'stopped', detail: 'Stop requested' }); render(); onStatus('Stopping Presence.'); } });
+  listen(pause, 'click', () => { if (session.pause()) { const state = session.snapshot(); appendLog({ eventId: `${state.runId}:paused:${now()}`, at: now(), kind: 'session', outcome: 'paused', detail: 'Paused' }, logRunFor(state)?.binding); render(); onStatus('Presence paused.'); } });
+  listen(resume, 'click', () => { if (session.resume()) { const state = session.snapshot(); appendLog({ eventId: `${state.runId}:resumed:${now()}`, at: now(), kind: 'session', outcome: 'resumed', detail: 'Resumed' }, logRunFor(state)?.binding); render(); onStatus('Presence resumed.'); } });
+  listen(stop, 'click', () => { if (session.stop()) { const state = session.snapshot(); appendLog({ eventId: `${state.runId}:stopped:${now()}`, at: now(), kind: 'session', outcome: 'stopped', detail: 'Stop requested' }, logRunFor(state)?.binding); render(); onStatus('Stopping Presence.'); } });
   const saveChanges = () => {
     try { save(); } catch { onStatus('Choose an action limit from 1 to 50 for One session.'); }
     render();
@@ -487,21 +567,21 @@ export function mountPresenceSessionPanel({
   listen(limit, 'change', saveChanges);
   for (const input of [mode, duration, breaks, burst, quiet]) listen(input, 'change', saveChanges);
   listen(openLog, 'click', () => {
+    if (!refreshLog()) return;
     logWindow = window?.open?.('', 'insta-toolbox-presence-log', 'popup=yes,width=620,height=760,resizable=yes,scrollbars=yes') || null;
     if (!logWindow) { onStatus('Allow pop-ups to open the Presence log window.'); return; }
     logWindow.addEventListener?.('load', () => renderLogWindow(), { once: true });
     renderLogWindow();
     window.setTimeout?.(() => renderLogWindow(), 0);
   });
-  listen(exportLog, 'click', () => downloadRecord());
-  listen(clearLog, 'click', () => {
-    if (window?.confirm?.('Clear the local Presence activity log?')) activityLog.clear();
-  });
+  listen(exportLog, 'click', () => exportHistory());
+  listen(clearLog, 'click', () => clearHistory());
   render();
 
   return Object.freeze({
     begin,
     render,
+    refreshLog: () => Boolean(refreshLog()),
     stop: () => session.stop(),
     busy: () => ['running', 'searching', 'waiting', 'quiet', 'paused', 'stopping']
       .includes(session.snapshot().status),
@@ -510,7 +590,7 @@ export function mountPresenceSessionPanel({
       if (disposed) return;
       session.stop();
       disposed = true;
-      unsubscribeLog();
+      unsubscribeLog?.();
       listeners.splice(0).forEach((remove) => remove());
       root.remove();
     },

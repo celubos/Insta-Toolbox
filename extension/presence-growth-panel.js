@@ -101,6 +101,7 @@ export function mountPresenceGrowthPanel({
   let disposed = false;
   let readGeneration = 0;
   let readingSeed = '';
+  let readOpening = null;
   let restorePending = true;
   let restoreCancelled = false;
   const preserveNewIntent = () => { restorePending = false; restoreCancelled = true; };
@@ -115,6 +116,7 @@ export function mountPresenceGrowthPanel({
       ? growthUsername(value.accountId) : '';
   };
   const campaigns = () => {
+    if (readOpening) return [];
     const saved = readCampaigns();
     return (Array.isArray(saved) ? saved : [])
     .filter((item) => item?.schemaVersion === 1 && item.account === account()
@@ -129,8 +131,9 @@ export function mountPresenceGrowthPanel({
   const ordered = value => Array.isArray(value) ? value.map(ordered)
     : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, ordered(value[key])])) : value;
   const same = (left, right) => JSON.stringify(ordered(left)) === JSON.stringify(ordered(right));
-  const storedDraft = () => readReadDraft(readDraft?.actor || account(), readingSeed);
+  const storedDraft = () => readOpening ? null : readReadDraft(readDraft?.actor || account(), readingSeed);
   const currentDraft = ({ stored = true, profile = '' } = {}) => {
+    if (readOpening) return null;
     try {
       const valid = validateGrowthReadDraft(readDraft, {
         actor: account(), followingSnapshot: readFollowingSnapshot(), now: now(),
@@ -141,7 +144,18 @@ export function mountPresenceGrowthPanel({
       return valid;
     } catch { return null; }
   };
+  const openingDraft = () => {
+    try {
+      if (!readOpening || !controller || controller.signal.aborted || readOpening.generation !== readGeneration
+        || !readingSeed || readOpening.validate() !== true || readCurrentProfile() !== readingSeed) return null;
+      const valid = validateGrowthReadDraft(readDraft, {
+        actor: readDraft?.actor, followingSnapshot: readFollowingSnapshot(), now: now(),
+      });
+      return valid && same(selection(), valid.seeds) ? valid : null;
+    } catch { return null; }
+  };
   function storeDraft(value, previous = persistedDraft ? readDraft : storedDraft()) {
+    if (readOpening) throw new Error('Wait for Instagram to verify the native list before saving this read.');
     if (typeof writeReadDraft !== 'function') throw new Error('Your userscript manager could not keep this read. Start a new search after reloading.');
     if (!same(storedDraft(), previous)) throw new Error('This search changed in another tab. Reopen Grow through mutuals before reading again.');
     writeReadDraft(value, readDraft?.actor || account(), readingSeed);
@@ -190,8 +204,8 @@ export function mountPresenceGrowthPanel({
   }
 
   function render() {
-    const owner = account();
-    const savedCampaigns = campaigns();
+    const owner = readOpening ? '' : account();
+    const savedCampaigns = readOpening ? [] : campaigns();
     const nextDue = savedCampaigns.map((campaign) => ({ campaign,
       targets: dueGrowthUnfollows(campaign, { account: owner, now: now() }) }))
       .find(({ targets }) => targets.length);
@@ -206,7 +220,7 @@ export function mountPresenceGrowthPanel({
       ? `${nextDue.targets.length} campaign follow${nextDue.targets.length === 1 ? '' : 's'} due for review.`
       : 'No campaign unfollows due yet. Reopen Instagram after your chosen wait to review them.';
     due.disabled = !nextDue || Boolean(controller) || busy() || !canRunBatch();
-    const valid = readDraft ? currentDraft() : null;
+    const valid = readDraft ? readOpening ? openingDraft() : currentDraft() : null;
     renderReadSteps(valid);
     if (readDraft && !valid) { clearCandidates(); controller?.abort(); }
     cancel.hidden = !controller && !(persistedDraft && valid?.status === 'active');
@@ -312,7 +326,8 @@ export function mountPresenceGrowthPanel({
     readingSeed = seed;
     clearCandidates(); render();
     const assertCurrent = () => {
-      if (disposed || active.signal.aborted || generation !== readGeneration || !currentDraft({ profile: seed })) {
+      if (disposed || active.signal.aborted || generation !== readGeneration
+        || !(readOpening ? openingDraft() : currentDraft({ profile: seed }))) {
         active.abort(); throw new Error('Search stopped or its account, profile, Following list, or selected seeds changed.');
       }
     };
@@ -324,6 +339,22 @@ export function mountPresenceGrowthPanel({
       const result = await readSeedNative(seed, active.signal, update => {
         assertCurrent();
         setProgress(`Reading ${label(seed)}${update?.listType ? ` · ${update.listType}: ${Math.max(0, Number(update.found) || 0)} read` : '…'}`);
+      }, context => {
+        if (controller !== active || generation !== readGeneration) return;
+        if (context?.phase === 'opening') {
+          if (typeof context.validate !== 'function') throw new Error('The native opening context could not be verified.');
+          // Check the ordinary actor and stored draft before entering the wait,
+          // including before navigating from one completed list to the next.
+          assertCurrent();
+          readOpening = { validate: context.validate, generation };
+          assertCurrent();
+          setProgress('Waiting for Instagram to finish opening this list…');
+        } else {
+          readOpening = null;
+          // Qualification must restore ordinary storage continuity before rows
+          // are observed. Cleanup alone never accesses account-scoped storage.
+          if (context?.phase === 'ready') assertCurrent();
+        }
       });
       assertCurrent();
       storeDraft(recordGrowthSeedRead(readDraft, { seed, result, startedAt, now: now() }));
@@ -331,7 +362,7 @@ export function mountPresenceGrowthPanel({
       else setProgress(`Read ${label(seed)}. Open the next selected profile and choose Read current seed.`);
     } catch (error) {
       // Interrupted observations stay read-only and never become follow targets.
-      if (error?.partialResult && currentDraft({ stored: true })) {
+      if (!readOpening && error?.partialResult && currentDraft({ stored: true })) {
         try {
           storeDraft(recordGrowthSeedRead(readDraft, { seed, result: error.partialResult, startedAt, now: now(), partial: true }));
         } catch { /* Keep the previously verified reads if this partial record is invalid. */ }
@@ -341,7 +372,7 @@ export function mountPresenceGrowthPanel({
         : searchFailure(error));
     } finally {
       globalThis.clearInterval(monitor);
-      if (controller === active) controller = null;
+      if (controller === active) { controller = null; readOpening = null; }
       readingSeed = '';
       render();
     }
@@ -352,7 +383,7 @@ export function mountPresenceGrowthPanel({
     controller?.abort();
     readGeneration += 1;
     clearCandidates();
-    const valid = currentDraft();
+    const valid = readOpening ? null : currentDraft();
     if (persistedDraft && valid) {
       try { storeDraft(stopGrowthReadDraft(valid, { now: now() })); }
       catch (error) { setProgress(String(error?.message || 'Search stopped.')); }
@@ -364,7 +395,7 @@ export function mountPresenceGrowthPanel({
   function discardReadDraft() {
     preserveNewIntent();
     controller?.abort(); readGeneration += 1;
-    if (persistedDraft && same(storedDraft(), readDraft)) storeDraft(null);
+    if (!readOpening && persistedDraft && same(storedDraft(), readDraft)) storeDraft(null);
     readDraft = null; persistedDraft = false; clearCandidates();
     setProgress('Choose one to three accounts from your Following list, then find mutual connections.');
     render();

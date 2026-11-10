@@ -2,6 +2,22 @@
 
 This project uses [Semantic Versioning](https://semver.org/).
 
+## 4.3.7 - 2026-11-10 (development)
+
+- Repair Presence history loading when startup account verification arrives
+  after the panel mounts. Bind each logger and reviewed run to its verified
+  history scope, including queued writes and late outcomes.
+- Wait through the exact native list's loading and fade using fresh read-only
+  context proof. Preserve strict account controls and dialog identity, ignore
+  non-rendered SVG titles, and accept rows or saved results only after full
+  visible scoped validation and stored-draft continuity checks.
+- Keep opening and row readiness within the existing shared deadline, with
+  Stop and drift guards intact. Preserve storage keys, history schema, grants
+  and action authority. Both functional reviews and focused checks passed;
+  generation and complete same-build local QA passed. Installation, live
+  acceptance and exact-candidate CI remain pending. No official release is
+  recorded.
+
 ## 4.3.6 - 2026-11-10 (development)
 
 - Ignore nested music/audio routes when identifying a post for Live like me.

@@ -1413,6 +1413,7 @@
     renderCheckerSteps();
     renderListScanControls();
     renderDmSummary();
+    presencePanel?.refreshLog();
     renderContext();
     renderRun();
     renderLimits();
@@ -3904,16 +3905,23 @@
       confirmAction: confirmRun,
       readPreferences: () => GM_getValue('instaToolboxPresenceSessionV1', null),
       writePreferences: value => GM_setValue('instaToolboxPresenceSessionV1', value),
-      readLog: () => {
-        const account = nativeActions.inspectContext();
-        return account.accountKey
-          ? GM_getValue(`instaToolboxPresenceActivityLogV1:${account.accountKey}`, null)
-          : null;
+      readLog: accountKey => {
+        if (typeof accountKey !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(accountKey)) throw new Error('presence-log-account-unverified');
+        return GM_getValue(`instaToolboxPresenceActivityLogV1:${accountKey}`, null);
       },
-      writeLog: value => {
-        const account = nativeActions.inspectContext();
-        if (!account.accountKey) throw new Error('presence-log-account-unverified');
-        return GM_setValue(`instaToolboxPresenceActivityLogV1:${account.accountKey}`, value);
+      writeLog: (value, accountKey) => {
+        if (typeof accountKey !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(accountKey)) throw new Error('presence-log-account-unverified');
+        return GM_setValue(`instaToolboxPresenceActivityLogV1:${accountKey}`, value);
+      },
+      onAccountReady: () => {
+        const dm = dmRunner?.snapshot();
+        if (preferences.view !== 'account'
+          || query('[data-role="context-title"]')?.textContent !== 'Verify your signed-in account'
+          || presencePanel?.busy() || presenceGrowthPanel?.busy() || inboxPanel?.busy()
+          || relationshipController || manualScanController || dmCleanupController || accountActionController
+          || dm?.canStop || ['preparing', 'running', 'waiting', 'stopping'].includes(dm?.status)
+          || state.run?.status === 'running') return;
+        renderContext();
       },
       busy: () => Boolean(dmCleanupController || dmRunner?.snapshot().canStop
         || relationshipController || manualScanController || state.run?.status === 'running' || inboxPanel?.busy()
@@ -3975,9 +3983,10 @@
           username, signal, onProgress, maxAccounts: 2_000,
           maxDurationMs: 4 * 60_000, retryRateLimits: false,
         }),
-        readSeedNative: (username, signal, onProgress) => engine.fetchFollowerComparison({
+        readSeedNative: (username, signal, onProgress, onNativeReadContext) => engine.fetchFollowerComparison({
           username, signal, onProgress, maxAccounts: 2_000,
           maxDurationMs: 4 * 60_000, retryRateLimits: false, allowNativeListFallback: true,
+          onNativeReadContext,
         }),
         readCampaigns: () => readGrowthCampaigns(inspectPresenceAccount().accountId),
         writeCampaigns: (campaigns) => writeGrowthCampaigns(inspectPresenceAccount().accountId, campaigns),

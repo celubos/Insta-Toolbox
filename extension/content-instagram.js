@@ -687,6 +687,7 @@
     maxDurationMs = RELATIONSHIP_MAX_DURATION_MS,
     maxPages = RELATIONSHIP_MAX_PAGES,
     now = Date.now,
+    onNativeReadContext = null,
     onProgress = null,
     random = Math.random,
     requestAttempts = RELATIONSHIP_REQUEST_ATTEMPTS,
@@ -737,6 +738,7 @@
         maxDurationMs: boundedDuration,
         maxPages: boundedPages,
         now,
+        onNativeReadContext,
         onProgress,
         random,
         requestAttempts: boundedAttempts,
@@ -2188,7 +2190,7 @@
   // Scrolls the open followers/following dialog to enumerate the full list.
   // Read-only: it only scrolls an already-open list and reads rendered rows.
   async function collectAccountList({ maxScrolls = 1_200, settleMs = 500, listType = '', signal, onProgress,
-    validateContext = null, initialReadinessMs = 0 } = {}) {
+    validateContext = null, initialReadinessMs = 0, initialReadinessDeadline = null } = {}) {
     const session = inspectSession();
     if (session.sessionExpired || session.challenge || session.actionBlocked || session.rateLimited) {
       return { ...session, accounts: [], complete: false, reason: 'session-stop' };
@@ -2295,7 +2297,8 @@
       });
     };
     const awaitInitialReadiness = async () => {
-      const deadline = Date.now() + readinessMs;
+      const deadline = Math.min(Date.now() + readinessMs,
+        Number.isFinite(initialReadinessDeadline) ? initialReadinessDeadline : Infinity);
       let emptySince = null;
       while (true) {
         const context = currentContext();
@@ -2442,7 +2445,8 @@
 
   // Used by explicit userscript native reads after both existing lookup GETs
   // explicitly retire. These are native reads, never authenticated API evidence.
-  async function collectNativeFollowerComparison({ username, signal, onProgress, now, startedAt, maxDurationMs, maxAccounts }) {
+  async function collectNativeFollowerComparison({ username, signal, onProgress, onNativeReadContext,
+    now, startedAt, maxDurationMs, maxAccounts }) {
     const types = ['followers', 'following'];
     const lists = {};
     const initialPath = location.pathname;
@@ -2538,10 +2542,32 @@
         if (controls.length !== 1 || !Number.isSafeInteger(exactProfileListCount(type, { requireScoped: true }))) {
           fail('native-list-control-unavailable', `Open the exact @${username} profile with a single visible ${type} control, then try again.`);
         }
+        const readinessDeadline = Date.now() + RELATIONSHIP_REQUEST_TIMEOUT_MS;
+        const captureGuard = globalThis.InstaToolboxInstagramViewer?.captureNativeListReadGuard;
+        const openingGuard = typeof captureGuard === 'function' ? captureGuard({ document, location,
+          profileHeader: header, username, listType: type, actor: viewer, readSession: inspectSession,
+          deadline: readinessDeadline,
+          isActive() {
+            assertRelationshipRunActive(signal, startedAt, now, maxDurationMs);
+            return true;
+          } }) : null;
+        if (typeof captureGuard === 'function' && !openingGuard) {
+          fail('profile-mismatch', 'The native read could not retain its exact account and profile context.');
+        }
+        if (openingGuard) onNativeReadContext?.({ phase: 'opening',
+          validate: () => openingGuard.check().phase !== 'invalid' });
         assertContext();
         controls[0].click();
         const modal = await waitFor(() => {
           assertRelationshipRunActive(signal, startedAt, now, maxDurationMs);
+          if (openingGuard) {
+            const opening = openingGuard.check();
+            if (opening.phase === 'invalid') fail('native-dialog-changed', 'The account, profile, or native opening dialog changed. Read stopped.');
+            if (opening.phase === 'timeout') fail('native-list-loading-timeout', `Instagram's ${type} list is still loading. Let it finish loading, close it, then retry from this profile.`);
+            if (opening.phase !== 'ready') return null;
+            assertContext(opening.dialog);
+            return opening.dialog;
+          }
           const open = dialogs();
           if (!open.length) return null;
           if (open.length !== 1 || accountListDialog(type)?.dialog !== open[0]) {
@@ -2549,12 +2575,15 @@
           }
           assertContext(open[0]);
           return open[0];
-        }, 6_000, signal);
+        }, Math.max(1, readinessDeadline - Date.now()), signal);
         if (!modal) {
           assertRelationshipRunActive(signal, startedAt, now, maxDurationMs);
-          fail('native-list-unavailable', `Instagram did not open ${type}. Open that list normally and try again.`);
+          fail('native-list-loading-timeout', `Instagram's ${type} list is still loading. Let it finish loading, close it, then retry from this profile.`);
         }
         assertContext(modal);
+        // The caller must recheck normal actor-scoped storage continuity before
+        // this fully qualified list can yield any observed rows.
+        onNativeReadContext?.({ phase: 'ready' });
         const listController = new AbortController();
         const stopList = () => listController.abort();
         signal?.addEventListener?.('abort', stopList, { once: true });
@@ -2564,6 +2593,7 @@
         try {
           scanned = await collectAccountList({ listType: type, signal: listController.signal,
             initialReadinessMs: RELATIONSHIP_REQUEST_TIMEOUT_MS,
+            initialReadinessDeadline: readinessDeadline,
             validateContext() {
               try { assertContext(modal); }
               catch (error) { contextError = error; return false; }
@@ -2614,6 +2644,8 @@
           : error?.code === 'native-list-loading-timeout' ? 'native-list-loading-timeout' : 'native-context-changed');
       }
       throw error;
+    } finally {
+      onNativeReadContext?.(null);
     }
   }
 
