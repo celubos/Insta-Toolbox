@@ -2,6 +2,18 @@
 
 This project uses [Semantic Versioning](https://semver.org/).
 
+## 4.3.9 - 2026-11-10 (development)
+
+- Avoid repeatedly searching native-list profile avatars for account navigation.
+  Reject dialog rows before geometry and ancestor scans while retaining actual
+  navigation and scoped backdrop validation.
+- Add large-list regressions for visible and hidden navigation and qualified
+  native-list account proof. Both new cases and 222 neighboring checks pass;
+  installed retesting must resolve the observed list stalls.
+- Preserve the version-labelled 4.3.8 timed Presence and history results. Its
+  377 verified activities and passing local/CI checks do not establish complete
+  native-list acceptance. Official release remains held.
+
 ## 4.3.8 - 2026-11-10 (development)
 
 - Replace cached history snapshots with independent private changes and
@@ -20,8 +32,10 @@ This project uses [Semantic Versioning](https://semver.org/).
   deadlines; accept rows only after full scoped validation. Native review and
   209 focused checks passed. Keep routine history updates quiet.
 - Generate the development candidate and pass all required local source,
-  package, native, sandbox, background and rendered gates. Installed and CI
-  acceptance remain pending. The 4.3.7 update remains held; no official release is recorded.
+  package, native, sandbox, background and rendered gates. All eight candidate
+  CI checks and installed activation passed. The timed Presence run completed
+  377 activities and retained all prior history; native list stalls keep full
+  acceptance and official release held.
 
 ## 4.3.7 - 2026-11-10 (development)
 

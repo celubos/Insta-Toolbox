@@ -127,7 +127,9 @@
     if (list && !pickerAccount) return { ...unavailable, threadId, reason: 'account-name-unavailable' };
     const navigation = new Map();
     const profiles = [...document.querySelectorAll('a[role="link"][href]')].filter((link) => {
-      if (!shown(link) || list?.contains(link)
+      // Dialog profile rows are content, not account navigation. Reject them
+      // before ancestor searches so growing native lists do not cause quadratic work.
+      if (link.closest?.('[role="dialog"]') || !shown(link) || list?.contains(link)
         || link.getAttribute('aria-label')?.startsWith('Open the profile page of')) return false;
       const match = pathOf(link).match(/^\/([a-z0-9._]+)\/?$/i);
       const accountId = match && username(match[1]);

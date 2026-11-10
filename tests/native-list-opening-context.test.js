@@ -558,3 +558,44 @@ test('a late list heading shares the opening deadline with row readiness instead
   assert.equal(clock - started, 20_000);
   assert.deepEqual(calls, ['open:followers']);
 });
+
+function modalNavigationFixture(size, { hiddenBackdrop = true } = {}) {
+  const f = openingFixture();
+  if (hiddenBackdrop) f.root.attributes['aria-hidden'] = 'true';
+  const rows = Array.from({ length: size }, (_, index) => {
+    const owner = 'fixture.person' + index;
+    return f.element('div', {}, [f.element('a', { role: 'link', href: '/' + owner + '/' }, [
+      f.element('img', { alt: owner + "'s profile picture" }),
+    ])]);
+  });
+  const list = f.element('div', {}, rows);
+  const modal = f.element('div', { role: 'dialog', 'aria-label': 'Followers' }, [f.element('h2', {}, [], 'Followers'), list]);
+  modal.parentElement = f.document.body; f.document.body.children.push(modal);
+  let navigationRescans = 0;
+  for (const node of [list, modal]) {
+    const query = node.querySelectorAll;
+    node.querySelectorAll = function (selector) {
+      if (selector === 'a[href]') navigationRescans += 1;
+      return query.call(this, selector);
+    };
+  }
+  return { ...f, modal, navigationRescans: () => navigationRescans };
+}
+
+test('account navigation does not repeatedly rescan large native-dialog profile rows', () => {
+  for (const hiddenBackdrop of [true, false]) {
+    const f = modalNavigationFixture(198, { hiddenBackdrop });
+    const value = f.context.InstaToolboxInstagramViewer.inspect({ document: f.document, location: f.location, session: {} });
+    assert.equal(value.accountVerified, !hiddenBackdrop, 'ordinary visible navigation remains the only actor proof');
+    assert.ok(f.navigationRescans() <= 1, 'dialog contents are not searched once per profile avatar');
+  }
+});
+
+test('large dialog filtering preserves explicitly scoped native-list account proof', () => {
+  const f = modalNavigationFixture(198);
+  f.followers.text = '198 followers';
+  const value = f.context.InstaToolboxInstagramViewer.inspect({ document: f.document, location: f.location,
+    session: {}, nativeListDialog: { profileHeader: f.header, username: 'fixture.target', listType: 'followers', dialog: f.modal } });
+  assert.equal(value.accountVerified, true); assert.equal(value.accountId, f.owner);
+  assert.ok(f.navigationRescans() <= 1, 'qualified backdrop proof does not require crawling dialog avatars');
+});

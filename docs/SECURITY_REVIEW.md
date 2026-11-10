@@ -105,7 +105,7 @@ Provenance-verified partial comparisons remain visible and downloadable with unc
 
 ## Local app and web delivery
 
-The PWA service worker uses network-first same-origin GET handling, caches only successful same-origin responses, bypasses the HTTP cache for service-worker update checks, and removes earlier cache generations. Version 4.1.4 used `insta-toolbox-v414`; the 4.3.8 preparation uses `insta-toolbox-v438`. Persisted workspace and settings keys are unchanged. Public web/PWA delivery remains on hold at 4.3.1.
+The PWA service worker uses network-first same-origin GET handling, caches only successful same-origin responses, bypasses the HTTP cache for service-worker update checks, and removes earlier cache generations. Version 4.1.4 used `insta-toolbox-v414`; the 4.3.9 preparation uses `insta-toolbox-v439`. Persisted workspace and settings keys are unchanged. Public web/PWA delivery remains on hold at 4.3.1.
 
 The loopback development server accepts only loopback Host headers and serves an explicit asset allowlist. Repository metadata, tests, documentation, and Git internals are not served. Framing protection is sent as HTTP headers because `frame-ancestors` is ineffective in a meta policy.
 
@@ -123,7 +123,7 @@ When release credentials are available, remove the library-validation exception,
 
 Earlier reviews fixed structural profile-control binding, pre-existing-dialog confusion, missing extension reservations, malformed migration fields, discard races, weak message identity, unbound or noninteractive DM controls, synthetic confirmation acceptance, and incomplete oldest-edge traversal. Regression fixtures cover these boundaries.
 
-Historical releases retain their own acceptance records. They are not evidence that the current 4.3.8 preparation passed authenticated acceptance. Current authenticated compatibility, human screen-reader use, Windows publisher trust, Apple notarization, and physical Intel Mac behavior require fresh acceptance.
+Historical releases retain their own acceptance records. They are not evidence that the current 4.3.9 preparation passed authenticated acceptance. Current authenticated compatibility, human screen-reader use, Windows publisher trust, Apple notarization, and physical Intel Mac behavior require fresh acceptance.
 
 ## Dependencies and supply chain
 
@@ -241,7 +241,8 @@ Version 4.3.8 implements the private history repair and async UI, independently
 reviewed with 85 combined focused checks. The bounded native skeleton handoff
 passed independent review and 209 focused regressions without granting action
 authority during opening. The generated candidate passed all required local
-gates; installation, authenticated acceptance and exact CI remain pending in
+gates and all eight candidate CI checks. Installed activation, timed Presence
+and cold history retention passed; native list stalls keep full acceptance held in
 [4.3.8 acceptance](./acceptance/4.3.8.md).
 
 The approved private-manager journal uses independent immutable operations and
@@ -270,6 +271,18 @@ review access are currently unavailable; existing protections remain required.
 Fixtures do not prove current authenticated Instagram behavior.
 
 Partial mutual comparisons are available for display, export, and Follow / Unfollow target review. Target reviews and their existing confirmation show an uncertainty notice; missing records are not proof of a non-mutual relationship. Captures must belong to the signed-in account, and each profile's current relationship is checked before acting. Schema-1 comparison exports preserve existing fields and add `partial`, `labels`, and `warning`; completeness flags are not promoted by downloading.
+
+## 4.3.9 native-list performance boundary
+
+Exclude native-dialog profile links before account-navigation geometry and
+ancestor scans. Large lists no longer trigger one whole-list search per
+avatar. Existing visible-navigation and explicitly scoped backdrop proofs
+remain required; dialog rows never establish account identity. No permissions,
+storage schema, review capability or live-action dispatch change is introduced.
+Two new regressions and 222 neighboring checks passed. Installed list retesting
+remains required; the 4.3.8 native stalls keep full acceptance held despite
+its passing timed Presence, history and exact-candidate CI checks.
+See [4.3.9 acceptance](./acceptance/4.3.9.md).
 
 ## License
 

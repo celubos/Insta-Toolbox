@@ -174,26 +174,21 @@ Read the reason shown in the active tool. Challenge, rate-limit, wrong-thread, c
 
 ## Acceptance and support
 
-Version 4.3.8 is in preparation. Its metadata adds GM.getValue, GM.setValue,
-GM.listValues and GM.deleteValue for this userscript's private history storage.
-All legacy grants and the isolated sandbox remain; no network, cookie,
-connection or domain permission is added. History implementation and focused
-review passed. The bounded native handoff passed independent review and
-209 focused checks. The generated candidate passed all required local
-checks; installed validation and exact-candidate CI remain pending. The log/export limit is 500 visible entries; private backing
-records and the retained legacy backup are not a global storage-cap promise.
+Version 4.3.9 is a development repair for repeated account-navigation scans
+inside native list dialogs. It adds no permissions or action authority.
+Version 4.3.8 installed activation and all eight candidate CI checks passed;
+its timed Presence run completed 377 activities and retained all earlier
+history. Native list scans became unresponsive, so complete acceptance and
+official publication remain held. Current live retesting and protected
+current-main promotion remain required.
 
-Hold the 4.3.7 development candidate update
-while a confirmed same-account multi-tab history overwrite is repaired and
-validated. Its passing local matrix does not cover this later regression.
-No actual user history loss was observed. Settings verified installed 4.3.7,
-and a cold read/export kept all 95 prior records without Start or Clear. A
-subsequent native Growth read failed before rows; complete acceptance is not
-claimed.
+The four manager-storage grants introduced in 4.3.8 access this userscript's
+private history storage. The 500-entry display/export limit is not a global
+physical-storage cap. Identity, author and stable installation URLs remain
+unchanged.
 
-
-- [4.3.8 userscript candidate acceptance](acceptance/4.3.8.md)
-- [4.3.8 userscript compatibility](compatibility/4.3.8.md)
+- [4.3.9 userscript candidate acceptance](acceptance/4.3.9.md)
+- [4.3.9 userscript compatibility](compatibility/4.3.9.md)
 - [4.3.1 acceptance record](acceptance/4.3.1.md)
 - [4.3.1 compatibility](compatibility/4.3.1.md)
 - [Operator acceptance guide](OPERATOR_ACCEPTANCE.md)
