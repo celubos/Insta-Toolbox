@@ -1,4 +1,4 @@
-const CACHE_NAME = 'insta-toolbox-v432';
+const CACHE_NAME = 'insta-toolbox-v433';
 const ASSETS = [
   './', './index.html', './manifest.webmanifest', './assets/icon.svg',
   './LICENSE', './THIRD_PARTY_NOTICES.md',

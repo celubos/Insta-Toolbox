@@ -21,19 +21,72 @@
         && !url.search && !url.hash ? url.pathname : '';
     } catch { return ''; }
   }
+  function nativeListBackdrop({ document, location, context }) {
+    const owner = username(context?.username), type = context?.listType;
+    const header = context?.profileHeader, dialog = context?.dialog;
+    if (!owner || !['followers', 'following'].includes(type)
+      || !new RegExp(`^/${owner.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/?$`, 'i').test(location.pathname)) return null;
+    const backdrop = header?.closest?.('[aria-hidden="true"]');
+    const rendered = (node, allowed = null) => {
+      if (!node?.isConnected || !node.getClientRects?.().length || typeof getComputedStyle !== 'function') return false;
+      for (let parent = node; parent; parent = parent.parentElement) {
+        const style = getComputedStyle(parent);
+        if (parent.hidden || (parent.getAttribute?.('aria-hidden') === 'true' && parent !== allowed)
+          || style.display === 'none' || ['hidden', 'collapse'].includes(style.visibility)
+          || (style.opacity !== undefined && style.opacity !== '' && Number(style.opacity) === 0)) return false;
+      }
+      return true;
+    };
+    if (!backdrop || backdrop === header || backdrop.contains(dialog) || !rendered(header, backdrop) || !rendered(dialog)) return null;
+    const dialogs = [...document.querySelectorAll('[role="dialog"]')].filter(node => rendered(node));
+    if (dialogs.length !== 1 || dialogs[0] !== dialog) return null;
+    const labels = [dialog.getAttribute('aria-label'),
+      ...[...dialog.querySelectorAll('[role="heading"], h1, h2')].filter(node => rendered(node)).map(node => node.textContent),
+      String(dialog.textContent || '').split(/\r?\n/).map(line => line.trim()).find(Boolean)];
+    const types = new Set(labels.map(label => String(label || '').normalize('NFKC').trim().toLowerCase().match(/^(followers|following)(?:\s|$)/)?.[1]).filter(Boolean));
+    if (types.size !== 1 || !types.has(type)) return null;
+    const headers = [...document.querySelectorAll('main header')].filter(node => rendered(node, backdrop));
+    if (headers.length !== 1 || headers[0] !== header
+      || ![...header.querySelectorAll('a[href], h1, h2, [role="heading"]')]
+        .some(node => rendered(node, backdrop) && username(node.textContent) === owner)) return null;
+    for (const listType of ['followers', 'following']) {
+      const controls = [...header.querySelectorAll('a[role="link"], a[href="#"]')].filter(node => {
+        if (!rendered(node, backdrop) || !new RegExp(`\\s${listType}$`, 'i').test(String(node.textContent || '').trim())) return false;
+        const href = node.getAttribute('href'), path = pathOf(node).replace(/\/+$/, '').toLowerCase();
+        return href === '#' || [`/${owner}`, `/${owner}/${listType}`].includes(path);
+      });
+      if (controls.length !== 1) return null;
+      const control = controls[0], counts = new Set();
+      const title = control.querySelector?.('[title]')?.getAttribute('title');
+      for (const value of [control.getAttribute('title'), control.textContent, title ? `${title} ${listType}` : '']) {
+        const match = String(value || '').normalize('NFKC').replace(/[\u00a0\u202f]/g, ' ').trim().toLowerCase()
+          .match(/^([0-9][0-9., ]*)\s+(followers|following)$/);
+        if (!match || match[2] !== listType || !/^(?:\d+|\d{1,3}([,. ])\d{3}(?:\1\d{3})*)$/.test(match[1])) continue;
+        const count = Number(match[1].replace(/\D/g, ''));
+        if (Number.isSafeInteger(count)) counts.add(count);
+      }
+      if (counts.size !== 1) return null;
+    }
+    return { backdrop, shown: node => rendered(node, backdrop)
+      && node.closest?.('[aria-hidden="true"]') === backdrop };
+  }
   function inspect({ document = globalThis.document, location = globalThis.location,
     session = globalThis.InstaToolboxInstagramInspector?.inspectSession?.() || {},
-    reactionDialog = false } = {}) {
+    reactionDialog = false, nativeListDialog = null } = {}) {
     const unavailable = { accountVerified: false, usable: false, accountId: null, threadId: null };
     if (location?.origin !== origin) return { ...unavailable, reason: 'instagram-origin-required' };
     const threadId = String(location.pathname).match(/^\/direct\/t\/([0-9]+)\/?$/)?.[1] || null;
     const restriction = session.sessionExpired || session.challenge || session.actionBlocked || session.rateLimited;
     if (restriction) return { ...unavailable, threadId, restriction: true, reason: 'instagram-restricted' };
+    const nativeBackdrop = nativeListDialog === null ? null
+      : nativeListBackdrop({ document, location, context: nativeListDialog });
+    if (nativeListDialog !== null && !nativeBackdrop) return { ...unavailable, threadId, reason: 'native-list-context-unavailable' };
     const rawLists = [...document.querySelectorAll('[aria-label="Thread list"]')];
     const dialogs = reactionDialog ? [...document.querySelectorAll('[role="dialog"]')]
       .filter(visible).filter(node => [...node.querySelectorAll('h1, h2, h3, [role="heading"]')]
         .some(heading => String(heading.textContent || '').trim() === 'Reactions')) : [];
     const shown = (node) => {
+      if (nativeBackdrop) return nativeBackdrop.shown(node);
       if (visible(node)) return true;
       if (dialogs.length !== 1 || !node?.isConnected || node.closest?.('[hidden]')
         || !node.getClientRects?.().length) return false;

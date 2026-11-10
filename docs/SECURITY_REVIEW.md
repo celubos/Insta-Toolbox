@@ -1,6 +1,6 @@
 # Security review
 
-Last reviewed: 2026-09-18
+Last reviewed: 2026-11-09
 
 ## Boundaries
 
@@ -26,6 +26,15 @@ Every Follow, Unfollow, or Unsend mutation requires:
 Capabilities expire and cannot be replayed. Route changes, panel closure, Stop, challenge, block, rate limit, wrong target, pre-existing dialog, ambiguous controls, or an uncertain postcondition stop the run. Failed preflight and zero-click failure record zero removals.
 
 The in-overlay confirmation controller freezes the reviewed binding, focuses Cancel first, and accepts only a trusted browser click on its exact Confirm button. Synthetic `.click()` and dispatched events do not mint authority. Rendered facts use text nodes rather than HTML interpolation.
+
+Account and message mutations retain the sole isolated live-control activator.
+The native relationship reader has two separately reviewed navigation call
+sites: opening the exact profile list and closing that same list dialog. Each
+checks the current account, owner and dialog immediately before clicking.
+These reads cannot invoke the live activator or grant mutation authority. The
+extension package gate rejects extra direct click paths or missing native
+context checks; full source checks run this gate alongside generated userscript
+verification. Regression tests cover those rejections.
 
 Thread-wide DM Unsend has an internal runaway watchdog, not a daily action limit. Version 3 does not read, migrate, or delete version 2 browser or desktop state.
 
@@ -81,11 +90,22 @@ If the fixed search lookup returns HTTP 404 or 410, resolution may use the alrea
 
 Results replace Followers and Following atomically and are not sent through the extension bridge. Instagram can change these unsupported web routes without notice.
 
+When both lookup GETs explicitly return HTTP 404 or 410, the userscript's
+primary check can read the exact open profile's native Followers and Following
+lists. It requires a unique owner header, scoped count controls, a newly opened
+matching dialog, stable account evidence and fresh ending totals. Its narrow
+backdrop verifier re-reads the rendered account rail while that exact list
+dialog hides the app from accessibility; ordinary viewer visibility stays
+strict. Native results retain list-dialog provenance and do not invent numeric
+IDs or authenticated API evidence. Interruption leaves the saved comparison
+unchanged and offers observed partial rows as a separate download. Other
+engine callers do not enable this fallback by default.
+
 Provenance-verified partial comparisons remain visible and downloadable with uncertainty and “Not found” wording. They may supply reviewed Follow / Unfollow targets under the existing 3.1.12 contract, with uncertainty bound into review and confirmation; missing records are not presented as confirmed relationship facts. A quiet or motionless list does not establish completion. Schema 6 retains earlier rows but clears unproven completion from older dialog captures. Existing count-verified authenticated captures remain usable.
 
 ## Local app and web delivery
 
-The PWA service worker uses network-first same-origin GET handling, caches only successful same-origin responses, bypasses the HTTP cache for service-worker update checks, and removes earlier cache generations. Version 4.1.4 uses `insta-toolbox-v414`; persisted workspace and settings keys are unchanged.
+The PWA service worker uses network-first same-origin GET handling, caches only successful same-origin responses, bypasses the HTTP cache for service-worker update checks, and removes earlier cache generations. Version 4.1.4 used `insta-toolbox-v414`; the 4.3.3 candidate uses `insta-toolbox-v433`. Persisted workspace and settings keys are unchanged. Public web/PWA delivery remains on hold at 4.3.1.
 
 The loopback development server accepts only loopback Host headers and serves an explicit asset allowlist. Repository metadata, tests, documentation, and Git internals are not served. Framing protection is sent as HTTP headers because `frame-ancestors` is ineffective in a meta policy.
 
@@ -103,7 +123,7 @@ When release credentials are available, remove the library-validation exception,
 
 Earlier reviews fixed structural profile-control binding, pre-existing-dialog confusion, missing extension reservations, malformed migration fields, discard races, weak message identity, unbound or noninteractive DM controls, synthetic confirmation acceptance, and incomplete oldest-edge traversal. Regression fixtures cover these boundaries.
 
-Historical releases retain their own acceptance records. They are not evidence that the current 3.1 build passed authenticated acceptance. Current authenticated compatibility, human screen-reader use, Windows publisher trust, Apple notarization, and physical Intel Mac behavior require fresh acceptance.
+Historical releases retain their own acceptance records. They are not evidence that the current 4.3.3 candidate passed authenticated acceptance. Current authenticated compatibility, human screen-reader use, Windows publisher trust, Apple notarization, and physical Intel Mac behavior require fresh acceptance.
 
 ## Dependencies and supply chain
 
@@ -111,11 +131,17 @@ Runtime application code has no third-party production dependencies. The lockfil
 
 CI actions are pinned to full commit SHAs. Pull requests receive dependency review; CodeQL runs on pull requests, `main`, and weekly. Dependabot proposes npm and action updates. Release promotion accepts only artifacts from the successful current `main` CI run, rechecks versions and checksums, generates an SBOM, and requests GitHub provenance attestation without rebuilding.
 
-The 4.1.4 development matrix contains 1009 tests. The 45 overlay states and 11
-PWA states retain their reviewed visual baselines because those surfaces did
-not change in this userscript-first patch. Current userscript results are
-tracked in [the 4.1.4 acceptance record](./acceptance/4.1.4.md). Fixtures do not
-prove current authenticated Instagram behavior.
+The historical 4.1.4 development matrix contained 1009 tests; its results remain
+in [the 4.1.4 acceptance record](./acceptance/4.1.4.md).
+
+The 4.3.3 candidate passed 1,275 source tests, 50 production extension browser
+gates, 7 background gates, 45 overlay states and 11 PWA states. Reviewed visual
+baselines and tolerances remain unchanged. Final-source CI, installation and authenticated acceptance are pending.
+The production dependency audit (`pnpm audit --prod --audit-level high`) found
+no known vulnerabilities.
+Current results and release gates are tracked in
+[the 4.3.3 acceptance record](./acceptance/4.3.3.md). Fixtures do not prove
+current authenticated Instagram behavior.
 
 Partial mutual comparisons are available for display, export, and Follow / Unfollow target review. Target reviews and their existing confirmation show an uncertainty notice; missing records are not proof of a non-mutual relationship. Captures must belong to the signed-in account, and each profile's current relationship is checked before acting. Schema-1 comparison exports preserve existing fields and add `partial`, `labels`, and `warning`; completeness flags are not promoted by downloading.
 

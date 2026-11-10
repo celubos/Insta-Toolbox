@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta Toolbox
 // @namespace    https://github.com/slaveofsolace/Insta-Toolbox
-// @version      4.3.2
+// @version      4.3.3
 // @description  Mutual Checker, Presence, and DM Unsend on Instagram.
 // @author       @slaveofsolace
 // @homepageURL  https://github.com/slaveofsolace/Insta-Toolbox
@@ -3927,7 +3927,14 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
       // A retired lookup route is not an authentication or transport failure.
       // Use only the already allowlisted profile GET, never another search path.
       if (error?.code !== 'request-failed' || ![404, 410].includes(error.httpStatus)) throw error;
-      const profile = await fetchRelationshipProfile(username, options);
+      let profile;
+      try { profile = await fetchRelationshipProfile(username, options); }
+      catch (profileError) {
+        if (profileError?.code === 'request-failed' && [404, 410].includes(profileError.httpStatus)) {
+          profileError.lookupRoutesRetired = true;
+        }
+        throw profileError;
+      }
       const userId = boundRelationshipProfileId(profile, username);
       return { userId, subjectInstagramId: userId, profile };
     }
@@ -4168,6 +4175,7 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
   }
 
   async function fetchFollowerComparison({
+    allowNativeListFallback = false,
     clearTimer = clearTimeout,
     fetchImpl = globalThis.fetch?.bind(globalThis),
     maxAccounts = RELATIONSHIP_MAX_ACCOUNTS,
@@ -4236,13 +4244,15 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
         startedAt,
       };
       const openProfileCounts = openProfileRelationshipCounts(username);
-      const resolution = await resolveRelationshipUserId(username, {
-        ...common,
-        found: 0,
-        listType: null,
-        pages: 0,
-        username,
-      });
+      let resolution;
+      try {
+        resolution = await resolveRelationshipUserId(username, {
+          ...common, found: 0, listType: null, pages: 0, username,
+        });
+      } catch (error) {
+        if (allowNativeListFallback !== true || error?.lookupRoutesRetired !== true) throw error;
+        return await collectNativeFollowerComparison({ ...common, username });
+      }
       const { userId } = resolution;
       onProgress?.(Object.freeze({ found: 0, listType: null, pages: 0, phase: 'verifying-profile', username }));
       const profileCountsAtStart = openProfileCounts || await resolveRelationshipProfileCounts(username, userId, {
@@ -4328,7 +4338,8 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
       return result;
     } catch (error) {
       if (deadline.timedOut() && error?.code === 'stopped') {
-        throw relationshipError('time-limit', 'The follower check reached its 20-minute read limit.');
+        throw Object.assign(relationshipError('time-limit', 'The follower check reached its 20-minute read limit.'),
+          error.partialResult ? { partialResult: error.partialResult } : {});
       }
       throw error;
     } finally {
@@ -4338,7 +4349,8 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
 
   function normalizeFollowerDiagnostics(value) {
     const reasons = new Set(['pagination-complete', 'instagram-limited-list', 'cursor-missing',
-      'count-mismatch', 'count-unverified', 'count-changed', 'profile-count-disagreement', 'account-limit', 'page-limit']);
+      'count-mismatch', 'count-unverified', 'count-changed', 'profile-count-disagreement', 'account-limit', 'page-limit',
+      'native-list-complete', 'native-list-truncated', 'stopped', 'native-context-changed']);
     const count = (number) => Number.isSafeInteger(number) && number >= 0 ? number : null;
     return {
       expectedCounts: Object.fromEntries(['followers', 'following'].map((type) => [type, count(value?.expectedCounts?.[type])])),
@@ -4366,6 +4378,10 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
         'profile-count-disagreement': 'Instagram profile counters disagreed.',
         'account-limit': 'The bounded account read limit was reached.',
         'page-limit': 'The bounded page read limit was reached.',
+        'native-list-complete': 'The native list finished and fresh profile totals matched.',
+        'native-list-truncated': 'The native list ended before all accounts could be verified.',
+        stopped: 'The native read was stopped; this is a partial capture.',
+        'native-context-changed': 'The native profile or list changed during the read.',
       };
       return [`${label}: ${count}. ${explanations[reason]}`];
     });
@@ -5665,7 +5681,7 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
 
   // Scrolls the open followers/following dialog to enumerate the full list.
   // Read-only: it only scrolls an already-open list and reads rendered rows.
-  async function collectAccountList({ maxScrolls = 1_200, settleMs = 500, listType = '', signal, onProgress } = {}) {
+  async function collectAccountList({ maxScrolls = 1_200, settleMs = 500, listType = '', signal, onProgress, validateContext = null } = {}) {
     const session = inspectSession();
     if (session.sessionExpired || session.challenge || session.actionBlocked || session.rateLimited) {
       return { ...session, accounts: [], complete: false, reason: 'session-stop' };
@@ -5696,6 +5712,9 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
     let reportedCount = -1;
     const currentContext = () => {
       if (signal?.aborted) { stopReason = 'stopped'; return null; }
+      if (validateContext !== null && (typeof validateContext !== 'function' || validateContext() !== true)) {
+        stopReason = 'profile-changed'; return null;
+      }
       if (location.pathname !== profilePath) { stopReason = 'profile-changed'; return null; }
       if (ownerHeaderAtStart && !ownerHeaderPresent()) { stopReason = 'profile-changed'; return null; }
       const check = inspectSession();
@@ -5844,6 +5863,178 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
               ? 'list-complete'
               : 'list-truncated'),
     };
+  }
+
+  // Used by explicit userscript native reads after both existing lookup GETs
+  // explicitly retire. These are native reads, never authenticated API evidence.
+  async function collectNativeFollowerComparison({ username, signal, onProgress, now, startedAt, maxDurationMs, maxAccounts }) {
+    const types = ['followers', 'following'];
+    const lists = {};
+    const initialPath = location.pathname;
+    const viewer = detectAuthenticatedUsername();
+    let ownerHeader = null;
+    let initialCounts = null;
+    let activeListType = '';
+    const readViewer = (modal = null) => {
+      const ordinary = detectAuthenticatedUsername();
+      if (ordinary || !modal) return ordinary;
+      try {
+        const account = globalThis.InstaToolboxInstagramViewer?.inspect?.({ document, location, session: inspectSession(),
+          nativeListDialog: { dialog: modal, profileHeader: ownerHeader, username, listType: activeListType } });
+        return account?.accountVerified === true ? normalizeUsername(account.accountId) : '';
+      } catch { return ''; }
+    };
+    const fail = (code, message) => { throw relationshipError(code, message); };
+    const rendered = (element) => {
+      if (element?.isConnected !== true || !element.getClientRects?.().length) return false;
+      for (let node = element; node; node = node.parentElement) {
+        const style = getComputedStyle(node);
+        if (node.hidden || node.getAttribute?.('aria-hidden') === 'true' || style.display === 'none'
+          || ['hidden', 'collapse'].includes(style.visibility)
+          || (style.opacity !== undefined && style.opacity !== '' && Number(style.opacity) === 0)) return false;
+      }
+      return true;
+    };
+    const dialogs = () => visibleDialogs().filter(rendered);
+    const assertContext = (modal = null) => {
+      assertRelationshipRunActive(signal, startedAt, now, maxDurationMs);
+      if (!viewer || readViewer(modal) !== viewer) fail('profile-mismatch', 'The signed-in account changed or could not be verified. Native check stopped.');
+      if (location.origin !== INSTAGRAM_WEB_ORIGIN || location.pathname !== initialPath
+        || !new RegExp(`^/${username.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/?$`, 'i').test(location.pathname)) {
+        fail('native-profile-required', `Open @${username}'s profile in this tab, then run Check mutuals again.`);
+      }
+      const header = verifiedProfileHeader(username).root;
+      if (!header || (ownerHeader && header !== ownerHeader) || !header.isConnected || !header.getClientRects?.().length) {
+        fail('profile-mismatch', 'Keep the exact profile header open until the native check finishes.');
+      }
+      const open = dialogs();
+      if (modal ? open.length !== 1 || open[0] !== modal : open.length !== 0) {
+        fail('native-dialog-changed', 'Close the open Instagram dialog, then run Check mutuals again from the profile.');
+      }
+      if (!modal && !rendered(header)) fail('profile-mismatch', 'The profile header is hidden. Open the profile before checking.');
+      return header;
+    };
+    const result = (interrupted = '') => {
+      const bound = location.origin === INSTAGRAM_WEB_ORIGIN && location.pathname === initialPath
+        && detectAuthenticatedUsername() === viewer && verifiedProfileHeader(username).root === ownerHeader;
+      const ending = initialCounts && bound ? Object.fromEntries(types.map(type => [type,
+        exactProfileListCount(type, { requireScoped: true })])) : {};
+      return Object.freeze({
+        username, source: 'list-dialog', capturedAt: new Date(now()).toISOString(),
+        followers: Object.freeze(lists.followers?.accounts || []), following: Object.freeze(lists.following?.accounts || []),
+        verified: Object.freeze(Object.fromEntries(types.map(type => [type, Boolean(lists[type])]))),
+        complete: Object.freeze(Object.fromEntries(types.map(type => [type, !interrupted && lists[type]?.complete === true
+          && Number.isSafeInteger(ending[type]) && ending[type] === initialCounts[type]
+          && lists[type].accounts.length === ending[type]]))),
+        expectedCounts: Object.freeze(Object.fromEntries(types.map(type => [type,
+          Number.isSafeInteger(ending[type]) ? ending[type] : initialCounts?.[type] ?? null]))),
+        pages: Object.freeze({ followers: null, following: null }),
+        reasons: Object.freeze(Object.fromEntries(types.map(type => {
+          const list = lists[type];
+          const reason = interrupted || (!list ? 'native-list-truncated'
+            : !Number.isSafeInteger(ending[type]) ? 'count-unverified'
+              : ending[type] !== initialCounts[type] || list.reason === 'list-count-changed' ? 'count-changed'
+                : list.reason === 'list-count-unverified' ? 'count-unverified'
+                : list.reason === 'account-limit' ? 'account-limit'
+                  : list.accounts.length !== ending[type] ? 'count-mismatch'
+                    : list.complete ? 'native-list-complete' : 'native-list-truncated');
+          return [type, reason];
+        }))),
+      });
+    };
+    try {
+      ownerHeader = assertContext();
+      initialCounts = openProfileRelationshipCounts(username);
+      if (!initialCounts) fail('profile-count-unavailable', 'Keep the exact Followers and Following totals visible on the open profile, then try again.');
+      onProgress?.({ phase: 'native-lists', username, expectedCounts: initialCounts, found: 0, listType: null });
+      for (const type of types) {
+        activeListType = type;
+        const header = assertContext();
+        const controls = [...header.querySelectorAll('a[role="link"], a[href="#"]')].filter(control => {
+          if (!rendered(control) || !new RegExp(`^[0-9][0-9., \\u00a0\\u202f]*[kmb]?\\s+${type}$`, 'i').test(visibleText(control).trim())) return false;
+          const href = control.getAttribute('href');
+          if (href === '#') return true;
+          try {
+            const target = new URL(href, INSTAGRAM_WEB_ORIGIN);
+            return target.origin === INSTAGRAM_WEB_ORIGIN && !target.username && !target.password && !target.search && !target.hash
+              && [`/${username}`, `/${username}/${type}`].includes(target.pathname.replace(/\/+$/, '').toLowerCase());
+          } catch { return false; }
+        });
+        if (controls.length !== 1 || !Number.isSafeInteger(exactProfileListCount(type, { requireScoped: true }))) {
+          fail('native-list-control-unavailable', `Open the exact @${username} profile with a single visible ${type} control, then try again.`);
+        }
+        assertContext();
+        controls[0].click();
+        const modal = await waitFor(() => {
+          assertRelationshipRunActive(signal, startedAt, now, maxDurationMs);
+          const open = dialogs();
+          if (!open.length) return null;
+          if (open.length !== 1 || accountListDialog(type)?.dialog !== open[0]) {
+            fail('native-dialog-changed', `Instagram did not open the exact ${type} list. No other list was opened.`);
+          }
+          assertContext(open[0]);
+          return open[0];
+        }, 6_000, signal);
+        if (!modal) {
+          assertRelationshipRunActive(signal, startedAt, now, maxDurationMs);
+          fail('native-list-unavailable', `Instagram did not open ${type}. Open that list normally and try again.`);
+        }
+        assertContext(modal);
+        const listController = new AbortController();
+        const stopList = () => listController.abort();
+        signal?.addEventListener?.('abort', stopList, { once: true });
+        let limited = false;
+        let contextError = null;
+        let scanned;
+        try {
+          scanned = await collectAccountList({ listType: type, signal: listController.signal,
+            validateContext() {
+              try { assertContext(modal); }
+              catch (error) { contextError = error; return false; }
+              return true;
+            },
+            onProgress(progress) {
+              onProgress?.({ ...progress, found: Math.min(progress.found, maxAccounts), phase: 'native-reading', username });
+              if (progress.found >= maxAccounts) { limited = true; listController.abort(); }
+            } });
+        } finally { signal?.removeEventListener?.('abort', stopList); }
+        if (scanned.profilePath === initialPath && scanned.listType === type) {
+          lists[type] = { ...scanned, accounts: scanned.accounts.slice(0, maxAccounts),
+            complete: scanned.complete === true && !limited,
+            reason: limited ? 'account-limit' : scanned.reason };
+        }
+        if (contextError) throw contextError;
+        assertContext(modal);
+        if (!lists[type] || ['profile-changed', 'list-changed', 'list-closed', 'session-stop', 'stopped'].includes(scanned.reason) && !limited) {
+          fail('native-dialog-changed', 'The native list changed before the check finished.');
+        }
+        const closeControls = [...modal.querySelectorAll('button, [role="button"]')].filter(control => rendered(control)
+          && [control.getAttribute('aria-label'), visibleText(control),
+            ...[...control.querySelectorAll('[aria-label]')].map(node => node.getAttribute('aria-label'))]
+            .some(label => /^close$/i.test(String(label || '').trim())));
+        if (closeControls.length !== 1) fail('native-close-unavailable', 'Close the native list normally before checking again.');
+        assertContext(modal);
+        closeControls[0].click();
+        const closed = await waitFor(() => {
+          assertRelationshipRunActive(signal, startedAt, now, maxDurationMs);
+          const open = dialogs();
+          if (!open.length) { assertContext(); return true; }
+          if (open.length !== 1 || open[0] !== modal) fail('native-dialog-changed', 'The native dialog changed. Check stopped.');
+          return false;
+        }, 6_000, signal);
+        if (!closed) {
+          assertRelationshipRunActive(signal, startedAt, now, maxDurationMs);
+          fail('native-close-unavailable', 'Close the native list normally before checking again.');
+        }
+      }
+      assertContext();
+      return result();
+    } catch (error) {
+      if (types.some(type => lists[type]?.accounts.length)) {
+        error.partialResult = result(signal?.aborted || error?.code === 'stopped' ? 'stopped' : 'native-context-changed');
+      }
+      throw error;
+    }
   }
 
   // Enumerates messages the signed-in account sent in the open conversation.
@@ -6143,19 +6334,72 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
         && !url.search && !url.hash ? url.pathname : '';
     } catch { return ''; }
   }
+  function nativeListBackdrop({ document, location, context }) {
+    const owner = username(context?.username), type = context?.listType;
+    const header = context?.profileHeader, dialog = context?.dialog;
+    if (!owner || !['followers', 'following'].includes(type)
+      || !new RegExp(`^/${owner.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/?$`, 'i').test(location.pathname)) return null;
+    const backdrop = header?.closest?.('[aria-hidden="true"]');
+    const rendered = (node, allowed = null) => {
+      if (!node?.isConnected || !node.getClientRects?.().length || typeof getComputedStyle !== 'function') return false;
+      for (let parent = node; parent; parent = parent.parentElement) {
+        const style = getComputedStyle(parent);
+        if (parent.hidden || (parent.getAttribute?.('aria-hidden') === 'true' && parent !== allowed)
+          || style.display === 'none' || ['hidden', 'collapse'].includes(style.visibility)
+          || (style.opacity !== undefined && style.opacity !== '' && Number(style.opacity) === 0)) return false;
+      }
+      return true;
+    };
+    if (!backdrop || backdrop === header || backdrop.contains(dialog) || !rendered(header, backdrop) || !rendered(dialog)) return null;
+    const dialogs = [...document.querySelectorAll('[role="dialog"]')].filter(node => rendered(node));
+    if (dialogs.length !== 1 || dialogs[0] !== dialog) return null;
+    const labels = [dialog.getAttribute('aria-label'),
+      ...[...dialog.querySelectorAll('[role="heading"], h1, h2')].filter(node => rendered(node)).map(node => node.textContent),
+      String(dialog.textContent || '').split(/\r?\n/).map(line => line.trim()).find(Boolean)];
+    const types = new Set(labels.map(label => String(label || '').normalize('NFKC').trim().toLowerCase().match(/^(followers|following)(?:\s|$)/)?.[1]).filter(Boolean));
+    if (types.size !== 1 || !types.has(type)) return null;
+    const headers = [...document.querySelectorAll('main header')].filter(node => rendered(node, backdrop));
+    if (headers.length !== 1 || headers[0] !== header
+      || ![...header.querySelectorAll('a[href], h1, h2, [role="heading"]')]
+        .some(node => rendered(node, backdrop) && username(node.textContent) === owner)) return null;
+    for (const listType of ['followers', 'following']) {
+      const controls = [...header.querySelectorAll('a[role="link"], a[href="#"]')].filter(node => {
+        if (!rendered(node, backdrop) || !new RegExp(`\\s${listType}$`, 'i').test(String(node.textContent || '').trim())) return false;
+        const href = node.getAttribute('href'), path = pathOf(node).replace(/\/+$/, '').toLowerCase();
+        return href === '#' || [`/${owner}`, `/${owner}/${listType}`].includes(path);
+      });
+      if (controls.length !== 1) return null;
+      const control = controls[0], counts = new Set();
+      const title = control.querySelector?.('[title]')?.getAttribute('title');
+      for (const value of [control.getAttribute('title'), control.textContent, title ? `${title} ${listType}` : '']) {
+        const match = String(value || '').normalize('NFKC').replace(/[\u00a0\u202f]/g, ' ').trim().toLowerCase()
+          .match(/^([0-9][0-9., ]*)\s+(followers|following)$/);
+        if (!match || match[2] !== listType || !/^(?:\d+|\d{1,3}([,. ])\d{3}(?:\1\d{3})*)$/.test(match[1])) continue;
+        const count = Number(match[1].replace(/\D/g, ''));
+        if (Number.isSafeInteger(count)) counts.add(count);
+      }
+      if (counts.size !== 1) return null;
+    }
+    return { backdrop, shown: node => rendered(node, backdrop)
+      && node.closest?.('[aria-hidden="true"]') === backdrop };
+  }
   function inspect({ document = globalThis.document, location = globalThis.location,
     session = globalThis.InstaToolboxInstagramInspector?.inspectSession?.() || {},
-    reactionDialog = false } = {}) {
+    reactionDialog = false, nativeListDialog = null } = {}) {
     const unavailable = { accountVerified: false, usable: false, accountId: null, threadId: null };
     if (location?.origin !== origin) return { ...unavailable, reason: 'instagram-origin-required' };
     const threadId = String(location.pathname).match(/^\/direct\/t\/([0-9]+)\/?$/)?.[1] || null;
     const restriction = session.sessionExpired || session.challenge || session.actionBlocked || session.rateLimited;
     if (restriction) return { ...unavailable, threadId, restriction: true, reason: 'instagram-restricted' };
+    const nativeBackdrop = nativeListDialog === null ? null
+      : nativeListBackdrop({ document, location, context: nativeListDialog });
+    if (nativeListDialog !== null && !nativeBackdrop) return { ...unavailable, threadId, reason: 'native-list-context-unavailable' };
     const rawLists = [...document.querySelectorAll('[aria-label="Thread list"]')];
     const dialogs = reactionDialog ? [...document.querySelectorAll('[role="dialog"]')]
       .filter(visible).filter(node => [...node.querySelectorAll('h1, h2, h3, [role="heading"]')]
         .some(heading => String(heading.textContent || '').trim() === 'Reactions')) : [];
     const shown = (node) => {
+      if (nativeBackdrop) return nativeBackdrop.shown(node);
       if (visible(node)) return true;
       if (dialogs.length !== 1 || !node?.isConnected || node.closest?.('[hidden]')
         || !node.getClientRects?.().length) return false;
@@ -11162,6 +11406,7 @@ function observedAccounts(rows) {
   for (const row of Array.isArray(rows) ? rows : []) {
     const username = growthUsername(typeof row === 'string' ? row : row?.username);
     if (!username) continue;
+    if (row?.instagramIdAmbiguous === true) { accounts.set(username, null); continue; }
     const id = typeof row === 'object' && row !== null
       && /^[1-9]\d{0,29}$/.test(String(row.instagramId || '')) ? String(row.instagramId) : '';
     const prior = accounts.get(username);
@@ -11259,17 +11504,243 @@ function dueGrowthUnfollows(campaign, { account, now = Date.now() } = {}) {
 
 return Object.freeze({ growthUsername, rankGrowthCandidates, createGrowthCampaign, recordGrowthOutcome, growthOutcomeVerified, dueGrowthUnfollows });
 })();
+localModules["extension/presence-growth-draft.js"] = (() => {
+const { growthUsername } = localModules["extension/presence-growth.js"];
+
+const MAX_AGE = 30 * 60_000;
+const TYPES = ['followers', 'following'];
+const NATIVE_ROW_SOURCES = ['extension-scrolled-dom', 'extension-visible-dom', 'tampermonkey-visible-dom'];
+const REASONS = new Set(['pagination-complete', 'instagram-limited-list', 'cursor-missing', 'count-mismatch',
+  'count-unverified', 'count-changed', 'profile-count-disagreement', 'account-limit', 'page-limit',
+  'native-list-complete', 'native-list-truncated', 'stopped', 'native-context-changed']);
+const freeze = value => {
+  if (value && typeof value === 'object') { Object.values(value).forEach(freeze); Object.freeze(value); }
+  return value;
+};
+const integer = value => Number.isSafeInteger(value) && value >= 0;
+const identity = value => typeof value === 'string' && /^[1-9]\d{0,29}$/.test(value);
+const object = value => value && typeof value === 'object' && !Array.isArray(value)
+  && [Object.prototype, null].includes(Object.getPrototypeOf(value));
+function keys(value, allowed, required = allowed) {
+  return object(value) && Object.keys(value).every(key => allowed.includes(key))
+    && required.every(key => Object.prototype.hasOwnProperty.call(value, key));
+}
+function handle(value) {
+  return typeof value === 'string' && growthUsername(value) === value ? value : '';
+}
+function timestamp(value) {
+  if (typeof value !== 'string') return null;
+  const parsed = Date.parse(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 && new Date(parsed).toISOString() === value ? parsed : null;
+}
+function rows(value, { max, source, nativeIds = true, seedRead = false } = {}) {
+  if (!Array.isArray(value) || value.length > max) return null;
+  const names = new Set(), ids = new Set(), output = [];
+  for (const row of value) {
+    if (!keys(row, ['username', 'source', 'instagramId', 'instagramIdAmbiguous', 'profileUrl', 'displayName'], ['username', 'source'])
+      || !handle(row.username) || names.has(row.username)
+      || (source === 'authenticated-web' ? row.source !== 'authenticated-instagram-web'
+        : source === 'list-dialog' ? !NATIVE_ROW_SOURCES.includes(row.source)
+          : ![...NATIVE_ROW_SOURCES, 'authenticated-instagram-web'].includes(row.source))
+      || (seedRead && source === 'list-dialog' && row.source !== 'extension-scrolled-dom')
+      || (row.profileUrl !== undefined && row.profileUrl !== `https://www.instagram.com/${row.username}/`)
+      || (row.displayName !== undefined && (typeof row.displayName !== 'string' || row.displayName.length > 500))
+      || (row.instagramId !== undefined && (!nativeIds || !identity(row.instagramId) || ids.has(row.instagramId)))
+      || (row.instagramIdAmbiguous !== undefined && (!nativeIds || seedRead || row.instagramIdAmbiguous !== true))
+      || (row.instagramId && row.instagramIdAmbiguous)) return null;
+    names.add(row.username);
+    if (row.instagramId) ids.add(row.instagramId);
+    output.push({ username: row.username, source: row.source,
+      ...(row.instagramId ? { instagramId: row.instagramId } : {}),
+      ...(row.instagramIdAmbiguous ? { instagramIdAmbiguous: true } : {}),
+      profileUrl: `https://www.instagram.com/${row.username}/`,
+      displayName: row.displayName || '' });
+  }
+  return output.sort((left, right) => left.username.localeCompare(right.username));
+}
+
+function growthFollowingSnapshot(value, { actor, now = Date.now() } = {}) {
+  try {
+    if (!handle(actor) || !integer(now) || !keys(value,
+      ['subjectUsername', 'listType', 'verified', 'source', 'capturedAt', 'complete', 'accounts'])
+      || value.subjectUsername !== actor || value.listType !== 'following' || value.verified !== true
+      || !['list-dialog', 'authenticated-web'].includes(value.source) || typeof value.complete !== 'boolean') return null;
+    const captured = timestamp(value.capturedAt);
+    const accounts = rows(value.accounts, { max: 25_000, source: value.source });
+    if (captured === null || captured > now || now - captured >= MAX_AGE || !accounts) return null;
+    return freeze({ subjectUsername: actor, listType: 'following', verified: true, source: value.source,
+      capturedAt: value.capturedAt, complete: value.complete, accounts });
+  } catch { return null; }
+}
+
+// An integrity checksum plus full snapshot comparison detects storage corruption.
+// This read-only record is never a receipt or permission to perform an action.
+function snapshotDigest(snapshot) {
+  const serialized = JSON.stringify(snapshot);
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < serialized.length; index += 1) {
+    hash ^= serialized.charCodeAt(index); hash = Math.imul(hash, 0x01000193);
+  }
+  return `growth-following-v1-${serialized.length}-${(hash >>> 0).toString(16).padStart(8, '0')}`;
+}
+
+function normalizedRead(value, seed, createdAt, now) {
+  if (!keys(value, ['username', 'source', 'startedAt', 'capturedAt', 'partial', 'lists'])
+    || value.username !== seed || !['list-dialog', 'authenticated-instagram-web'].includes(value.source)
+    || !integer(value.startedAt) || value.startedAt < createdAt || value.startedAt > now
+    || typeof value.partial !== 'boolean' || !keys(value.lists, TYPES)) return null;
+  const observedAt = timestamp(value.capturedAt);
+  if (observedAt === null || observedAt < value.startedAt || observedAt > now) return null;
+  const native = value.source === 'list-dialog', lists = {};
+  for (const type of TYPES) {
+    const list = value.lists[type];
+    if (!keys(list, ['owner', 'listType', 'source', 'verified', 'complete', 'capturedAt', 'expectedCount', 'pages', 'reason', 'accounts'])
+      || list.owner !== seed || list.listType !== type || list.source !== value.source
+      || typeof list.verified !== 'boolean' || typeof list.complete !== 'boolean'
+      || timestamp(list.capturedAt) === null || timestamp(list.capturedAt) < createdAt || timestamp(list.capturedAt) > observedAt
+      || (list.expectedCount !== null && !integer(list.expectedCount))
+      || (native ? list.pages !== null : !integer(list.pages) || list.pages > 1_000)
+      || !REASONS.has(list.reason) || (list.complete && (!list.verified
+        || list.reason !== (native ? 'native-list-complete' : 'pagination-complete')))) return null;
+    const accounts = rows(list.accounts, { max: 2_000, source: native ? 'list-dialog' : 'authenticated-web', nativeIds: !native, seedRead: true });
+    if (!accounts || (!list.verified && accounts.length)
+      || (list.complete && (list.expectedCount === null || list.expectedCount !== accounts.length))) return null;
+    lists[type] = { owner: seed, listType: type, source: value.source, verified: list.verified,
+      complete: list.complete, capturedAt: list.capturedAt, expectedCount: list.expectedCount,
+      pages: list.pages, reason: list.reason, accounts };
+  }
+  return { username: seed, source: value.source, startedAt: value.startedAt,
+    capturedAt: value.capturedAt, partial: value.partial, lists };
+}
+
+function validateGrowthReadDraft(value, { actor, followingSnapshot, now = Date.now() } = {}) {
+  try {
+    const fields = ['schemaVersion', 'kind', 'id', 'actor', 'createdAt', 'expiresAt', 'status', 'revision',
+      'followingSnapshot', 'followingDigest', 'followers', 'seeds', 'results'];
+    if (!keys(value, fields) || value.schemaVersion !== 1 || value.kind !== 'growth-read-draft'
+      || !handle(actor) || value.actor !== actor || typeof value.id !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(value.id)
+      || !integer(now) || !integer(value.createdAt) || value.createdAt <= 0 || value.createdAt > now
+      || !integer(value.expiresAt) || value.expiresAt <= now || value.expiresAt <= value.createdAt
+      || value.expiresAt > value.createdAt + MAX_AGE || !['active', 'stopped'].includes(value.status)
+      || !integer(value.revision) || value.revision > 100_000) return null;
+    const snapshot = growthFollowingSnapshot(value.followingSnapshot, { actor, now });
+    const current = growthFollowingSnapshot(followingSnapshot, { actor, now });
+    if (!snapshot || !current || value.followingDigest !== snapshotDigest(snapshot)
+      || JSON.stringify(snapshot) !== JSON.stringify(current)
+      || value.expiresAt > timestamp(snapshot.capturedAt) + MAX_AGE) return null;
+    const followers = rows(value.followers, { max: 25_000 });
+    const followingNames = new Set(snapshot.accounts.map(row => row.username));
+    if (!followers || !Array.isArray(value.seeds) || value.seeds.length < 1 || value.seeds.length > 3
+      || value.seeds.some(seed => !handle(seed) || seed === actor || !followingNames.has(seed))
+      || new Set(value.seeds).size !== value.seeds.length || !object(value.results)
+      || Object.keys(value.results).some(seed => !value.seeds.includes(seed))) return null;
+    const results = Object.create(null);
+    for (const seed of value.seeds) {
+      if (!Object.prototype.hasOwnProperty.call(value.results, seed)) continue;
+      const read = normalizedRead(value.results[seed], seed, value.createdAt, now);
+      if (!read) return null;
+      results[seed] = read;
+    }
+    return freeze({ schemaVersion: 1, kind: 'growth-read-draft', id: value.id, actor,
+      createdAt: value.createdAt, expiresAt: value.expiresAt, status: value.status, revision: value.revision,
+      followingSnapshot: snapshot, followingDigest: value.followingDigest, followers, seeds: [...value.seeds], results });
+  } catch { return null; }
+}
+
+function checkedDraft(value, now) {
+  const draft = validateGrowthReadDraft(value, { actor: value?.actor, followingSnapshot: value?.followingSnapshot, now });
+  if (!draft) throw new Error('growth-read-draft-invalid');
+  return draft;
+}
+
+function createGrowthReadDraft({ actor, followingSnapshot, followers = [], seeds, now = Date.now(), id } = {}) {
+  const snapshot = growthFollowingSnapshot(followingSnapshot, { actor, now });
+  if (!snapshot) throw new Error('growth-following-snapshot-invalid');
+  const draft = validateGrowthReadDraft({ schemaVersion: 1, kind: 'growth-read-draft', id, actor, createdAt: now,
+    expiresAt: Math.min(now + MAX_AGE, timestamp(snapshot.capturedAt) + MAX_AGE), status: 'active', revision: 0,
+    followingSnapshot: snapshot, followingDigest: snapshotDigest(snapshot), followers, seeds, results: {} },
+  { actor, followingSnapshot: snapshot, now });
+  if (!draft) throw new Error('growth-read-draft-invalid');
+  return draft;
+}
+
+function recordGrowthSeedRead(value, { seed, result, startedAt, now = Date.now(), partial = false } = {}) {
+  const draft = checkedDraft(value, now);
+  if ((draft.status !== 'active' && partial !== true) || !draft.seeds.includes(seed) || !integer(startedAt)
+    || startedAt < draft.createdAt || startedAt > now || typeof partial !== 'boolean') throw new Error('growth-seed-read-invalid');
+  const native = result?.source === 'list-dialog';
+  const allowed = ['username', 'source', 'capturedAt', 'followers', 'following', 'verified', 'complete', 'expectedCounts', 'pages', 'reasons',
+    ...(native ? [] : ['userId', 'subjectInstagramId'])];
+  const required = ['username', 'source', 'capturedAt', 'followers', 'following', 'complete', 'expectedCounts', 'pages', 'reasons',
+    ...(native ? ['verified'] : ['userId', 'subjectInstagramId'])];
+  if (!keys(result, allowed, required) || result.username !== seed
+    || !['list-dialog', 'authenticated-instagram-web'].includes(result.source)
+    || !keys(result.complete, TYPES) || !keys(result.expectedCounts, TYPES) || !keys(result.pages, TYPES) || !keys(result.reasons, TYPES)
+    || (native ? !keys(result.verified, TYPES) : !identity(result.userId) || result.subjectInstagramId !== result.userId)
+    || (result.verified !== undefined && !keys(result.verified, TYPES))) throw new Error('growth-seed-read-invalid');
+  const lists = {};
+  for (const type of TYPES) {
+    const verified = native ? result.verified[type] : result.verified?.[type] ?? true;
+    lists[type] = { owner: seed, listType: type, source: result.source, verified, complete: result.complete[type],
+      capturedAt: result.capturedAt, expectedCount: result.expectedCounts[type], pages: result.pages[type],
+      reason: result.reasons[type], accounts: result[type] };
+  }
+  const read = normalizedRead({ username: seed, source: result.source, startedAt,
+    capturedAt: result.capturedAt, partial, lists }, seed, draft.createdAt, now);
+  if (!read) throw new Error('growth-seed-read-invalid');
+  const previous = draft.results[seed];
+  // An interrupted retry cannot replace an already completed observation.
+  if (partial && previous && !previous.partial && TYPES.every(type => previous.lists[type].verified)) return draft;
+  if (partial && previous?.source === read.source) {
+    for (const type of TYPES) {
+      if (!read.lists[type].verified && previous.lists[type].verified) read.lists[type] = previous.lists[type];
+    }
+  }
+  return freeze({ ...draft, revision: draft.revision + 1, results: { ...draft.results, [seed]: read } });
+}
+
+function stopGrowthReadDraft(value, { now = Date.now() } = {}) {
+  const draft = checkedDraft(value, now);
+  return freeze({ ...draft, status: 'stopped', revision: draft.revision + 1 });
+}
+
+function resumeGrowthReadDraft(value, { now = Date.now() } = {}) {
+  const draft = checkedDraft(value, now);
+  return freeze({ ...draft, status: 'active', revision: draft.revision + 1 });
+}
+
+function growthDraftSeedSources(draft) {
+  return (draft?.seeds || []).flatMap(seed => {
+    const read = draft.results?.[seed];
+    return read && !read.partial && TYPES.every(type => read.lists?.[type]?.verified === true)
+      ? [{ username: seed, followers: read.lists.followers.accounts, following: read.lists.following.accounts }] : [];
+  });
+}
+
+function growthDraftSeedDone(draft, seed) {
+  return growthDraftSeedSources(draft).some(source => source.username === seed);
+}
+
+return Object.freeze({ growthFollowingSnapshot, snapshotDigest, validateGrowthReadDraft, createGrowthReadDraft, recordGrowthSeedRead, stopGrowthReadDraft, resumeGrowthReadDraft, growthDraftSeedSources, growthDraftSeedDone });
+})();
 localModules["extension/presence-growth-panel.js"] = (() => {
 const { createGrowthCampaign, dueGrowthUnfollows, growthUsername, rankGrowthCandidates } = localModules["extension/presence-growth.js"];
+const { createGrowthReadDraft, growthDraftSeedDone, growthDraftSeedSources, growthFollowingSnapshot, recordGrowthSeedRead, resumeGrowthReadDraft, stopGrowthReadDraft, validateGrowthReadDraft } = localModules["extension/presence-growth-draft.js"];
+
 
 const label = (name) => `@${name}`;
+const searchFailure = error => /^growth-/.test(String(error?.message || ''))
+  ? 'This profile read could not be verified. Keep the selected profile open and read it again.'
+  : String(error?.message || 'This profile could not be read. Earlier reads are kept.');
 
 function mountPresenceGrowthPanel({
   container, inspectAccount, readFollowing, readFollowers, scanSeed,
   readCampaigns, writeCampaigns, confirmAction, runBatch,
+  readFollowingSnapshot = () => null, readReadDraft = () => null, writeReadDraft = null,
+  readCurrentProfile = () => '', readSeedNative = null, inspectReadAccount = null,
   canRunBatch = () => true,
   busy = () => false, onStatus = () => {}, document = globalThis.document,
-  now = Date.now,
+  window = globalThis.window, now = Date.now,
 } = {}) {
   if (!container || !document?.createElement || ![inspectAccount, readFollowing, readFollowers,
     scanSeed, readCampaigns, writeCampaigns, confirmAction, runBatch].every((fn) => typeof fn === 'function')) {
@@ -11314,6 +11785,12 @@ function mountPresenceGrowthPanel({
   const candidatesList = make('div');
   candidatesList.className = 'presence-growth-candidates';
   const dueList = make('p');
+  const readSteps = make('div');
+  const readNote = make('p', 'Open each account below, then choose Read current seed. Your read progress is kept in this userscript.');
+  const seedLinks = make('ul');
+  const readCurrent = make('button', 'Read current seed'); readCurrent.type = 'button'; readCurrent.className = 'button primary';
+  const restart = make('button', 'Start a new search'); restart.type = 'button'; restart.className = 'button quiet';
+  readSteps.append(readNote, seedLinks, readCurrent, restart); readSteps.hidden = true;
   const style = make('style', `
     .presence-growth{border-top:1px solid var(--insta-toolbox-line);padding-top:8px;min-width:0}
     .presence-growth>summary{min-height:44px;display:flex;align-items:center;cursor:pointer;font-weight:700;-webkit-text-fill-color:currentColor}
@@ -11323,6 +11800,9 @@ function mountPresenceGrowthPanel({
     .presence-growth label{display:grid;gap:6px;margin:0 0 12px}
     .presence-growth input:not([type=checkbox]),.presence-growth select{box-sizing:border-box;width:100%;min-height:44px;padding:8px 10px;border:1px solid var(--insta-toolbox-line);border-radius:8px;color:var(--insta-toolbox-text);background:var(--insta-toolbox-bg-sunken);font:inherit}
     .presence-growth button{margin:0 8px 8px 0;white-space:normal}
+    .presence-growth ul{padding-left:20px;overflow-wrap:anywhere}
+    .presence-growth li{padding:4px 0}
+    .presence-growth a{display:inline-flex;align-items:center;min-height:44px;color:var(--insta-toolbox-accent,LinkText)}
     .presence-growth-candidates{display:grid;gap:4px;max-height:220px;overflow:auto;margin:8px 0}
     .presence-growth-candidates label{display:flex;align-items:center;min-height:44px;margin:0;padding:6px;border-bottom:1px solid var(--insta-toolbox-line);overflow-wrap:anywhere}
     .presence-growth-candidates input{margin-right:8px;flex:none}
@@ -11331,16 +11811,25 @@ function mountPresenceGrowthPanel({
     @media(forced-colors:active){.presence-growth input,.presence-growth select{border-color:CanvasText}.presence-growth>summary{color:LinkText;-webkit-text-fill-color:LinkText}}
   `);
   root.append(style, summary, note, seedLabel, daysLabel, find, cancel, progress,
-    candidatesList, follow, dueList, due);
+    readSteps, candidatesList, follow, dueList, due);
   container.prepend(root);
 
   let controller = null;
   let candidates = [];
   let selectedSeeds = [];
   let incompleteSeeds = [];
+  let readDraft = null;
+  let persistedDraft = false;
+  let disposed = false;
+  let readGeneration = 0;
+  let readingSeed = '';
+  const selection = () => [...new Set(seedInput.value.split(/[\s,]+/).map(growthUsername).filter(Boolean))];
   const setProgress = (message) => { progress.textContent = message; onStatus(message); };
   const account = () => {
-    const value = inspectAccount();
+    let value = inspectAccount();
+    if (value?.accountVerified !== true && controller && readingSeed && typeof inspectReadAccount === 'function') {
+      value = inspectReadAccount({ actor: readDraft?.actor, seed: readingSeed });
+    }
     return value?.accountVerified === true && value.usable === true
       ? growthUsername(value.accountId) : '';
   };
@@ -11355,6 +11844,69 @@ function mountPresenceGrowthPanel({
       && item.followed && typeof item.followed === 'object'
       && item.unfollowed && typeof item.unfollowed === 'object').slice(-100);
   };
+
+  const ordered = value => Array.isArray(value) ? value.map(ordered)
+    : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, ordered(value[key])])) : value;
+  const same = (left, right) => JSON.stringify(ordered(left)) === JSON.stringify(ordered(right));
+  const storedDraft = () => readReadDraft(readDraft?.actor || account(), readingSeed);
+  const currentDraft = ({ stored = true, profile = '' } = {}) => {
+    try {
+      const valid = validateGrowthReadDraft(readDraft, {
+        actor: account(), followingSnapshot: readFollowingSnapshot(), now: now(),
+      });
+      if (!valid || !same(selection(), valid.seeds)
+        || (profile && readCurrentProfile() !== profile)
+        || (stored && persistedDraft && !same(storedDraft(), readDraft))) return null;
+      return valid;
+    } catch { return null; }
+  };
+  function storeDraft(value, previous = persistedDraft ? readDraft : storedDraft()) {
+    if (typeof writeReadDraft !== 'function') throw new Error('Your userscript manager could not keep this read. Start a new search after reloading.');
+    if (!same(storedDraft(), previous)) throw new Error('This search changed in another tab. Reopen Grow through mutuals before reading again.');
+    writeReadDraft(value, readDraft?.actor || account(), readingSeed);
+    if (!same(storedDraft(), value)) throw new Error('The read progress could not be saved. No follow was started.');
+    readDraft = value;
+    persistedDraft = Boolean(value);
+  }
+  function clearCandidates() {
+    candidates = []; selectedSeeds = []; incompleteSeeds = [];
+    candidatesList.replaceChildren();
+  }
+  function applyDraftCandidates() {
+    const valid = currentDraft();
+    clearCandidates();
+    if (!valid || valid.status !== 'active' || valid.seeds.some(seed => !growthDraftSeedDone(valid, seed))) {
+      render(); return;
+    }
+    selectedSeeds = growthDraftSeedSources(valid);
+    incompleteSeeds = valid.seeds.filter(seed => ['followers', 'following'].some(type => !valid.results[seed].lists[type].complete));
+    candidates = rankGrowthCandidates({ account: valid.actor, seeds: selectedSeeds,
+      following: valid.followingSnapshot.accounts, followers: valid.followers });
+    renderCandidates();
+    const partial = incompleteSeeds.length
+      ? ` Partial lists: ${incompleteSeeds.map(label).join(', ')}; other connections may be missing.` : '';
+    setProgress(candidates.length
+      ? `${candidates.length} observed mutual connections. Select exact accounts to review.${partial}`
+      : `No observed mutual connections to review.${partial}`);
+  }
+  function renderReadSteps(valid) {
+    readSteps.hidden = !persistedDraft || !valid;
+    seedLinks.replaceChildren();
+    if (!persistedDraft || !valid) return;
+    for (const seed of valid.seeds) {
+      const row = make('li'), link = make('a', `Open ${label(seed)} profile`);
+      link.href = `https://www.instagram.com/${seed}/`;
+      row.append(link, document.createTextNode(growthDraftSeedDone(valid, seed)
+        ? ' · read' : valid.results[seed] ? ' · partly read' : ' · waiting to read'));
+      seedLinks.append(row);
+    }
+    const here = readCurrentProfile();
+    const allRead = valid.seeds.every(seed => growthDraftSeedDone(valid, seed));
+    readCurrent.textContent = allRead && valid.status === 'stopped' ? 'Show read results' : 'Read current seed';
+    readCurrent.hidden = allRead && valid.status === 'active';
+    readCurrent.disabled = Boolean(controller) || busy() || (!allRead && (!valid.seeds.includes(here) || growthDraftSeedDone(valid, here)));
+    restart.disabled = Boolean(controller);
+  }
 
   function render() {
     const owner = account();
@@ -11373,9 +11925,14 @@ function mountPresenceGrowthPanel({
       ? `${nextDue.targets.length} campaign follow${nextDue.targets.length === 1 ? '' : 's'} due for review.`
       : 'No campaign unfollows due yet. Reopen Instagram after your chosen wait to review them.';
     due.disabled = !nextDue || Boolean(controller) || busy() || !canRunBatch();
-    cancel.hidden = !controller;
+    const valid = readDraft ? currentDraft() : null;
+    renderReadSteps(valid);
+    if (readDraft && !valid) { clearCandidates(); controller?.abort(); }
+    cancel.hidden = !controller && !(persistedDraft && valid?.status === 'active');
+    seedInput.disabled = Boolean(controller);
+    find.hidden = Boolean(persistedDraft && valid);
     find.disabled = Boolean(controller) || busy();
-    follow.disabled = !candidates.length || Boolean(controller) || busy() || !canRunBatch();
+    follow.disabled = !candidates.length || Boolean(controller) || busy() || !canRunBatch() || !valid || valid.status !== 'active';
   }
 
   function renderCandidates() {
@@ -11399,55 +11956,143 @@ function mountPresenceGrowthPanel({
     const following = readFollowing();
     const followingNames = new Set((Array.isArray(following) ? following : [])
       .map((entry) => growthUsername(entry?.username || entry)).filter(Boolean));
-    const seeds = [...new Set(seedInput.value.split(/[\s,]+/).map(growthUsername).filter(Boolean))];
+    const seeds = selection();
     if (!owner || !followingNames.size) {
       setProgress('Check your own Following list in Mutual Checker first.'); return;
     }
     if (!seeds.length || seeds.length > 3 || seeds.some((name) => !followingNames.has(name))) {
       setProgress('Enter one to three accounts found in your captured Following list.'); return;
     }
+    const snapshot = growthFollowingSnapshot(readFollowingSnapshot(), { actor: owner, now: now() });
+    if (!snapshot) { setProgress('Read your own Following list again in Mutual Checker, then start this search.'); return; }
+    const fresh = createGrowthReadDraft({ actor: owner, followingSnapshot: snapshot, followers: readFollowers(), seeds,
+      now: now(), id: globalThis.crypto?.randomUUID?.() || `read-${now()}-${Math.random().toString(16).slice(2)}` });
+    if (persistedDraft) storeDraft(null);
+    readDraft = fresh;
+    persistedDraft = false;
+    const storedAtStart = storedDraft();
     const active = new AbortController();
     controller = active;
-    candidates = [];
-    selectedSeeds = [];
-    incompleteSeeds = [];
+    const generation = ++readGeneration;
+    clearCandidates();
     renderCandidates();
+    const assertCurrent = () => {
+      if (disposed || active.signal.aborted || generation !== readGeneration || !currentDraft()) {
+        active.abort(); throw new Error('Search stopped or its account, Following list, or selected seeds changed. Start a new search.');
+      }
+    };
     try {
       for (const [index, seed] of seeds.entries()) {
+        assertCurrent();
         setProgress(`Checking ${label(seed)} (${index + 1} of ${seeds.length})…`);
+        const startedAt = now();
         const result = await scanSeed(seed, active.signal, (update) => {
-          if (active.signal.aborted) return;
+          assertCurrent();
           const part = update?.listType === 'followers' || update?.listType === 'following'
             ? `${update.listType}: ${Math.max(0, Number(update.found) || 0)} read`
             : 'resolving profile';
           setProgress(`Checking ${label(seed)} (${index + 1} of ${seeds.length}) · ${part}`);
         });
-        if (active.signal.aborted || account() !== owner) throw new Error('Search stopped or account changed.');
-        selectedSeeds.push({ username: seed, followers: result.followers, following: result.following });
-        if (result.complete?.followers !== true || result.complete?.following !== true) {
-          incompleteSeeds.push(seed);
-        }
+        assertCurrent();
+        readDraft = recordGrowthSeedRead(readDraft, { seed, result, startedAt, now: now() });
       }
-      candidates = rankGrowthCandidates({ account: owner, seeds: selectedSeeds,
-        following, followers: readFollowers() });
-      renderCandidates();
-      const partial = incompleteSeeds.length
-        ? ` Partial lists: ${incompleteSeeds.map(label).join(', ')}; other connections may be missing.` : '';
-      setProgress(candidates.length
-        ? `${candidates.length} observed mutual connections. Select exact accounts to review.${partial}`
-        : `No observed mutual connections to review.${partial}`);
+      applyDraftCandidates();
     } catch (error) {
-      setProgress(active.signal.aborted ? 'Search stopped.' : String(error?.message || 'Search failed.'));
+      if (error?.lookupRoutesRetired === true && error.code === 'request-failed' && [404, 410].includes(error.httpStatus)
+        && !active.signal.aborted && currentDraft()
+        && typeof readSeedNative === 'function' && typeof writeReadDraft === 'function') {
+        storeDraft(readDraft, storedAtStart);
+        setProgress('Open each selected profile below, then choose Read current seed. Nothing will be followed until you review it.');
+      } else {
+        clearCandidates();
+        setProgress(active.signal.aborted ? 'Search stopped.' : searchFailure(error));
+      }
     } finally {
-      controller = null;
+      if (controller === active) controller = null;
       render();
     }
   }
 
+  async function readCurrentSeed() {
+    if (controller || busy() || disposed || typeof readSeedNative !== 'function') return;
+    const valid = currentDraft(), seed = readCurrentProfile();
+    if (persistedDraft && valid?.status === 'stopped' && valid.seeds.every(name => growthDraftSeedDone(valid, name))) {
+      storeDraft(resumeGrowthReadDraft(valid, { now: now() })); applyDraftCandidates(); return;
+    }
+    if (!persistedDraft || !valid || !valid.seeds.includes(seed) || growthDraftSeedDone(valid, seed)) {
+      clearCandidates(); render();
+      setProgress('Open a selected account using its profile link, then choose Read current seed.'); return;
+    }
+    const active = new AbortController(), generation = ++readGeneration, startedAt = now();
+    if (valid.status === 'stopped') storeDraft(resumeGrowthReadDraft(valid, { now: now() }));
+    controller = active;
+    readingSeed = seed;
+    clearCandidates(); render();
+    const assertCurrent = () => {
+      if (disposed || active.signal.aborted || generation !== readGeneration || !currentDraft({ profile: seed })) {
+        active.abort(); throw new Error('Search stopped or its account, profile, Following list, or selected seeds changed.');
+      }
+    };
+    const monitor = globalThis.setInterval(() => {
+      try { assertCurrent(); } catch { active.abort(); }
+    }, 100);
+    try {
+      assertCurrent();
+      const result = await readSeedNative(seed, active.signal, update => {
+        assertCurrent();
+        setProgress(`Reading ${label(seed)}${update?.listType ? ` · ${update.listType}: ${Math.max(0, Number(update.found) || 0)} read` : '…'}`);
+      });
+      assertCurrent();
+      storeDraft(recordGrowthSeedRead(readDraft, { seed, result, startedAt, now: now() }));
+      if (readDraft.seeds.every(name => growthDraftSeedDone(readDraft, name))) applyDraftCandidates();
+      else setProgress(`Read ${label(seed)}. Open the next selected profile and choose Read current seed.`);
+    } catch (error) {
+      // Interrupted observations stay read-only and never become follow targets.
+      if (error?.partialResult && currentDraft({ stored: true })) {
+        try {
+          storeDraft(recordGrowthSeedRead(readDraft, { seed, result: error.partialResult, startedAt, now: now(), partial: true }));
+        } catch { /* Keep the previously verified reads if this partial record is invalid. */ }
+      }
+      clearCandidates();
+      setProgress(active.signal.aborted ? 'Search stopped. Earlier reads are kept; choose Read current seed to continue.'
+        : searchFailure(error));
+    } finally {
+      globalThis.clearInterval(monitor);
+      if (controller === active) controller = null;
+      readingSeed = '';
+      render();
+    }
+  }
+
+  function stopSearch() {
+    controller?.abort();
+    readGeneration += 1;
+    clearCandidates();
+    const valid = currentDraft();
+    if (persistedDraft && valid) {
+      try { storeDraft(stopGrowthReadDraft(valid, { now: now() })); }
+      catch (error) { setProgress(String(error?.message || 'Search stopped.')); }
+    }
+    setProgress('Search stopped. Earlier reads are kept; choose Read current seed to continue.');
+    render();
+  }
+
+  function discardReadDraft() {
+    controller?.abort(); readGeneration += 1;
+    if (persistedDraft && same(storedDraft(), readDraft)) storeDraft(null);
+    readDraft = null; persistedDraft = false; clearCandidates();
+    setProgress('Choose one to three accounts from your Following list, then find mutual connections.');
+    render();
+  }
+
   async function reviewFollow() {
     const owner = account();
+    const discovery = currentDraft();
     const targets = [...candidatesList.querySelectorAll('input:checked')].map((input) => input.value);
-    if (!owner || busy() || !canRunBatch() || !targets.length || targets.length > 25) {
+    if (!owner || controller || !discovery || discovery.status !== 'active'
+      || discovery.seeds.some(seed => !growthDraftSeedDone(discovery, seed))
+      || busy() || !canRunBatch() || !targets.length || targets.length > 25
+      || targets.some(target => !candidates.some(candidate => candidate.username === target))) {
       setProgress('Select 1 to 25 candidates and stop other runs first.'); return;
     }
     const waitDays = Number(days.value);
@@ -11461,7 +12106,7 @@ function mountPresenceGrowthPanel({
       facts: [{ label: 'Account', value: label(owner) }, { label: 'Targets', value: String(targets.length) }],
       binding });
     const currentTargets = [...candidatesList.querySelectorAll('input:checked')].map((input) => input.value);
-    if (!approval || account() !== owner || busy() || !canRunBatch()
+    if (!approval || controller || account() !== owner || !same(currentDraft(), discovery) || busy() || !canRunBatch()
       || JSON.stringify(currentTargets) !== binding.targets || Number(days.value) !== waitDays
       || Object.keys(binding).some((key) => approval[key] !== binding[key])
       || expiresAt <= now()) return;
@@ -11479,7 +12124,7 @@ function mountPresenceGrowthPanel({
     const entry = campaigns().map((campaign) => ({ campaign,
       targets: dueGrowthUnfollows(campaign, { account: owner, now: now() }) }))
       .find(({ targets }) => targets.length);
-    if (!entry || busy() || !canRunBatch()) return;
+    if (!entry || controller || busy() || !canRunBatch()) return;
     const targets = entry.targets.slice(0, 25);
     const expiresAt = now() + 15 * 60_000;
     const binding = { action: 'presence-growth-unfollow', account: owner,
@@ -11490,7 +12135,7 @@ function mountPresenceGrowthPanel({
       facts: [{ label: 'Account', value: label(owner) }, { label: 'Targets', value: String(targets.length) }],
       binding });
     const fresh = campaigns().find((campaign) => campaign.id === entry.campaign.id);
-    if (!approval || account() !== owner || busy() || !canRunBatch() || !fresh
+    if (!approval || controller || account() !== owner || busy() || !canRunBatch() || !fresh
       || JSON.stringify(dueGrowthUnfollows(fresh, { account: owner, now: now() }).slice(0, 25)) !== binding.targets
       || Object.keys(binding).some((key) => approval[key] !== binding[key])
       || expiresAt <= now()) return;
@@ -11501,16 +12146,41 @@ function mountPresenceGrowthPanel({
   }
 
   const launch = (operation) => {
-    void operation().catch((error) => setProgress(String(error?.message || 'Campaign could not start.')));
+    void operation().catch((error) => setProgress(searchFailure(error)));
   };
   find.addEventListener('click', () => launch(findCandidates));
-  cancel.addEventListener('click', () => controller?.abort());
+  cancel.addEventListener('click', stopSearch);
+  readCurrent.addEventListener('click', () => launch(readCurrentSeed));
+  restart.addEventListener('click', () => launch(async () => discardReadDraft()));
+  seedInput.addEventListener('input', () => { if (readDraft && !same(selection(), readDraft.seeds)) discardReadDraft(); });
   follow.addEventListener('click', () => launch(reviewFollow));
   due.addEventListener('click', () => launch(reviewDue));
+  try {
+    const saved = readReadDraft();
+    const restored = validateGrowthReadDraft(saved, { actor: account(), followingSnapshot: readFollowingSnapshot(), now: now() });
+    if (restored) {
+      readDraft = restored; persistedDraft = true; seedInput.value = restored.seeds.join(', '); root.open = true;
+      setProgress(restored.status === 'stopped' ? 'Search stopped. Choose Read current seed to continue.'
+        : 'Open the next selected profile, then choose Read current seed.');
+      applyDraftCandidates();
+    }
+  } catch { setProgress('Read your Following list in Mutual Checker before starting a new search.'); }
+  const stopReadingOnPagehide = () => { if (controller) stopSearch(); };
+  window?.addEventListener?.('pagehide', stopReadingOnPagehide);
+  const contextStamp = () => `${readCurrentProfile()}|${account()}|${Boolean(readDraft && readDraft.expiresAt <= now())}`;
+  let lastContext = contextStamp();
+  const routeRefresh = globalThis.setInterval(() => {
+    try {
+      const context = contextStamp();
+      if (!disposed && persistedDraft && context !== lastContext) { lastContext = context; render(); }
+    } catch { controller?.abort(); }
+  }, 250);
+  routeRefresh.unref?.();
   render();
-  return Object.freeze({ render, findCandidates, reviewFollow, reviewDue,
+  return Object.freeze({ render, findCandidates, readCurrentSeed, stopSearch, discardReadDraft, reviewFollow, reviewDue,
     busy: () => Boolean(controller),
-    dispose() { controller?.abort(); root.remove(); } });
+    dispose() { disposed = true; controller?.abort(); readGeneration += 1; globalThis.clearInterval(routeRefresh);
+      window?.removeEventListener?.('pagehide', stopReadingOnPagehide); root.remove(); } });
 }
 
 return Object.freeze({ mountPresenceGrowthPanel });
@@ -12628,7 +13298,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
       </nav>
       <div class="scroll">
         <section id="insta-toolbox-panel-checker" class="view" role="tabpanel" aria-labelledby="insta-toolbox-tab-checker" data-panel="checker" hidden><section class="card" aria-labelledby="insta-toolbox-checker-account-title"><h2 id="insta-toolbox-checker-account-title">Check mutuals</h2><p>Read-only. Uses the Instagram session in this tab.</p><div class="field"><label for="insta-toolbox-checker-username">Instagram username</label><input id="insta-toolbox-checker-username" type="text" inputmode="text" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="your_username" data-role="checker-username"></div><div class="toolbar"><button class="button primary" type="button" data-action="check-account-relationships" data-role="checker-run">Check mutuals</button></div></section>
-          <div class="scan-progress" data-role="scan-progress" hidden><div class="run-bar" data-role="scan-bar" role="progressbar" aria-label="Mutual check progress" aria-describedby="insta-toolbox-scan-detail" aria-valuemin="0" aria-valuemax="100"><span data-role="scan-fill"></span></div><p id="insta-toolbox-scan-detail" class="lead" data-role="scan-detail"></p><button class="button danger" type="button" data-action="stop-list-scan" data-role="list-scan-stop" hidden>Stop scan</button></div>
+          <div class="scan-progress" data-role="scan-progress" hidden><div class="run-bar" data-role="scan-bar" role="progressbar" aria-label="Mutual check progress" aria-describedby="insta-toolbox-scan-detail" aria-valuemin="0" aria-valuemax="100"><span data-role="scan-fill"></span></div><p id="insta-toolbox-scan-detail" class="lead" data-role="scan-detail"></p><button class="button danger" type="button" data-action="stop-list-scan" data-role="list-scan-stop" hidden>Stop scan</button><a class="button quiet" data-role="checker-open-profile" hidden>Open profile</a><button class="button quiet" type="button" data-action="download-partial-scan" data-role="partial-scan-download" hidden>Download partial scan</button></div>
           <div class="card" data-role="comparison"></div>
           <div data-role="loaded-insights"></div>
           <section class="card comparison-browser" data-role="comparison-browser" aria-labelledby="insta-toolbox-comparison-browser-title" hidden><h2 id="insta-toolbox-comparison-browser-title">Comparison list</h2><div class="comparison-controls"><div class="field"><label for="insta-toolbox-comparison-category">Show accounts</label><select id="insta-toolbox-comparison-category" data-role="comparison-category" aria-controls="insta-toolbox-comparison-list"><option value="not-following-me-back">Don't follow you back</option><option value="i-do-not-follow-back">You don't follow back</option><option value="mutuals">Mutuals</option></select></div><div class="field"><label for="insta-toolbox-filter">Find a username</label><input id="insta-toolbox-filter" type="search" inputmode="search" autocomplete="off" spellcheck="false" placeholder="Search usernames" data-role="result-filter" aria-controls="insta-toolbox-comparison-list"></div></div><p id="insta-toolbox-comparison-count" class="comparison-count" data-role="comparison-count" tabindex="-1"></p><ul id="insta-toolbox-comparison-list" class="list comparison-list" data-role="comparison-list" aria-describedby="insta-toolbox-comparison-count"></ul><button class="button quiet comparison-more" type="button" data-action="show-more-comparison" data-role="comparison-more" hidden>Show more</button></section>
@@ -13246,6 +13916,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
   let accountActionController = null;
   let accountRunDraft = null;
   let relationshipController = null;
+  let relationshipPartialResult = null;
   let manualScanController = null;
   let relationshipProgress = null;
   let dmThreadPreview = null;
@@ -13263,7 +13934,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
 
   const engine = globalThis.InstaToolboxInstagramInspector;
   const presenceInputs = globalThis.InstaToolboxPresenceInputs?.create({
-    fetchFollowerComparison: options => engine.fetchFollowerComparison(options),
+    fetchFollowerComparison: options => engine.fetchFollowerComparison({ ...options, allowNativeListFallback: true }),
     inspectViewer: () => globalThis.InstaToolboxInstagramViewer.inspect({ document, location }),
   });
   const invalidatePresence = () => {
@@ -13978,6 +14649,8 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
   }
 
   function renderListScanControls() {
+    const partialDownload = query('[data-role="partial-scan-download"]');
+    if (partialDownload) partialDownload.hidden = !relationshipPartialResult;
     const stop = query('[data-role="list-scan-stop"]');
     if (stop) {
       stop.hidden = !manualScanController;
@@ -14086,9 +14759,12 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
   }
 
   function failedRelationshipScanDetail(error) {
-    if (error?.code === 'stopped') return 'Mutual check stopped. Saved comparison unchanged.';
+    const partial = error?.partialResult;
+    const retained = partial
+      ? ` ${formatCount(partial.followers?.length)} followers and ${formatCount(partial.following?.length)} following retained as a partial scan; download it before starting again or reloading.` : '';
+    if (error?.code === 'stopped') return `Mutual check stopped. Saved comparison unchanged.${retained}`;
     const message = safeText(error?.message, 'Instagram did not return readable relationship data.');
-    return `Mutual check failed: ${message} Saved comparison unchanged.`;
+    return `Mutual check failed: ${message} Saved comparison unchanged.${retained}`;
   }
 
   function settleFailedRelationshipProgress(error, { kind = 'mutual' } = {}) {
@@ -14145,22 +14821,27 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
   }
 
   async function checkAccountRelationships() {
-    if (manualScanController) { status('Stop the list scan before checking mutuals.'); return; }
-    if (inboxPanel?.busy()) { status('Stop inbox cleanup before checking mutuals.'); return; }
-    if (presencePanel?.busy()) { status('Pause or stop Presence before checking mutuals.'); return; }
     if (relationshipController) {
       relationshipController.abort();
       status('Stopping the mutual check. Saved comparison data was not changed.');
       return;
+    }
+    if (manualScanController) { status('Stop the list scan before checking mutuals.'); return; }
+    if (inboxPanel?.busy()) { status('Stop inbox cleanup before checking mutuals.'); return; }
+    if (presencePanel?.busy() || presenceGrowthPanel?.busy()) { status('Stop Presence before checking mutuals.'); return; }
+    const dm = dmRunner?.snapshot();
+    if (accountActionController || dmCleanupController || dm?.canStop
+      || ['preparing', 'running', 'waiting', 'stopping'].includes(dm?.status) || state.run?.status === 'running') {
+      status('Stop the current run before checking mutuals.'); return;
     }
     if (typeof engine?.fetchFollowerComparison !== 'function') {
       status('Reload Instagram to activate Mutual Checker.');
       return;
     }
     const input = query('[data-role="checker-username"]');
-    const username = engine.normalizeUsername(input?.value)
-      || engine.detectAuthenticatedUsername?.()
-      || '';
+    const suppliedUsername = String(input?.value || '').trim();
+    const username = suppliedUsername ? engine.normalizeUsername(suppliedUsername)
+      : engine.detectAuthenticatedUsername?.() || '';
     if (!username) {
       status('Enter the Instagram username whose Followers and Following should be checked.');
       input?.focus();
@@ -14168,7 +14849,11 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
     }
     if (input) input.value = username;
     const controller = new AbortController();
+    const originalCapture = state.capture;
     relationshipController = controller;
+    relationshipPartialResult = null;
+    const openProfile = query('[data-role="checker-open-profile"]');
+    if (openProfile) openProfile.hidden = true;
     invalidatePresence();
     resetRelationshipProgress();
     renderAll();
@@ -14177,12 +14862,17 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
     try {
       const result = await (presenceInputs
         ? options => presenceInputs.captureComparison(options)
-        : options => engine.fetchFollowerComparison(options))({
+        : options => engine.fetchFollowerComparison({ ...options, allowNativeListFallback: true }))({
         username,
         retryRateLimits: true,
         signal: controller.signal,
         onProgress(progress) {
           if (relationshipController !== controller) return;
+          if (progress.phase === 'native-lists') {
+            showScanProgress(null, 0, false, false, null, progress.expectedCounts);
+            setText('scan-detail', `Reading @${username}'s native Followers and Following lists. Stop mutual check cancels this read.`);
+            return;
+          }
           if (progress.phase === 'cooldown') {
             const seconds = Math.ceil(progress.remainingMs / 1000);
             const clock = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
@@ -14237,6 +14927,9 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
           }
         },
       });
+      if (relationshipController !== controller || state.capture !== originalCapture) return;
+      if (controller.signal.aborted) throw Object.assign(new Error('Mutual check stopped.'), { code: 'stopped' });
+      const nativeLists = result.source === 'list-dialog';
       const previousCapture = state.capture;
       const nextCapture = {
         ...stateDefaults().capture,
@@ -14247,8 +14940,9 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
         following: normalizeAccounts(result.following),
         capturedAt: { followers: result.capturedAt, following: result.capturedAt },
         complete: { ...result.complete },
-        verified: { followers: true, following: true },
-        source: { followers: 'authenticated-web', following: 'authenticated-web' },
+        verified: { followers: !nativeLists || result.verified?.followers === true,
+          following: !nativeLists || result.verified?.following === true },
+        source: { followers: nativeLists ? 'list-dialog' : 'authenticated-web', following: nativeLists ? 'list-dialog' : 'authenticated-web' },
         ...engine.normalizeFollowerDiagnostics(result),
       };
       state.capture = nextCapture;
@@ -14258,7 +14952,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
         state.capture = previousCapture;
         throw error;
       }
-      if (!controller.signal.aborted) presenceCapture = result;
+      if (!nativeLists && !controller.signal.aborted) presenceCapture = result;
       const partialDetails = [];
       for (const [listType, accounts] of [
         ['followers', result.followers],
@@ -14275,11 +14969,15 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
           const difference = expected - accounts.length;
           partialDetails.push(difference > 0
             ? `${label}: Instagram returned ${accounts.length.toLocaleString('en-US')} of ${expected.toLocaleString('en-US')}; ${difference.toLocaleString('en-US')} were not returned.`
-            : `${label}: the API returned ${accounts.length.toLocaleString('en-US')} unique accounts while the profile shows ${expected.toLocaleString('en-US')}.`);
+            : `${label}: the ${nativeLists ? 'native list' : 'API'} returned ${accounts.length.toLocaleString('en-US')} unique accounts while the profile shows ${expected.toLocaleString('en-US')}.`);
         } else if (reason === 'count-changed') {
           partialDetails.push(`${label}: the profile total changed during the check.`);
         } else if (reason === 'profile-count-disagreement') {
           partialDetails.push(`${label}: Instagram's profile counters disagreed.`);
+        } else if (reason === 'count-unverified') {
+          partialDetails.push(`${label}: a fresh exact profile total could not be verified.`);
+        } else if (reason === 'native-list-truncated') {
+          partialDetails.push(`${label}: the native list could not be read completely.`);
         }
       }
       const mismatch = ` ${partialDetails.join(' ') || 'A bounded read limit was reached.'}`;
@@ -14298,6 +14996,16 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
       );
       setText('scan-detail', completedRelationshipScanDetail(result));
     } catch (error) {
+      if (relationshipController !== controller || state.capture !== originalCapture) return;
+      if (error?.partialResult?.source === 'list-dialog'
+        && (error.partialResult.followers?.length || error.partialResult.following?.length)) {
+        relationshipPartialResult = error.partialResult;
+      }
+      if (error?.code === 'native-profile-required' && openProfile) {
+        openProfile.href = `https://www.instagram.com/${username}/`;
+        openProfile.textContent = `Open @${username} profile`;
+        openProfile.hidden = false;
+      }
       const detail = failedRelationshipScanDetail(error);
       settleFailedRelationshipProgress(error);
       setText('scan-detail', detail);
@@ -15110,6 +15818,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
     }),
     capture: () => {
       if (manualScanController) { status('Stop the list scan before capturing visible rows.'); return; }
+      if (relationshipController) { status('Stop the mutual check before capturing visible rows.'); return; }
       const listType = query('[data-role="list-type"]').value === 'followers' ? 'followers' : 'following';
       const visible = captureVisibleAccounts(listType);
       if (!visible.length) {
@@ -15134,6 +15843,8 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
     },
     'clear-capture': () => {
       if (manualScanController) { status('Stop the list scan before clearing the checker.'); return; }
+      if (relationshipController) { status('Stop the mutual check before clearing the checker.'); return; }
+      relationshipPartialResult = null;
       invalidatePresence();
       state.capture = stateDefaults().capture;
       checkerResultKey = '';
@@ -15180,6 +15891,14 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
         note: method === 'authenticated-web'
           ? 'Read from bounded authenticated Instagram pagination. No follow, unfollow, message, or click action was performed.'
           : 'Only rows rendered in Instagram were captured. Scroll manually and capture again to merge more rows.',
+      });
+    },
+    'download-partial-scan': () => {
+      if (!relationshipPartialResult) return;
+      downloadJson(`insta-toolbox-partial-native-scan-${Date.now()}.json`, {
+        kind: 'insta-toolbox-partial-native-scan', schemaVersion: 1, partial: true,
+        note: 'Interrupted native read. This is separate from the saved comparison; missing accounts are unknown.',
+        ...relationshipPartialResult,
       });
     },
     'download-comparison-json': () => {
@@ -15581,16 +16300,62 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
     });
     if (globalThis.InstaToolboxPresenceGrowthPanel && globalThis.InstaToolboxPresenceGrowth) {
       try {
+        const inspectGrowthReadAccount = ({ actor = '', seed = '' } = {}) => {
+          const ordinary = inspectPresenceAccount();
+          if (ordinary.accountVerified || ordinary.restriction || !actor || !seed) return ordinary;
+          // Native lists hide the app backdrop from accessibility while keeping
+          // its account controls mounted. Re-prove that exact context each time.
+          const proven = [];
+          for (const dialog of document.querySelectorAll('[role="dialog"]')) {
+            for (const profileHeader of document.querySelectorAll('main header')) {
+              for (const listType of ['followers', 'following']) {
+                const value = globalThis.InstaToolboxInstagramViewer?.inspect?.({ document, location,
+                  session: engine.inspectSession?.() || {},
+                  nativeListDialog: { dialog, profileHeader, username: seed, listType } });
+                if (value?.accountVerified === true && value.accountId === actor && !value.restriction) proven.push(value);
+              }
+            }
+          }
+          return proven.length === 1 ? { ...proven[0], usable: location.origin === 'https://www.instagram.com' } : ordinary;
+        };
         presenceGrowthPanel = globalThis.InstaToolboxPresenceGrowthPanel.mount({
         container: query('[data-role="presence-routine"]'), document,
         inspectAccount: inspectPresenceAccount,
+        inspectReadAccount: inspectGrowthReadAccount,
         readFollowing: () => state.capture.subjectUsername === inspectPresenceAccount().accountId
           && state.capture.verified?.following === true ? state.capture.following : [],
         readFollowers: () => state.capture.subjectUsername === inspectPresenceAccount().accountId
           && state.capture.verified?.followers === true ? state.capture.followers : [],
+        readFollowingSnapshot: () => ({
+          subjectUsername: state.capture.subjectUsername,
+          listType: 'following', verified: state.capture.verified?.following === true,
+          source: state.capture.source?.following,
+          capturedAt: state.capture.capturedAt?.following,
+          complete: state.capture.complete?.following === true,
+          accounts: state.capture.following,
+        }),
+        readReadDraft: (actor, seed) => {
+          const value = inspectGrowthReadAccount({ actor, seed });
+          const owner = value.accountVerified && value.usable && (!actor || value.accountId === actor) ? value.accountId : '';
+          return owner ? GM_getValue(`instaToolboxGrowthReadDraftV1:${owner}`, null) : null;
+        },
+        writeReadDraft: (value, owner, seed) => {
+          const actor = inspectGrowthReadAccount({ actor: owner, seed });
+          if (!actor.accountVerified || !actor.usable || !actor.accountId || actor.accountId !== owner
+            || (value !== null && value?.actor !== actor.accountId)) throw new Error('The signed-in account changed. Start a new search.');
+          GM_setValue(`instaToolboxGrowthReadDraftV1:${actor.accountId}`, value);
+        },
+        readCurrentProfile: () => {
+          const match = String(location.pathname).match(/^\/([A-Za-z0-9._]{1,30})\/?$/);
+          return match ? engine.normalizeUsername(match[1]) : '';
+        },
         scanSeed: (username, signal, onProgress) => engine.fetchFollowerComparison({
           username, signal, onProgress, maxAccounts: 2_000,
           maxDurationMs: 4 * 60_000, retryRateLimits: false,
+        }),
+        readSeedNative: (username, signal, onProgress) => engine.fetchFollowerComparison({
+          username, signal, onProgress, maxAccounts: 2_000,
+          maxDurationMs: 4 * 60_000, retryRateLimits: false, allowNativeListFallback: true,
         }),
         readCampaigns: () => readGrowthCampaigns(inspectPresenceAccount().accountId),
         writeCampaigns: (campaigns) => writeGrowthCampaigns(inspectPresenceAccount().accountId, campaigns),

@@ -2,6 +2,20 @@
 
 This project uses [Semantic Versioning](https://semver.org/).
 
+## 4.3.3 - 2026-11-09 (development)
+
+- Read the exact open profile's native Followers and Following lists when both
+  existing account lookup routes are unavailable. Keep fresh owner, count,
+  account and dialog checks throughout the read.
+- Preserve the saved comparison on interruption and offer a separate download
+  for the partial native read.
+- Collect selected Growth seed lists through explicit profile visits when
+  account lookups are unavailable. Retain an expiring read-only draft across
+  navigation, including each seed's source and completeness. Follow and later
+  Unfollow actions still need their own fresh review.
+- Verify account navigation behind the exact native list backdrop without
+  restoring cached identity or broadening ordinary account detection.
+
 ## 4.3.2 - 2026-11-09 (development)
 
 - Identify the signed-in account from verified navigation instead of unrelated

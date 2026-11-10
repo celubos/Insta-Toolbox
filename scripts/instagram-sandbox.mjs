@@ -232,7 +232,7 @@ async function run(){
       await withTimeout(window.loadURL('https://www.instagram.com/following_11/'),'campaign target profile');
       await waitForPageValue(window.webContents,`Boolean(document.querySelector('#insta-toolbox-userscript-root')?.shadowRoot?.querySelector('.presence-growth'))`,'growth campaign mount');
       await openView('account');await evaluate(`instagramSandbox.faults({delayMs:700});${value('.presence-growth')}.open=true`);
-      await click('.presence-growth button:last-child');
+      await click('.presence-growth > button:last-child');
       await waitForPageValue(window.webContents,`${value('[data-role="action-confirmation"]')}.open`,'campaign unfollow exact review');
       await click('[data-action="confirm-accept"]');
       await waitForPageValue(window.webContents,`instagramSandbox.snapshot().pendingUnfollow`,'native Following menu opening');
@@ -246,7 +246,7 @@ async function run(){
     await check('a fresh campaign review can complete one exact Unfollow and record its verified outcome',async()=>{
       await withTimeout(window.loadURL('https://www.instagram.com/following_11/'),'fresh campaign target profile');
       await waitForPageValue(window.webContents,`Boolean(document.querySelector('#insta-toolbox-userscript-root')?.shadowRoot?.querySelector('.presence-growth'))`,'fresh campaign mount');
-      await openView('account');await evaluate(`${value('.presence-growth')}.open=true`);await click('.presence-growth button:last-child');
+      await openView('account');await evaluate(`${value('.presence-growth')}.open=true`);await click('.presence-growth > button:last-child');
       await waitForPageValue(window.webContents,`${value('[data-role="action-confirmation"]')}.open`,'fresh Unfollow approval');await click('[data-action="confirm-accept"]');
       await waitForPageValue(window.webContents,`instagramSandbox.snapshot().actions.some(item=>item.type==='unfollow')`,'independent native Unfollow',15_000);
       const truth=await snapshot();assert.deepEqual(truth.actions.filter(item=>item.type==='unfollow').map(item=>item.target),['following_11']);

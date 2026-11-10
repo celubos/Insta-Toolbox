@@ -4,6 +4,8 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 const source = await readFile(new URL('../userscripts/src/toolbox-shell.js', import.meta.url), 'utf8');
+const inspectorSource = await readFile(new URL('../extension/content-instagram.js', import.meta.url), 'utf8');
+const diagnosticsSource = inspectorSource.match(/  function normalizeFollowerDiagnostics\([\s\S]*?\n  \}/)[0];
 const functionSource = name => {
   const match = source.match(new RegExp(`  (?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`));
   assert.ok(match, name); return match[0];
@@ -22,7 +24,7 @@ const freshCapture = () => ({ subjectUsername: 'fixture.owner', followers: [{ us
 function fixture() {
   let resolve, reject, request;
   const gate = new Promise((done, fail) => { resolve = done; reject = fail; });
-  const messages = [], saved = [], details = [];
+  const messages = [], saved = [], details = [], downloads = [];
   const fields = {
     'list-type': { value: 'following' }, 'scan-progress': { hidden: true },
     'scan-fill': { style: {} },
@@ -32,23 +34,28 @@ function fixture() {
     'scan-detail': { tabIndex: 0, getClientRects: () => [{}], closest: () => null,
       focus(options) { this.focusOptions = options; context.shadow.activeElement = this; } },
     'checker-run': { disabled: false },
+    'checker-username': { value: 'fixture.owner' },
+    'checker-open-profile': { hidden: true }, 'partial-scan-download': { hidden: true },
   };
   const scanButtons = new Map(['scan-following', 'scan-followers', 'scan-list', 'capture', 'clear-capture']
     .map(name => [name, { disabled: false }]));
   const state = { capture: freshCapture(), run: { status: 'idle', queue: ['untouched.target'] } };
   const context = vm.createContext({ AbortController, state, actions: {},
-    manualScanController: null, relationshipController: null, relationshipProgress: null,
+    manualScanController: null, relationshipController: null, relationshipProgress: null, relationshipPartialResult: null,
     inboxPanel: null, presencePanel: null, presenceGrowthPanel: null, dmCleanupController: null, accountActionController: null,
     dmRunner: { snapshot: () => ({ canStop: false }) },
+    presenceInputs: null, presenceCapture: null,
     location: { pathname: '/fixture.owner/' }, preferences: { view: 'checker', open: true },
     engine: { normalizeUsername: value => String(value || '').replace(/^\/+|\/+$/g, '').toLowerCase(),
-      collectAccountList(options) { request = options; return gate; } },
+      collectAccountList(options) { request = options; return gate; },
+      fetchFollowerComparison(options) { request = options; return gate; } },
     query: selector => fields[selector.match(/data-role="([^"]+)"/)?.[1]] || null,
     shadow: { querySelectorAll: selector => [scanButtons.get(selector.match(/data-action="([^"]+)"/)?.[1])].filter(Boolean) },
     normalizeAccounts: rows => rows,
     verifiedCapture: type => state.capture.verified?.[type] ? state.capture[type] : [],
     stateDefaults: () => ({ capture: freshCapture() }),
-    invalidatePresence() {}, nowIso: () => '2026-01-01T00:00:00Z',
+    invalidatePresence() { context.presenceCapture = null; }, nowIso: () => '2026-01-01T00:00:00Z',
+    downloadJson: (filename, value) => downloads.push({ filename, value }),
     saveState: () => saved.push(JSON.parse(JSON.stringify(state.capture))),
     status: message => messages.push(message),
     safeText: (value, fallback = '') => String(value ?? '').trim() || fallback,
@@ -59,14 +66,17 @@ function fixture() {
   for (const name of ['renderListScanControls', 'assertManualScanAvailable', 'resetRelationshipProgress',
     'scanProgressPercent', 'showScanProgress', 'settleFailedRelationshipProgress', 'scanInto',
     'sessionStop', 'currentProfileCaptureSubject', 'prepareCaptureWorkspace', 'reconciledRelationshipAccounts',
+    'completedRelationshipScanDetail', 'failedRelationshipScanDetail', 'normalizeObservedInstagramId',
     'checkAccountRelationships', 'scanSentConversation', 'runDmUnsend', 'runReactionsOnly', 'startAccountRun']) {
     vm.runInContext(functionSource(name), context);
   }
+  vm.runInContext(`${diagnosticsSource}\nengine.normalizeFollowerDiagnostics = normalizeFollowerDiagnostics;`, context);
   vm.runInContext(actionSource('scan-list', 'scan-sent')
     + actionSource('stop-list-scan', 'context-cta')
     + actionSource('capture', 'clear-capture', { quoted: false })
-    + actionSource('clear-capture', 'show-more-comparison'), context);
-  return { context, state, fields, scanButtons, messages, saved, details,
+    + actionSource('clear-capture', 'show-more-comparison')
+    + actionSource('download-partial-scan', 'download-comparison-json'), context);
+  return { context, state, fields, scanButtons, messages, saved, details, downloads,
     request: () => request, resolve, reject,
     scan: type => context.scanInto(type),
     stop: () => context.actions['stop-list-scan'](),
@@ -269,4 +279,88 @@ test('an independently verified empty list is saved as an empty complete capture
   assert.equal(f.state.capture.followers.length, 0);
   assert.equal(f.state.capture.complete.followers, true);
   assert.equal(f.state.capture.verified.followers, true);
+});
+
+const nativeComparison = (overrides = {}) => ({ username: 'fixture.owner', source: 'list-dialog',
+  capturedAt: '2026-01-01T00:00:00Z', followers: [{ username: 'native.row', source: 'extension-scrolled-dom' }],
+  following: [], verified: { followers: true, following: true }, complete: { followers: true, following: true },
+  expectedCounts: { followers: 1, following: 0 }, pages: { followers: null, following: null },
+  reasons: { followers: 'native-list-complete', following: 'native-list-complete' }, ...overrides });
+
+test('primary native check opts in, saves an atomic DOM pair, and supplies no Presence API evidence', async () => {
+  const f = fixture(); const old = f.state.capture;
+  const pending = f.context.checkAccountRelationships();
+  assert.equal(f.request().allowNativeListFallback, true);
+  assert.equal(f.state.capture, old); assert.equal(f.saved.length, 0);
+  f.request().onProgress({ phase: 'native-lists', expectedCounts: { followers: 1, following: 0 } });
+  assert.match(f.details.at(-1), /native Followers and Following/);
+  f.request().onProgress({ phase: 'native-reading', listType: 'followers', found: 1, expectedCount: 1 });
+  assert.match(f.details.at(-1), /1 found so far/);
+  f.resolve(nativeComparison()); await pending;
+  assert.equal(f.saved.length, 1); assert.notEqual(f.state.capture, old);
+  assert.equal(f.state.capture.source.followers, 'list-dialog');
+  assert.equal(f.state.capture.source.following, 'list-dialog');
+  assert.equal(f.state.capture.followers[0].source, 'extension-scrolled-dom');
+  assert.equal('subjectInstagramId' in f.state.capture, false);
+  assert.equal(f.state.capture.reasons.followers, 'native-list-complete');
+  assert.equal(f.context.presenceCapture, null);
+  assert.equal(f.fields['scan-bar'].attributes['aria-valuetext'], 'Mutual check complete');
+});
+
+test('primary stopped native reads preserve the saved pair and export separate explicit partial data', async () => {
+  const f = fixture(); const old = f.state.capture;
+  const pending = f.context.checkAccountRelationships();
+  await f.context.checkAccountRelationships();
+  assert.equal(f.request().signal.aborted, true);
+  const partial = nativeComparison({ complete: { followers: false, following: false },
+    verified: { followers: true, following: false }, reasons: { followers: 'stopped', following: 'stopped' } });
+  f.reject(Object.assign(new Error('Read stopped'), { code: 'stopped', partialResult: partial })); await pending;
+  assert.equal(f.state.capture, old); assert.equal(f.saved.length, 0); assert.equal(f.downloads.length, 0);
+  assert.equal(f.fields['partial-scan-download'].hidden, false);
+  assert.match(f.details.at(-1), /Saved comparison unchanged.*1 followers and 0 following retained as a partial scan/);
+  f.context.actions['download-partial-scan']();
+  assert.equal(f.downloads.length, 1); assert.equal(f.downloads[0].value.partial, true);
+  assert.equal(f.downloads[0].value.verified.following, false);
+  assert.equal(f.downloads[0].value.complete.followers, false);
+  assert.equal(f.downloads[0].value.source, 'list-dialog');
+  assert.notEqual(f.downloads[0].value.followers[0].username, old.followers[0].username);
+});
+
+test('native profile recovery offers an ordinary exact profile link without changing saved data', async () => {
+  const f = fixture(); const old = f.state.capture;
+  const pending = f.context.checkAccountRelationships();
+  f.reject(Object.assign(new Error('Open the requested profile first.'), { code: 'native-profile-required' })); await pending;
+  assert.equal(f.state.capture, old); assert.equal(f.fields['checker-open-profile'].hidden, false);
+  assert.equal(f.fields['checker-open-profile'].href, 'https://www.instagram.com/fixture.owner/');
+  assert.equal(f.fields['checker-open-profile'].textContent, 'Open @fixture.owner profile');
+  assert.equal(f.fields['partial-scan-download'].hidden, true);
+});
+
+test('an invalid typed target never silently changes into the signed-in account', async () => {
+  const f = fixture(); f.fields['checker-username'].value = 'invalid target!';
+  f.fields['checker-username'].focus = () => {};
+  f.context.engine.normalizeUsername = () => '';
+  f.context.engine.detectAuthenticatedUsername = () => 'fixture.viewer';
+  await f.context.checkAccountRelationships();
+  assert.equal(f.request(), undefined); assert.equal(f.saved.length, 0);
+  assert.match(f.messages.at(-1), /Enter the Instagram username/);
+});
+
+test('late primary results, replaced workspaces, and save failure cannot overwrite a saved comparison', async () => {
+  for (const replace of [f => { f.context.relationshipController = new AbortController(); },
+    f => { f.state.capture = freshCapture(); }]) {
+    const f = fixture(); const pending = f.context.checkAccountRelationships();
+    replace(f); const retained = f.state.capture;
+    f.resolve(nativeComparison()); await pending;
+    assert.equal(f.state.capture, retained); assert.equal(f.saved.length, 0);
+  }
+  const stopped = fixture(); const stoppedPending = stopped.context.checkAccountRelationships();
+  stopped.context.relationshipController.abort(); const old = stopped.state.capture;
+  stopped.resolve(nativeComparison()); await stoppedPending;
+  assert.equal(stopped.state.capture, old); assert.equal(stopped.saved.length, 0);
+  const failedSave = fixture(); const failedOld = failedSave.state.capture;
+  failedSave.context.saveState = () => { throw new Error('Storage failed'); };
+  const pending = failedSave.context.checkAccountRelationships(); failedSave.resolve(nativeComparison()); await pending;
+  assert.equal(failedSave.state.capture, failedOld); assert.equal(failedSave.saved.length, 0);
+  assert.match(failedSave.details.at(-1), /Storage failed.*Saved comparison unchanged/);
 });

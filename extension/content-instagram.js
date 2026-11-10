@@ -432,7 +432,14 @@
       // A retired lookup route is not an authentication or transport failure.
       // Use only the already allowlisted profile GET, never another search path.
       if (error?.code !== 'request-failed' || ![404, 410].includes(error.httpStatus)) throw error;
-      const profile = await fetchRelationshipProfile(username, options);
+      let profile;
+      try { profile = await fetchRelationshipProfile(username, options); }
+      catch (profileError) {
+        if (profileError?.code === 'request-failed' && [404, 410].includes(profileError.httpStatus)) {
+          profileError.lookupRoutesRetired = true;
+        }
+        throw profileError;
+      }
       const userId = boundRelationshipProfileId(profile, username);
       return { userId, subjectInstagramId: userId, profile };
     }
@@ -673,6 +680,7 @@
   }
 
   async function fetchFollowerComparison({
+    allowNativeListFallback = false,
     clearTimer = clearTimeout,
     fetchImpl = globalThis.fetch?.bind(globalThis),
     maxAccounts = RELATIONSHIP_MAX_ACCOUNTS,
@@ -741,13 +749,15 @@
         startedAt,
       };
       const openProfileCounts = openProfileRelationshipCounts(username);
-      const resolution = await resolveRelationshipUserId(username, {
-        ...common,
-        found: 0,
-        listType: null,
-        pages: 0,
-        username,
-      });
+      let resolution;
+      try {
+        resolution = await resolveRelationshipUserId(username, {
+          ...common, found: 0, listType: null, pages: 0, username,
+        });
+      } catch (error) {
+        if (allowNativeListFallback !== true || error?.lookupRoutesRetired !== true) throw error;
+        return await collectNativeFollowerComparison({ ...common, username });
+      }
       const { userId } = resolution;
       onProgress?.(Object.freeze({ found: 0, listType: null, pages: 0, phase: 'verifying-profile', username }));
       const profileCountsAtStart = openProfileCounts || await resolveRelationshipProfileCounts(username, userId, {
@@ -833,7 +843,8 @@
       return result;
     } catch (error) {
       if (deadline.timedOut() && error?.code === 'stopped') {
-        throw relationshipError('time-limit', 'The follower check reached its 20-minute read limit.');
+        throw Object.assign(relationshipError('time-limit', 'The follower check reached its 20-minute read limit.'),
+          error.partialResult ? { partialResult: error.partialResult } : {});
       }
       throw error;
     } finally {
@@ -843,7 +854,8 @@
 
   function normalizeFollowerDiagnostics(value) {
     const reasons = new Set(['pagination-complete', 'instagram-limited-list', 'cursor-missing',
-      'count-mismatch', 'count-unverified', 'count-changed', 'profile-count-disagreement', 'account-limit', 'page-limit']);
+      'count-mismatch', 'count-unverified', 'count-changed', 'profile-count-disagreement', 'account-limit', 'page-limit',
+      'native-list-complete', 'native-list-truncated', 'stopped', 'native-context-changed']);
     const count = (number) => Number.isSafeInteger(number) && number >= 0 ? number : null;
     return {
       expectedCounts: Object.fromEntries(['followers', 'following'].map((type) => [type, count(value?.expectedCounts?.[type])])),
@@ -871,6 +883,10 @@
         'profile-count-disagreement': 'Instagram profile counters disagreed.',
         'account-limit': 'The bounded account read limit was reached.',
         'page-limit': 'The bounded page read limit was reached.',
+        'native-list-complete': 'The native list finished and fresh profile totals matched.',
+        'native-list-truncated': 'The native list ended before all accounts could be verified.',
+        stopped: 'The native read was stopped; this is a partial capture.',
+        'native-context-changed': 'The native profile or list changed during the read.',
       };
       return [`${label}: ${count}. ${explanations[reason]}`];
     });
@@ -2170,7 +2186,7 @@
 
   // Scrolls the open followers/following dialog to enumerate the full list.
   // Read-only: it only scrolls an already-open list and reads rendered rows.
-  async function collectAccountList({ maxScrolls = 1_200, settleMs = 500, listType = '', signal, onProgress } = {}) {
+  async function collectAccountList({ maxScrolls = 1_200, settleMs = 500, listType = '', signal, onProgress, validateContext = null } = {}) {
     const session = inspectSession();
     if (session.sessionExpired || session.challenge || session.actionBlocked || session.rateLimited) {
       return { ...session, accounts: [], complete: false, reason: 'session-stop' };
@@ -2201,6 +2217,9 @@
     let reportedCount = -1;
     const currentContext = () => {
       if (signal?.aborted) { stopReason = 'stopped'; return null; }
+      if (validateContext !== null && (typeof validateContext !== 'function' || validateContext() !== true)) {
+        stopReason = 'profile-changed'; return null;
+      }
       if (location.pathname !== profilePath) { stopReason = 'profile-changed'; return null; }
       if (ownerHeaderAtStart && !ownerHeaderPresent()) { stopReason = 'profile-changed'; return null; }
       const check = inspectSession();
@@ -2349,6 +2368,178 @@
               ? 'list-complete'
               : 'list-truncated'),
     };
+  }
+
+  // Used by explicit userscript native reads after both existing lookup GETs
+  // explicitly retire. These are native reads, never authenticated API evidence.
+  async function collectNativeFollowerComparison({ username, signal, onProgress, now, startedAt, maxDurationMs, maxAccounts }) {
+    const types = ['followers', 'following'];
+    const lists = {};
+    const initialPath = location.pathname;
+    const viewer = detectAuthenticatedUsername();
+    let ownerHeader = null;
+    let initialCounts = null;
+    let activeListType = '';
+    const readViewer = (modal = null) => {
+      const ordinary = detectAuthenticatedUsername();
+      if (ordinary || !modal) return ordinary;
+      try {
+        const account = globalThis.InstaToolboxInstagramViewer?.inspect?.({ document, location, session: inspectSession(),
+          nativeListDialog: { dialog: modal, profileHeader: ownerHeader, username, listType: activeListType } });
+        return account?.accountVerified === true ? normalizeUsername(account.accountId) : '';
+      } catch { return ''; }
+    };
+    const fail = (code, message) => { throw relationshipError(code, message); };
+    const rendered = (element) => {
+      if (element?.isConnected !== true || !element.getClientRects?.().length) return false;
+      for (let node = element; node; node = node.parentElement) {
+        const style = getComputedStyle(node);
+        if (node.hidden || node.getAttribute?.('aria-hidden') === 'true' || style.display === 'none'
+          || ['hidden', 'collapse'].includes(style.visibility)
+          || (style.opacity !== undefined && style.opacity !== '' && Number(style.opacity) === 0)) return false;
+      }
+      return true;
+    };
+    const dialogs = () => visibleDialogs().filter(rendered);
+    const assertContext = (modal = null) => {
+      assertRelationshipRunActive(signal, startedAt, now, maxDurationMs);
+      if (!viewer || readViewer(modal) !== viewer) fail('profile-mismatch', 'The signed-in account changed or could not be verified. Native check stopped.');
+      if (location.origin !== INSTAGRAM_WEB_ORIGIN || location.pathname !== initialPath
+        || !new RegExp(`^/${username.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/?$`, 'i').test(location.pathname)) {
+        fail('native-profile-required', `Open @${username}'s profile in this tab, then run Check mutuals again.`);
+      }
+      const header = verifiedProfileHeader(username).root;
+      if (!header || (ownerHeader && header !== ownerHeader) || !header.isConnected || !header.getClientRects?.().length) {
+        fail('profile-mismatch', 'Keep the exact profile header open until the native check finishes.');
+      }
+      const open = dialogs();
+      if (modal ? open.length !== 1 || open[0] !== modal : open.length !== 0) {
+        fail('native-dialog-changed', 'Close the open Instagram dialog, then run Check mutuals again from the profile.');
+      }
+      if (!modal && !rendered(header)) fail('profile-mismatch', 'The profile header is hidden. Open the profile before checking.');
+      return header;
+    };
+    const result = (interrupted = '') => {
+      const bound = location.origin === INSTAGRAM_WEB_ORIGIN && location.pathname === initialPath
+        && detectAuthenticatedUsername() === viewer && verifiedProfileHeader(username).root === ownerHeader;
+      const ending = initialCounts && bound ? Object.fromEntries(types.map(type => [type,
+        exactProfileListCount(type, { requireScoped: true })])) : {};
+      return Object.freeze({
+        username, source: 'list-dialog', capturedAt: new Date(now()).toISOString(),
+        followers: Object.freeze(lists.followers?.accounts || []), following: Object.freeze(lists.following?.accounts || []),
+        verified: Object.freeze(Object.fromEntries(types.map(type => [type, Boolean(lists[type])]))),
+        complete: Object.freeze(Object.fromEntries(types.map(type => [type, !interrupted && lists[type]?.complete === true
+          && Number.isSafeInteger(ending[type]) && ending[type] === initialCounts[type]
+          && lists[type].accounts.length === ending[type]]))),
+        expectedCounts: Object.freeze(Object.fromEntries(types.map(type => [type,
+          Number.isSafeInteger(ending[type]) ? ending[type] : initialCounts?.[type] ?? null]))),
+        pages: Object.freeze({ followers: null, following: null }),
+        reasons: Object.freeze(Object.fromEntries(types.map(type => {
+          const list = lists[type];
+          const reason = interrupted || (!list ? 'native-list-truncated'
+            : !Number.isSafeInteger(ending[type]) ? 'count-unverified'
+              : ending[type] !== initialCounts[type] || list.reason === 'list-count-changed' ? 'count-changed'
+                : list.reason === 'list-count-unverified' ? 'count-unverified'
+                : list.reason === 'account-limit' ? 'account-limit'
+                  : list.accounts.length !== ending[type] ? 'count-mismatch'
+                    : list.complete ? 'native-list-complete' : 'native-list-truncated');
+          return [type, reason];
+        }))),
+      });
+    };
+    try {
+      ownerHeader = assertContext();
+      initialCounts = openProfileRelationshipCounts(username);
+      if (!initialCounts) fail('profile-count-unavailable', 'Keep the exact Followers and Following totals visible on the open profile, then try again.');
+      onProgress?.({ phase: 'native-lists', username, expectedCounts: initialCounts, found: 0, listType: null });
+      for (const type of types) {
+        activeListType = type;
+        const header = assertContext();
+        const controls = [...header.querySelectorAll('a[role="link"], a[href="#"]')].filter(control => {
+          if (!rendered(control) || !new RegExp(`^[0-9][0-9., \\u00a0\\u202f]*[kmb]?\\s+${type}$`, 'i').test(visibleText(control).trim())) return false;
+          const href = control.getAttribute('href');
+          if (href === '#') return true;
+          try {
+            const target = new URL(href, INSTAGRAM_WEB_ORIGIN);
+            return target.origin === INSTAGRAM_WEB_ORIGIN && !target.username && !target.password && !target.search && !target.hash
+              && [`/${username}`, `/${username}/${type}`].includes(target.pathname.replace(/\/+$/, '').toLowerCase());
+          } catch { return false; }
+        });
+        if (controls.length !== 1 || !Number.isSafeInteger(exactProfileListCount(type, { requireScoped: true }))) {
+          fail('native-list-control-unavailable', `Open the exact @${username} profile with a single visible ${type} control, then try again.`);
+        }
+        assertContext();
+        controls[0].click();
+        const modal = await waitFor(() => {
+          assertRelationshipRunActive(signal, startedAt, now, maxDurationMs);
+          const open = dialogs();
+          if (!open.length) return null;
+          if (open.length !== 1 || accountListDialog(type)?.dialog !== open[0]) {
+            fail('native-dialog-changed', `Instagram did not open the exact ${type} list. No other list was opened.`);
+          }
+          assertContext(open[0]);
+          return open[0];
+        }, 6_000, signal);
+        if (!modal) {
+          assertRelationshipRunActive(signal, startedAt, now, maxDurationMs);
+          fail('native-list-unavailable', `Instagram did not open ${type}. Open that list normally and try again.`);
+        }
+        assertContext(modal);
+        const listController = new AbortController();
+        const stopList = () => listController.abort();
+        signal?.addEventListener?.('abort', stopList, { once: true });
+        let limited = false;
+        let contextError = null;
+        let scanned;
+        try {
+          scanned = await collectAccountList({ listType: type, signal: listController.signal,
+            validateContext() {
+              try { assertContext(modal); }
+              catch (error) { contextError = error; return false; }
+              return true;
+            },
+            onProgress(progress) {
+              onProgress?.({ ...progress, found: Math.min(progress.found, maxAccounts), phase: 'native-reading', username });
+              if (progress.found >= maxAccounts) { limited = true; listController.abort(); }
+            } });
+        } finally { signal?.removeEventListener?.('abort', stopList); }
+        if (scanned.profilePath === initialPath && scanned.listType === type) {
+          lists[type] = { ...scanned, accounts: scanned.accounts.slice(0, maxAccounts),
+            complete: scanned.complete === true && !limited,
+            reason: limited ? 'account-limit' : scanned.reason };
+        }
+        if (contextError) throw contextError;
+        assertContext(modal);
+        if (!lists[type] || ['profile-changed', 'list-changed', 'list-closed', 'session-stop', 'stopped'].includes(scanned.reason) && !limited) {
+          fail('native-dialog-changed', 'The native list changed before the check finished.');
+        }
+        const closeControls = [...modal.querySelectorAll('button, [role="button"]')].filter(control => rendered(control)
+          && [control.getAttribute('aria-label'), visibleText(control),
+            ...[...control.querySelectorAll('[aria-label]')].map(node => node.getAttribute('aria-label'))]
+            .some(label => /^close$/i.test(String(label || '').trim())));
+        if (closeControls.length !== 1) fail('native-close-unavailable', 'Close the native list normally before checking again.');
+        assertContext(modal);
+        closeControls[0].click();
+        const closed = await waitFor(() => {
+          assertRelationshipRunActive(signal, startedAt, now, maxDurationMs);
+          const open = dialogs();
+          if (!open.length) { assertContext(); return true; }
+          if (open.length !== 1 || open[0] !== modal) fail('native-dialog-changed', 'The native dialog changed. Check stopped.');
+          return false;
+        }, 6_000, signal);
+        if (!closed) {
+          assertRelationshipRunActive(signal, startedAt, now, maxDurationMs);
+          fail('native-close-unavailable', 'Close the native list normally before checking again.');
+        }
+      }
+      assertContext();
+      return result();
+    } catch (error) {
+      if (types.some(type => lists[type]?.accounts.length)) {
+        error.partialResult = result(signal?.aborted || error?.code === 'stopped' ? 'stopped' : 'native-context-changed');
+      }
+      throw error;
+    }
   }
 
   // Enumerates messages the signed-in account sent in the open conversation.

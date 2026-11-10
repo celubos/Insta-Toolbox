@@ -20,7 +20,7 @@ const moduleFiles = [
     'inbox-single-tab', 'inbox-userscript-workers', 'inbox-userscript-panel', 'inbox-checkpoint-store',
     'presence-native-inputs',
     'presence-native-actions', 'presence-session', 'presence-activity-log', 'presence-session-panel',
-    'presence-growth', 'presence-growth-panel', 'insights']
+    'presence-growth', 'presence-growth-draft', 'presence-growth-panel', 'insights']
     .map(name => `extension/${name}.js`),
   'src/core/presence.js',
 ];

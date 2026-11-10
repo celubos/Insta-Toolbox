@@ -17,6 +17,7 @@ function observedAccounts(rows) {
   for (const row of Array.isArray(rows) ? rows : []) {
     const username = growthUsername(typeof row === 'string' ? row : row?.username);
     if (!username) continue;
+    if (row?.instagramIdAmbiguous === true) { accounts.set(username, null); continue; }
     const id = typeof row === 'object' && row !== null
       && /^[1-9]\d{0,29}$/.test(String(row.instagramId || '')) ? String(row.instagramId) : '';
     const prior = accounts.get(username);

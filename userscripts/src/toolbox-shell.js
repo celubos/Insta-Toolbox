@@ -920,7 +920,7 @@
       </nav>
       <div class="scroll">
         <section id="insta-toolbox-panel-checker" class="view" role="tabpanel" aria-labelledby="insta-toolbox-tab-checker" data-panel="checker" hidden><section class="card" aria-labelledby="insta-toolbox-checker-account-title"><h2 id="insta-toolbox-checker-account-title">Check mutuals</h2><p>Read-only. Uses the Instagram session in this tab.</p><div class="field"><label for="insta-toolbox-checker-username">Instagram username</label><input id="insta-toolbox-checker-username" type="text" inputmode="text" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="your_username" data-role="checker-username"></div><div class="toolbar"><button class="button primary" type="button" data-action="check-account-relationships" data-role="checker-run">Check mutuals</button></div></section>
-          <div class="scan-progress" data-role="scan-progress" hidden><div class="run-bar" data-role="scan-bar" role="progressbar" aria-label="Mutual check progress" aria-describedby="insta-toolbox-scan-detail" aria-valuemin="0" aria-valuemax="100"><span data-role="scan-fill"></span></div><p id="insta-toolbox-scan-detail" class="lead" data-role="scan-detail"></p><button class="button danger" type="button" data-action="stop-list-scan" data-role="list-scan-stop" hidden>Stop scan</button></div>
+          <div class="scan-progress" data-role="scan-progress" hidden><div class="run-bar" data-role="scan-bar" role="progressbar" aria-label="Mutual check progress" aria-describedby="insta-toolbox-scan-detail" aria-valuemin="0" aria-valuemax="100"><span data-role="scan-fill"></span></div><p id="insta-toolbox-scan-detail" class="lead" data-role="scan-detail"></p><button class="button danger" type="button" data-action="stop-list-scan" data-role="list-scan-stop" hidden>Stop scan</button><a class="button quiet" data-role="checker-open-profile" hidden>Open profile</a><button class="button quiet" type="button" data-action="download-partial-scan" data-role="partial-scan-download" hidden>Download partial scan</button></div>
           <div class="card" data-role="comparison"></div>
           <div data-role="loaded-insights"></div>
           <section class="card comparison-browser" data-role="comparison-browser" aria-labelledby="insta-toolbox-comparison-browser-title" hidden><h2 id="insta-toolbox-comparison-browser-title">Comparison list</h2><div class="comparison-controls"><div class="field"><label for="insta-toolbox-comparison-category">Show accounts</label><select id="insta-toolbox-comparison-category" data-role="comparison-category" aria-controls="insta-toolbox-comparison-list"><option value="not-following-me-back">Don't follow you back</option><option value="i-do-not-follow-back">You don't follow back</option><option value="mutuals">Mutuals</option></select></div><div class="field"><label for="insta-toolbox-filter">Find a username</label><input id="insta-toolbox-filter" type="search" inputmode="search" autocomplete="off" spellcheck="false" placeholder="Search usernames" data-role="result-filter" aria-controls="insta-toolbox-comparison-list"></div></div><p id="insta-toolbox-comparison-count" class="comparison-count" data-role="comparison-count" tabindex="-1"></p><ul id="insta-toolbox-comparison-list" class="list comparison-list" data-role="comparison-list" aria-describedby="insta-toolbox-comparison-count"></ul><button class="button quiet comparison-more" type="button" data-action="show-more-comparison" data-role="comparison-more" hidden>Show more</button></section>
@@ -1538,6 +1538,7 @@
   let accountActionController = null;
   let accountRunDraft = null;
   let relationshipController = null;
+  let relationshipPartialResult = null;
   let manualScanController = null;
   let relationshipProgress = null;
   let dmThreadPreview = null;
@@ -1555,7 +1556,7 @@
 
   const engine = globalThis.InstaToolboxInstagramInspector;
   const presenceInputs = globalThis.InstaToolboxPresenceInputs?.create({
-    fetchFollowerComparison: options => engine.fetchFollowerComparison(options),
+    fetchFollowerComparison: options => engine.fetchFollowerComparison({ ...options, allowNativeListFallback: true }),
     inspectViewer: () => globalThis.InstaToolboxInstagramViewer.inspect({ document, location }),
   });
   const invalidatePresence = () => {
@@ -2270,6 +2271,8 @@
   }
 
   function renderListScanControls() {
+    const partialDownload = query('[data-role="partial-scan-download"]');
+    if (partialDownload) partialDownload.hidden = !relationshipPartialResult;
     const stop = query('[data-role="list-scan-stop"]');
     if (stop) {
       stop.hidden = !manualScanController;
@@ -2378,9 +2381,12 @@
   }
 
   function failedRelationshipScanDetail(error) {
-    if (error?.code === 'stopped') return 'Mutual check stopped. Saved comparison unchanged.';
+    const partial = error?.partialResult;
+    const retained = partial
+      ? ` ${formatCount(partial.followers?.length)} followers and ${formatCount(partial.following?.length)} following retained as a partial scan; download it before starting again or reloading.` : '';
+    if (error?.code === 'stopped') return `Mutual check stopped. Saved comparison unchanged.${retained}`;
     const message = safeText(error?.message, 'Instagram did not return readable relationship data.');
-    return `Mutual check failed: ${message} Saved comparison unchanged.`;
+    return `Mutual check failed: ${message} Saved comparison unchanged.${retained}`;
   }
 
   function settleFailedRelationshipProgress(error, { kind = 'mutual' } = {}) {
@@ -2437,22 +2443,27 @@
   }
 
   async function checkAccountRelationships() {
-    if (manualScanController) { status('Stop the list scan before checking mutuals.'); return; }
-    if (inboxPanel?.busy()) { status('Stop inbox cleanup before checking mutuals.'); return; }
-    if (presencePanel?.busy()) { status('Pause or stop Presence before checking mutuals.'); return; }
     if (relationshipController) {
       relationshipController.abort();
       status('Stopping the mutual check. Saved comparison data was not changed.');
       return;
+    }
+    if (manualScanController) { status('Stop the list scan before checking mutuals.'); return; }
+    if (inboxPanel?.busy()) { status('Stop inbox cleanup before checking mutuals.'); return; }
+    if (presencePanel?.busy() || presenceGrowthPanel?.busy()) { status('Stop Presence before checking mutuals.'); return; }
+    const dm = dmRunner?.snapshot();
+    if (accountActionController || dmCleanupController || dm?.canStop
+      || ['preparing', 'running', 'waiting', 'stopping'].includes(dm?.status) || state.run?.status === 'running') {
+      status('Stop the current run before checking mutuals.'); return;
     }
     if (typeof engine?.fetchFollowerComparison !== 'function') {
       status('Reload Instagram to activate Mutual Checker.');
       return;
     }
     const input = query('[data-role="checker-username"]');
-    const username = engine.normalizeUsername(input?.value)
-      || engine.detectAuthenticatedUsername?.()
-      || '';
+    const suppliedUsername = String(input?.value || '').trim();
+    const username = suppliedUsername ? engine.normalizeUsername(suppliedUsername)
+      : engine.detectAuthenticatedUsername?.() || '';
     if (!username) {
       status('Enter the Instagram username whose Followers and Following should be checked.');
       input?.focus();
@@ -2460,7 +2471,11 @@
     }
     if (input) input.value = username;
     const controller = new AbortController();
+    const originalCapture = state.capture;
     relationshipController = controller;
+    relationshipPartialResult = null;
+    const openProfile = query('[data-role="checker-open-profile"]');
+    if (openProfile) openProfile.hidden = true;
     invalidatePresence();
     resetRelationshipProgress();
     renderAll();
@@ -2469,12 +2484,17 @@
     try {
       const result = await (presenceInputs
         ? options => presenceInputs.captureComparison(options)
-        : options => engine.fetchFollowerComparison(options))({
+        : options => engine.fetchFollowerComparison({ ...options, allowNativeListFallback: true }))({
         username,
         retryRateLimits: true,
         signal: controller.signal,
         onProgress(progress) {
           if (relationshipController !== controller) return;
+          if (progress.phase === 'native-lists') {
+            showScanProgress(null, 0, false, false, null, progress.expectedCounts);
+            setText('scan-detail', `Reading @${username}'s native Followers and Following lists. Stop mutual check cancels this read.`);
+            return;
+          }
           if (progress.phase === 'cooldown') {
             const seconds = Math.ceil(progress.remainingMs / 1000);
             const clock = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
@@ -2529,6 +2549,9 @@
           }
         },
       });
+      if (relationshipController !== controller || state.capture !== originalCapture) return;
+      if (controller.signal.aborted) throw Object.assign(new Error('Mutual check stopped.'), { code: 'stopped' });
+      const nativeLists = result.source === 'list-dialog';
       const previousCapture = state.capture;
       const nextCapture = {
         ...stateDefaults().capture,
@@ -2539,8 +2562,9 @@
         following: normalizeAccounts(result.following),
         capturedAt: { followers: result.capturedAt, following: result.capturedAt },
         complete: { ...result.complete },
-        verified: { followers: true, following: true },
-        source: { followers: 'authenticated-web', following: 'authenticated-web' },
+        verified: { followers: !nativeLists || result.verified?.followers === true,
+          following: !nativeLists || result.verified?.following === true },
+        source: { followers: nativeLists ? 'list-dialog' : 'authenticated-web', following: nativeLists ? 'list-dialog' : 'authenticated-web' },
         ...engine.normalizeFollowerDiagnostics(result),
       };
       state.capture = nextCapture;
@@ -2550,7 +2574,7 @@
         state.capture = previousCapture;
         throw error;
       }
-      if (!controller.signal.aborted) presenceCapture = result;
+      if (!nativeLists && !controller.signal.aborted) presenceCapture = result;
       const partialDetails = [];
       for (const [listType, accounts] of [
         ['followers', result.followers],
@@ -2567,11 +2591,15 @@
           const difference = expected - accounts.length;
           partialDetails.push(difference > 0
             ? `${label}: Instagram returned ${accounts.length.toLocaleString('en-US')} of ${expected.toLocaleString('en-US')}; ${difference.toLocaleString('en-US')} were not returned.`
-            : `${label}: the API returned ${accounts.length.toLocaleString('en-US')} unique accounts while the profile shows ${expected.toLocaleString('en-US')}.`);
+            : `${label}: the ${nativeLists ? 'native list' : 'API'} returned ${accounts.length.toLocaleString('en-US')} unique accounts while the profile shows ${expected.toLocaleString('en-US')}.`);
         } else if (reason === 'count-changed') {
           partialDetails.push(`${label}: the profile total changed during the check.`);
         } else if (reason === 'profile-count-disagreement') {
           partialDetails.push(`${label}: Instagram's profile counters disagreed.`);
+        } else if (reason === 'count-unverified') {
+          partialDetails.push(`${label}: a fresh exact profile total could not be verified.`);
+        } else if (reason === 'native-list-truncated') {
+          partialDetails.push(`${label}: the native list could not be read completely.`);
         }
       }
       const mismatch = ` ${partialDetails.join(' ') || 'A bounded read limit was reached.'}`;
@@ -2590,6 +2618,16 @@
       );
       setText('scan-detail', completedRelationshipScanDetail(result));
     } catch (error) {
+      if (relationshipController !== controller || state.capture !== originalCapture) return;
+      if (error?.partialResult?.source === 'list-dialog'
+        && (error.partialResult.followers?.length || error.partialResult.following?.length)) {
+        relationshipPartialResult = error.partialResult;
+      }
+      if (error?.code === 'native-profile-required' && openProfile) {
+        openProfile.href = `https://www.instagram.com/${username}/`;
+        openProfile.textContent = `Open @${username} profile`;
+        openProfile.hidden = false;
+      }
       const detail = failedRelationshipScanDetail(error);
       settleFailedRelationshipProgress(error);
       setText('scan-detail', detail);
@@ -3402,6 +3440,7 @@
     }),
     capture: () => {
       if (manualScanController) { status('Stop the list scan before capturing visible rows.'); return; }
+      if (relationshipController) { status('Stop the mutual check before capturing visible rows.'); return; }
       const listType = query('[data-role="list-type"]').value === 'followers' ? 'followers' : 'following';
       const visible = captureVisibleAccounts(listType);
       if (!visible.length) {
@@ -3426,6 +3465,8 @@
     },
     'clear-capture': () => {
       if (manualScanController) { status('Stop the list scan before clearing the checker.'); return; }
+      if (relationshipController) { status('Stop the mutual check before clearing the checker.'); return; }
+      relationshipPartialResult = null;
       invalidatePresence();
       state.capture = stateDefaults().capture;
       checkerResultKey = '';
@@ -3472,6 +3513,14 @@
         note: method === 'authenticated-web'
           ? 'Read from bounded authenticated Instagram pagination. No follow, unfollow, message, or click action was performed.'
           : 'Only rows rendered in Instagram were captured. Scroll manually and capture again to merge more rows.',
+      });
+    },
+    'download-partial-scan': () => {
+      if (!relationshipPartialResult) return;
+      downloadJson(`insta-toolbox-partial-native-scan-${Date.now()}.json`, {
+        kind: 'insta-toolbox-partial-native-scan', schemaVersion: 1, partial: true,
+        note: 'Interrupted native read. This is separate from the saved comparison; missing accounts are unknown.',
+        ...relationshipPartialResult,
       });
     },
     'download-comparison-json': () => {
@@ -3873,16 +3922,62 @@
     });
     if (globalThis.InstaToolboxPresenceGrowthPanel && globalThis.InstaToolboxPresenceGrowth) {
       try {
+        const inspectGrowthReadAccount = ({ actor = '', seed = '' } = {}) => {
+          const ordinary = inspectPresenceAccount();
+          if (ordinary.accountVerified || ordinary.restriction || !actor || !seed) return ordinary;
+          // Native lists hide the app backdrop from accessibility while keeping
+          // its account controls mounted. Re-prove that exact context each time.
+          const proven = [];
+          for (const dialog of document.querySelectorAll('[role="dialog"]')) {
+            for (const profileHeader of document.querySelectorAll('main header')) {
+              for (const listType of ['followers', 'following']) {
+                const value = globalThis.InstaToolboxInstagramViewer?.inspect?.({ document, location,
+                  session: engine.inspectSession?.() || {},
+                  nativeListDialog: { dialog, profileHeader, username: seed, listType } });
+                if (value?.accountVerified === true && value.accountId === actor && !value.restriction) proven.push(value);
+              }
+            }
+          }
+          return proven.length === 1 ? { ...proven[0], usable: location.origin === 'https://www.instagram.com' } : ordinary;
+        };
         presenceGrowthPanel = globalThis.InstaToolboxPresenceGrowthPanel.mount({
         container: query('[data-role="presence-routine"]'), document,
         inspectAccount: inspectPresenceAccount,
+        inspectReadAccount: inspectGrowthReadAccount,
         readFollowing: () => state.capture.subjectUsername === inspectPresenceAccount().accountId
           && state.capture.verified?.following === true ? state.capture.following : [],
         readFollowers: () => state.capture.subjectUsername === inspectPresenceAccount().accountId
           && state.capture.verified?.followers === true ? state.capture.followers : [],
+        readFollowingSnapshot: () => ({
+          subjectUsername: state.capture.subjectUsername,
+          listType: 'following', verified: state.capture.verified?.following === true,
+          source: state.capture.source?.following,
+          capturedAt: state.capture.capturedAt?.following,
+          complete: state.capture.complete?.following === true,
+          accounts: state.capture.following,
+        }),
+        readReadDraft: (actor, seed) => {
+          const value = inspectGrowthReadAccount({ actor, seed });
+          const owner = value.accountVerified && value.usable && (!actor || value.accountId === actor) ? value.accountId : '';
+          return owner ? GM_getValue(`instaToolboxGrowthReadDraftV1:${owner}`, null) : null;
+        },
+        writeReadDraft: (value, owner, seed) => {
+          const actor = inspectGrowthReadAccount({ actor: owner, seed });
+          if (!actor.accountVerified || !actor.usable || !actor.accountId || actor.accountId !== owner
+            || (value !== null && value?.actor !== actor.accountId)) throw new Error('The signed-in account changed. Start a new search.');
+          GM_setValue(`instaToolboxGrowthReadDraftV1:${actor.accountId}`, value);
+        },
+        readCurrentProfile: () => {
+          const match = String(location.pathname).match(/^\/([A-Za-z0-9._]{1,30})\/?$/);
+          return match ? engine.normalizeUsername(match[1]) : '';
+        },
         scanSeed: (username, signal, onProgress) => engine.fetchFollowerComparison({
           username, signal, onProgress, maxAccounts: 2_000,
           maxDurationMs: 4 * 60_000, retryRateLimits: false,
+        }),
+        readSeedNative: (username, signal, onProgress) => engine.fetchFollowerComparison({
+          username, signal, onProgress, maxAccounts: 2_000,
+          maxDurationMs: 4 * 60_000, retryRateLimits: false, allowNativeListFallback: true,
         }),
         readCampaigns: () => readGrowthCampaigns(inspectPresenceAccount().accountId),
         writeCampaigns: (campaigns) => writeGrowthCampaigns(inspectPresenceAccount().accountId, campaigns),

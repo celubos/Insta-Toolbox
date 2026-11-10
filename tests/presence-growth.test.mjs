@@ -50,6 +50,15 @@ test('conflicting IDs across seeds remove the candidate instead of boosting its 
   assert.deepEqual(rankGrowthCandidates({ account: 'owner', following: ['seed_a', 'seed_b'], seeds }), []);
 });
 
+test('an explicitly ambiguous account identity cannot prove a seed mutual', () => {
+  for (const listType of ['followers', 'following']) {
+    const seed = { username: 'seed', followers: [{ username: 'candidate', instagramId: '123' }],
+      following: [{ username: 'candidate', instagramId: '123' }] };
+    seed[listType][0] = { username: 'candidate', instagramIdAmbiguous: true };
+    assert.deepEqual(rankGrowthCandidates({ account: 'owner', following: ['seed'], seeds: [seed] }), []);
+  }
+});
+
 test('only verified campaign follows become due, once and on the right account', () => {
   const day = 86_400_000;
   const start = day * 200;
