@@ -40,6 +40,16 @@ export async function acceptUserscriptGhostWorkers({ fixtureAssets, resultsRoot,
     event.returnValue = null;
   };
   ipcMain.on('fixture-ghost:get', get); ipcMain.on('fixture-ghost:set', set);
+  const list = event => { assertSender(event); event.returnValue = [...store.keys()]; };
+  const remove = (event, key) => {
+    assertSender(event);
+    const previous = store.get(key); store.delete(key);
+    for (const window of windows.values()) if (!window.isDestroyed()) {
+      window.webContents.send('fixture-ghost:changed', key, previous, undefined);
+    }
+    event.returnValue = null;
+  };
+  ipcMain.on('fixture-ghost:list', list); ipcMain.on('fixture-ghost:delete', remove);
   const getTab = event => { assertSender(event); event.returnValue = tabStorage.get(event.sender.id) || {}; };
   const saveTab = (event, value) => { assertSender(event); tabStorage.set(event.sender.id, structuredClone(value)); event.returnValue = null; };
   ipcMain.on('fixture-ghost:get-tab', getTab); ipcMain.on('fixture-ghost:save-tab', saveTab);
@@ -89,6 +99,14 @@ export async function acceptUserscriptGhostWorkers({ fixtureAssets, resultsRoot,
         let listenerId=0; const listeners=new Map();
         GM_getValue=(key,fallback)=>fixtureGhostTransport.get(key,Object.hasOwn(fixtureGmStore,key)?fixtureGmStore[key]:fallback);
         GM_setValue=(key,value)=>fixtureGhostTransport.set(key,value);
+        // The Promise API uses this same shared fixture Map. IPC completion is
+        // only this simulation's acknowledgment, with no CAS/freshness claim.
+        globalThis.GM=Object.freeze({
+          getValue:async(key,fallback)=>GM_getValue(key,fallback),
+          setValue:async(key,value)=>{GM_setValue(key,value);},
+          listValues:async()=>[...new Set([...Object.keys(fixtureGmStore),...fixtureGhostTransport.list()])],
+          deleteValue:async key=>{delete fixtureGmStore[key];fixtureGhostTransport.delete(key);},
+        });
         const fixtureThread=new URL(fixtureLaunchHref).pathname.match(/^\\/direct\\/t\\/(\\d+)\\/$/)?.[1];
         let fixtureRedirected=false;
         GM_getTab=callback=>callback(fixtureGhostTransport.getTab());
@@ -105,7 +123,7 @@ export async function acceptUserscriptGhostWorkers({ fixtureAssets, resultsRoot,
         };
         globalThis.GM_addValueChangeListener=(key,callback)=>{const id=++listenerId;listeners.set(id,{key,callback});return id;};
         globalThis.GM_removeValueChangeListener=id=>listeners.delete(id);
-        fixtureGhostTransport.listen((key,previous,next)=>{for(const item of listeners.values())if(item.key===key)item.callback(key,previous,next,true);});
+        fixtureGhostTransport.listen((key,previous,next)=>{if(next===undefined)delete fixtureGmStore[key];for(const item of listeners.values())if(item.key===key)item.callback(key,previous,next,true);});
         globalThis.GM_openInTab=async(url,options)=>{const id=await fixtureGhostTransport.open(url,options);return {close:()=>fixtureGhostTransport.close(id)};};
         if(fixtureThread){
           history.replaceState({},'',fixtureLaunchHref);
@@ -182,6 +200,7 @@ export async function acceptUserscriptGhostWorkers({ fixtureAssets, resultsRoot,
   } finally {
     for (const window of windows.values()) if (!window.isDestroyed()) window.destroy();
     ipcMain.removeListener('fixture-ghost:get', get); ipcMain.removeListener('fixture-ghost:set', set);
+    ipcMain.removeListener('fixture-ghost:list', list); ipcMain.removeListener('fixture-ghost:delete', remove);
     ipcMain.removeListener('fixture-ghost:get-tab', getTab); ipcMain.removeListener('fixture-ghost:save-tab', saveTab);
     ipcMain.removeHandler('fixture-ghost:open'); ipcMain.removeHandler('fixture-ghost:close');
     isolated.protocol.unhandle('http'); isolated.protocol.unhandle('https');

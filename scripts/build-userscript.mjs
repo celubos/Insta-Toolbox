@@ -19,7 +19,8 @@ const moduleFiles = [
   ...['inbox-discovery', 'inbox-native-navigation', 'inbox-coordinator', 'inbox-userscript-discovery',
     'inbox-single-tab', 'inbox-userscript-workers', 'inbox-userscript-panel', 'inbox-checkpoint-store',
     'presence-native-inputs',
-    'presence-native-actions', 'presence-session', 'presence-activity-log', 'presence-session-panel',
+    'presence-native-actions', 'presence-session', 'presence-activity-log',
+    'presence-history-journal', 'presence-session-panel',
     'presence-growth', 'presence-growth-draft', 'presence-growth-panel', 'insights']
     .map(name => `extension/${name}.js`),
   'src/core/presence.js',
@@ -104,7 +105,8 @@ const singletonGuardEnd = `
 const localSources = Object.fromEntries(await Promise.all(moduleFiles.map(async file => [file, await readFile(path.join(repositoryRoot, file), 'utf8')])));
 const inboxModules = bundleLocalModules(localSources, ['extension/inbox-userscript-panel.js', 'extension/inbox-checkpoint-store.js',
   'extension/presence-native-inputs.js',
-  'extension/presence-native-actions.js', 'extension/presence-session.js', 'extension/presence-session-panel.js',
+  'extension/presence-native-actions.js', 'extension/presence-session.js',
+  'extension/presence-history-journal.js', 'extension/presence-session-panel.js',
   'extension/presence-growth-panel.js', 'extension/insights.js']);
 const inboxExport = `globalThis.InstaToolboxInboxDiscovery = Object.freeze({ create: localModules['extension/inbox-userscript-discovery.js'].createUserscriptInboxDiscovery });
 globalThis.InstaToolboxInboxPanel = Object.freeze({ mount: localModules['extension/inbox-userscript-panel.js'].mountUserscriptInboxPanel });
@@ -112,6 +114,7 @@ globalThis.InstaToolboxInboxCheckpoints = Object.freeze({ create: localModules['
 globalThis.InstaToolboxPresenceInputs = Object.freeze({ create: localModules['extension/presence-native-inputs.js'].createPresenceNativeInputs });
 globalThis.InstaToolboxPresenceNativeActions = Object.freeze({ create: localModules['extension/presence-native-actions.js'].createPresenceNativeActions });
 globalThis.InstaToolboxPresenceSession = Object.freeze({ create: localModules['extension/presence-session.js'].createPresenceSession });
+globalThis.InstaToolboxPresenceHistoryJournal = Object.freeze({ create: localModules['extension/presence-history-journal.js'].createPresenceHistoryJournal });
 globalThis.InstaToolboxPresenceSessionPanel = Object.freeze({ mount: localModules['extension/presence-session-panel.js'].mountPresenceSessionPanel });
 globalThis.InstaToolboxPresenceGrowth = Object.freeze({ ...localModules['extension/presence-growth.js'] });
 globalThis.InstaToolboxPresenceGrowthPanel = Object.freeze({ mount: localModules['extension/presence-growth-panel.js'].mountPresenceGrowthPanel });
@@ -137,10 +140,11 @@ if (!/^\/\/ @sandbox\s+DOM\s*$/m.test(metadata)) {
   throw new Error('The Tampermonkey bundle must explicitly require an isolated DOM sandbox.');
 }
 for (const grant of [
+  'GM.getValue', 'GM.setValue', 'GM.listValues', 'GM.deleteValue',
   'GM_getTab', 'GM_getValue', 'GM_addValueChangeListener', 'GM_openInTab',
   'GM_removeValueChangeListener', 'GM_saveTab', 'GM_setValue',
 ]) {
-  if (!new RegExp(`^// @grant\\s+${grant}\\s*$`, 'm').test(metadata)) {
+  if (!new RegExp(`^// @grant\\s+${grant.replaceAll('.', '\\.')}\\s*$`, 'm').test(metadata)) {
     throw new Error(`Userscript metadata is missing the required ${grant} grant.`);
   }
 }

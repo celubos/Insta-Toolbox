@@ -76,22 +76,42 @@ test('a new Presence run clears the previous result without discarding current-r
   assert.deepEqual(rendered, [null, 'Presence activity could not be saved.']);
 });
 
-test('log adapters use the captured actor key instead of the viewer at delayed write time', () => {
-  const start = source.indexOf('      readLog: accountKey =>');
+test('private history factory captures the actor key and uses modern manager storage without snapshot fallback', async () => {
+  const start = source.indexOf('      createHistoryStore: accountKey =>');
   const end = source.indexOf('      onAccountReady:', start);
   assert.ok(start >= 0 && end > start);
   const stores = new Map([['instaToolboxPresenceActivityLogV1:fixture-a', { entries: ['a-history'] }],
     ['instaToolboxPresenceActivityLogV1:fixture-b', { entries: ['b-history'] }]]);
-  const context = vm.createContext({ nativeActions: { inspectContext: () => ({ accountKey: 'fixture-b' }) },
-    GM_getValue: (key, fallback) => structuredClone(stores.get(key) ?? fallback),
-    GM_setValue: (key, value) => stores.set(key, structuredClone(value)) });
+  const notices = new Map(), removed = [];
+  const context = vm.createContext({ nativeActions: { inspectContext() { throw new Error('current viewer must not address delayed writes'); } },
+    GM: { getValue: async (key, fallback) => structuredClone(stores.get(key) ?? fallback),
+      setValue: async (key, value) => stores.set(key, structuredClone(value)),
+      listValues: async () => [...stores.keys()], deleteValue: async key => stores.delete(key) },
+    GM_getValue() { throw new Error('no legacy snapshot read fallback'); },
+    GM_setValue() { throw new Error('no legacy snapshot write fallback'); },
+    GM_addValueChangeListener: (key, callback) => { notices.set(1, { key, callback }); return 1; },
+    GM_removeValueChangeListener: id => removed.push(id),
+    InstaToolboxPresenceHistoryJournal: { create: options => options } });
   vm.runInContext(`globalThis.logAdapters = { ${source.slice(start, end)} };`, context);
-  assert.deepEqual(context.logAdapters.readLog('fixture-a'), { entries: ['a-history'] });
-  context.logAdapters.writeLog({ entries: ['a-history', 'a-late-result'] }, 'fixture-a');
-  assert.deepEqual(stores.get('instaToolboxPresenceActivityLogV1:fixture-a'), { entries: ['a-history', 'a-late-result'] });
+  const adapter = context.logAdapters.createHistoryStore('fixture-a');
+  assert.equal(adapter.accountKey, 'fixture-a');
+  assert.deepEqual(await adapter.readLegacy(), { entries: ['a-history'] });
+  await adapter.storage.setValue('synthetic-private-operation', { entries: ['a-late-result'] });
+  assert.deepEqual(await adapter.storage.getValue('synthetic-private-operation'), { entries: ['a-late-result'] });
+  assert.ok((await adapter.storage.listValues()).includes('synthetic-private-operation'));
+  let delivered; const noticeId = adapter.storage.listen('private-notice', value => { delivered = value; });
+  notices.get(noticeId).callback('private-notice', null, 'delivered'); assert.equal(delivered, 'delivered');
+  adapter.storage.unlisten(noticeId); assert.deepEqual(removed, [noticeId]);
+  await adapter.storage.deleteValue('synthetic-private-operation');
+  assert.equal(stores.has('synthetic-private-operation'), false);
+  assert.deepEqual(stores.get('instaToolboxPresenceActivityLogV1:fixture-a'), { entries: ['a-history'] });
   assert.deepEqual(stores.get('instaToolboxPresenceActivityLogV1:fixture-b'), { entries: ['b-history'] });
-  assert.throws(() => context.logAdapters.readLog(), /account-unverified/);
-  assert.throws(() => context.logAdapters.writeLog({ entries: [] }), /account-unverified/);
+  assert.throws(() => context.logAdapters.createHistoryStore(), /account-unverified/);
+  for (const name of ['getValue', 'setValue', 'listValues', 'deleteValue']) {
+    const saved = context.GM[name]; delete context.GM[name];
+    assert.throws(() => context.logAdapters.createHistoryStore('fixture-a'), /private-storage-unavailable/);
+    context.GM[name] = saved;
+  }
 });
 
 test('late verified history refreshes only stale idle Presence guidance and preserves existing progress and view', () => {

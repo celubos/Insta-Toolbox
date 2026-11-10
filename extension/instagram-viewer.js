@@ -21,9 +21,11 @@
         && !url.search && !url.hash ? url.pathname : '';
     } catch { return ''; }
   }
-  function nativeListBackdrop({ document, location, context }, { capture = false, opening = false } = {}) {
+  function nativeListBackdrop({ document, location, context }, { capture = false, opening = false, openingPortal = null } = {}) {
     const owner = username(context?.username), type = context?.listType;
     const header = context?.profileHeader, dialog = context?.dialog;
+    const gap = !capture && opening && openingPortal && dialog === null;
+    const surface = gap ? openingPortal : dialog;
     if (!owner || !['followers', 'following'].includes(type)
       || !new RegExp(`^/${owner.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/?$`, 'i').test(location.pathname)) return null;
     const backdrop = header?.closest?.('[aria-hidden="true"]');
@@ -39,11 +41,11 @@
       return true;
     };
     if (capture ? backdrop || !rendered(header) : !backdrop || backdrop === header
-      || backdrop.contains(dialog) || !rendered(header, backdrop) || !rendered(dialog, null, opening ? dialog : null)) return null;
+      || backdrop.contains(surface) || !rendered(header, backdrop) || !rendered(surface, null, opening && !gap ? dialog : null)) return null;
     const dialogs = [...document.querySelectorAll('[role="dialog"]')]
       .filter(node => rendered(node, null, capture || opening ? node : null));
-    if (capture ? dialogs.length !== 0 : dialogs.length !== 1 || dialogs[0] !== dialog) return null;
-    const labels = capture ? [] : [dialog.getAttribute('aria-label'),
+    if (capture ? dialogs.length !== 0 : gap ? dialogs.length !== 0 : dialogs.length !== 1 || dialogs[0] !== dialog) return null;
+    const labels = capture || gap ? [] : [dialog.getAttribute('aria-label'),
       ...[...dialog.querySelectorAll('[role="heading"], h1, h2')]
         .filter(node => rendered(node, null, opening ? dialog : null)).map(node => node.textContent),
       String((opening && typeof dialog.innerText === 'string' ? dialog.innerText : dialog.textContent) || '')
@@ -51,8 +53,10 @@
     const types = new Set(labels.map(label => String(label || '').normalize('NFKC').trim().toLowerCase().match(/^(followers|following)(?:\s|$)/)?.[1]).filter(Boolean));
     if (!capture && (types.size > 1 || types.size === 1 && !types.has(type))) return null;
     const typed = types.size === 1 && types.has(type);
-    const ready = typed && (!opening || rendered(dialog));
-    if (!capture && (opening || !ready) && (!opening || (typed ? labels.slice(0, -1) : labels).some(label => {
+    const ready = !gap && typed && (!opening || rendered(dialog));
+    const empty = !capture && !gap && labels.every(label => !String(label || '').normalize('NFKC').trim())
+      && !dialog.querySelector('a[href], main, article');
+    if (!capture && !gap && (opening || !ready) && (!opening || (typed ? labels.slice(0, -1) : labels).some(label => {
       const text = String(label || '').normalize('NFKC').trim();
       return text && !/^loading[.\s\u2026]*$/i.test(text)
         && !new RegExp(`^${type}(?:\\s|$)`, 'i').test(text);
@@ -81,19 +85,19 @@
       if (counts.size !== 1) return null;
       countControls.push(control); totals.push([...counts][0]);
     }
-    return { backdrop, controls: countControls, totals, ready, shown: node => rendered(node, backdrop)
+    return { backdrop, controls: countControls, totals, ready, typed, empty, shown: node => rendered(node, backdrop)
       && node.closest?.('[aria-hidden="true"]') === backdrop };
   }
   function inspectCurrent({ document = globalThis.document, location = globalThis.location,
     session = globalThis.InstaToolboxInstagramInspector?.inspectSession?.() || {},
-    reactionDialog = false, nativeListDialog = null } = {}, opening = false, evidence = null) {
+    reactionDialog = false, nativeListDialog = null } = {}, opening = false, evidence = null, openingPortal = null) {
     const unavailable = { accountVerified: false, usable: false, accountId: null, threadId: null };
     if (location?.origin !== origin) return { ...unavailable, reason: 'instagram-origin-required' };
     const threadId = String(location.pathname).match(/^\/direct\/t\/([0-9]+)\/?$/)?.[1] || null;
     const restriction = session.sessionExpired || session.challenge || session.actionBlocked || session.rateLimited;
     if (restriction) return { ...unavailable, threadId, restriction: true, reason: 'instagram-restricted' };
     const nativeBackdrop = nativeListDialog === null ? null
-      : nativeListBackdrop({ document, location, context: nativeListDialog }, { opening });
+      : nativeListBackdrop({ document, location, context: nativeListDialog }, { opening, openingPortal });
     if (nativeListDialog !== null && !nativeBackdrop) return { ...unavailable, threadId, reason: 'native-list-context-unavailable' };
     const rawLists = [...document.querySelectorAll('[aria-label="Thread list"]')];
     const dialogs = reactionDialog ? [...document.querySelectorAll('[role="dialog"]')]
@@ -164,6 +168,7 @@
     deadline = Infinity, now = Date.now } = {}) {
     if (typeof readSession !== 'function' || typeof isActive !== 'function' || !username(actor)) return null;
     const initialPath = location.pathname;
+    const originalBodyRoots = new Set(document.body?.children || []);
     const context = { profileHeader, username: owner, listType, dialog: null };
     let captured, originalNavigation;
     try {
@@ -177,6 +182,13 @@
     const originalAncestors = new Set();
     for (let node = profileHeader; node; node = node.parentElement) originalAncestors.add(node);
     let retainedDialog = null, retainedBackdrop = null, invalid = false;
+    let openingPortal = null, handoffEligible = false, handoffUsed = false, handoffGap = false, initialRoleSeen = false;
+    const portalOf = node => {
+      let root = node;
+      while (root?.parentElement && root.parentElement !== document.body) root = root.parentElement;
+      return root && root !== node && root.parentElement === document.body && !originalBodyRoots.has(root)
+        && !root.contains(profileHeader) && !root.contains(originalNavigation.rail) ? root : null;
+    };
     const refuse = () => { invalid = true; return Object.freeze({ phase: 'invalid', dialog: null }); };
     return Object.freeze({ check() {
       if (invalid) return refuse();
@@ -195,23 +207,40 @@
           return true;
         };
         const dialogs = [...document.querySelectorAll('[role="dialog"]')].filter(rendered);
-        if (dialogs.length > 1 || retainedDialog && dialogs[0] !== retainedDialog) return refuse();
+        if (dialogs.length > 1) return refuse();
+        let gap = false;
+        if (retainedDialog && (dialogs[0] !== retainedDialog || handoffGap)) {
+          // One empty native skeleton may retire before its typed successor is
+          // mounted. Keep only this newly inserted portal, never another popup.
+          if (!handoffEligible || handoffUsed || !openingPortal?.isConnected
+            || openingPortal.parentElement !== document.body) return refuse();
+          if (dialogs.length) {
+            if (portalOf(dialogs[0]) !== openingPortal || handoffGap && dialogs[0] === retainedDialog) return refuse();
+            retainedDialog = dialogs[0]; handoffUsed = true; handoffEligible = false; handoffGap = false;
+          } else { gap = true; handoffGap = true; }
+        }
         if (dialogs.length) retainedDialog ||= dialogs[0];
-        context.dialog = retainedDialog;
+        context.dialog = gap ? null : retainedDialog;
         const profile = nativeListBackdrop({ document, location, context },
-          retainedDialog ? { opening: true } : { capture: true });
+          retainedDialog ? { opening: true, openingPortal: gap ? openingPortal : null } : { capture: true });
         if (!profile || profile.backdrop && (!originalAncestors.has(profile.backdrop)
           || retainedBackdrop && profile.backdrop !== retainedBackdrop)
           || profile.controls.some((control, index) => control !== captured.controls[index]
           || profile.totals[index] !== captured.totals[index])) return refuse();
         retainedBackdrop ||= profile.backdrop;
+        if (retainedDialog && !initialRoleSeen) {
+          initialRoleSeen = true;
+          openingPortal = profile.empty ? portalOf(retainedDialog) : null;
+          handoffEligible = Boolean(openingPortal);
+        }
+        if (profile.typed) handoffEligible = false;
         const evidence = {}, value = inspectCurrent({ document, location, session: readSession(),
-          ...(retainedDialog ? { nativeListDialog: context } : {}) }, true, evidence);
+          ...(retainedDialog ? { nativeListDialog: context } : {}) }, true, evidence, gap ? openingPortal : null);
         if (value.accountVerified !== true || value.accountId !== actor
           || ['profile', 'rail', 'picture'].some(key => evidence[key] !== originalNavigation[key]
             || !profile.shown(evidence[key]))) return refuse();
         if (profile.ready && inspectCurrent({ document, location, session: readSession(), nativeListDialog: context }).accountId !== actor) return refuse();
-        return Object.freeze({ phase: now() >= deadline ? 'timeout' : profile.ready ? 'ready' : 'opening', dialog: retainedDialog });
+        return Object.freeze({ phase: now() >= deadline ? 'timeout' : profile.ready ? 'ready' : 'opening', dialog: context.dialog });
       } catch { return refuse(); }
     } });
   }

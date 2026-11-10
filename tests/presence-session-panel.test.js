@@ -110,6 +110,320 @@ const downloadWindow = () => {
   } } };
 };
 
+const deferredHistory = () => {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+};
+
+// A controllable public journal interface isolates panel state and async guards.
+// The separate journal suite validates real persistence and multi-tab semantics.
+function historyBackend(entries = []) {
+  const listeners = new Set(), failed = [];
+  const calls = { refresh: [], clear: 0, committedClear: 0, append: 0, disposed: 0 };
+  const hooks = {};
+  let record = { version: 1, entries: structuredClone(entries), history: {
+    initialized: false, loading: false, saving: false, clearing: false, error: false,
+    pendingCount: 0, unresolvedCount: 0, conflictCount: 0, scope: 'confirmed-discovered',
+    globallyFresh: false, remoteClearRevision: 0,
+  } };
+  let latest = Promise.resolve();
+  const snapshot = () => structuredClone(record);
+  const publish = () => { for (const listener of listeners) listener(snapshot()); };
+  const merge = values => {
+    const combined = new Map([...values, ...record.entries].map(entry => [entry.eventId, entry]));
+    record.entries = [...combined.values()].sort((a, b) => b.at - a.at).slice(0, 500);
+  };
+  const journal = {
+    snapshot,
+    subscribe(listener) { listeners.add(listener); listener(snapshot()); return () => listeners.delete(listener); },
+    refresh(options = {}) {
+      calls.refresh.push({ ...options }); record.history.loading = true; publish();
+      return Promise.resolve().then(() => hooks.refresh?.(options)).then(() => {
+        if (options.retryPending) {
+          for (const values of failed.splice(0)) merge(values);
+          record.history.pendingCount = 0; record.history.saving = false;
+        }
+        record.history.loading = false; record.history.initialized = true; record.history.error = false; publish();
+        return snapshot();
+      }, error => { record.history.loading = false; record.history.error = true; publish(); throw error; });
+    },
+    append(values) {
+      calls.append += 1; record.history.pendingCount += 1; record.history.saving = true; publish();
+      latest = Promise.resolve().then(() => hooks.append?.(values)).then(() => {
+        merge(values); record.history.pendingCount -= 1;
+        record.history.saving = record.history.pendingCount > 0; record.history.error = false; publish();
+        return { view: snapshot() };
+      }, error => { failed.push(structuredClone(values)); record.history.error = true; publish(); throw error; });
+      return latest;
+    },
+    clear({ beforeCommit }) {
+      calls.clear += 1;
+      latest = Promise.resolve().then(() => hooks.beforeClear?.()).then(async () => {
+        if (beforeCommit() !== true) throw new Error('history-account-changed');
+        calls.committedClear += 1; record.history.clearing = true; publish();
+        await hooks.clearAck?.();
+        record.entries = []; record.history.clearing = false; record.history.error = false; publish();
+        return { view: snapshot() };
+      }).catch(error => { record.history.clearing = false; record.history.error = true; publish(); throw error; });
+      return latest;
+    },
+    settled: () => latest,
+    exportRecord() { return { schemaVersion: 1, kind: 'insta-toolbox-presence-log',
+      generatedAt: new Date(1_800_000_000_000).toISOString(), entries: snapshot().entries,
+      historyScope: 'confirmed-discovered', globallyFresh: false,
+      pendingActivityExcluded: record.history.pendingCount > 0 }; },
+    dispose() { calls.disposed += 1; listeners.clear(); },
+  };
+  return { journal, hooks, calls, update(history, nextEntries) {
+    Object.assign(record.history, history); if (nextEntries) record.entries = structuredClone(nextEntries); publish();
+  } };
+}
+
+const journalEntries = () => [{ eventId: 'retained-journal-row', at: 1_700_000_000_000,
+  kind: 'action', action: 'likePosts', target: 'Retained synthetic post', outcome: 'completed', detail: 'Post liked' }];
+
+test('journal history initializes once and Start waits for ready account history before confirmation', async () => {
+  const backend = historyBackend(journalEntries()), gate = deferredHistory();
+  backend.hooks.refresh = () => gate.promise;
+  let confirmations = 0;
+  const f = fixture({ createHistoryStore: () => backend.journal,
+    confirm: async ({ binding }) => { confirmations += 1; return binding; } });
+  assert.match(f.container.textContent, /Loading activity/);
+  assert.equal(historyControl(f, 'Clear log').disabled, true);
+  const pending = f.panel.begin(); await settleHistoryWrites();
+  assert.equal(confirmations, 0); assert.equal(f.panel.busy(), true);
+  assert.match(f.start().textContent, /Loading history/);
+  assert.equal(backend.calls.refresh.length, 1);
+  gate.resolve(); assert.equal(await pending, true); await settleHistoryWrites();
+  assert.equal(confirmations, 1); assert.equal(f.starts.length, 1);
+  assert.match(f.container.textContent, /up to 500.*Other tabs/);
+  f.panel.dispose(); assert.equal(backend.calls.disposed, 1);
+});
+
+for (const drift of ['disposed', 'account', 'busy', 'options']) {
+  test(`journal initialization cannot open confirmation after ${drift} changes`, async () => {
+    const backend = historyBackend(), gate = deferredHistory(); backend.hooks.refresh = () => gate.promise;
+    let owner = 'fixture_owner', busy = false, confirmations = 0;
+    const f = fixture({ createHistoryStore: () => backend.journal, busy: () => busy,
+      inspectAccount: () => ({ accountVerified: true, usable: true, accountId: owner, accountKey: `key-${owner}` }),
+      confirm: async ({ binding }) => { confirmations += 1; return binding; } });
+    const pending = f.panel.begin(); await settleHistoryWrites();
+    if (drift === 'disposed') f.panel.dispose();
+    if (drift === 'account') owner = 'other_owner';
+    if (drift === 'busy') busy = true;
+    if (drift === 'options') f.attr('data-presence-limit').value = '9';
+    gate.resolve(); assert.equal(await pending, false);
+    assert.equal(confirmations, 0); assert.equal(f.starts.length, 0);
+    f.panel.dispose();
+  });
+}
+
+test('an initial history failure settles without auto-Start and reopening actually retries', async () => {
+  const backend = historyBackend(); backend.hooks.refresh = () => { throw new Error('private provider detail'); };
+  let confirmations = 0;
+  const f = fixture({ createHistoryStore: () => backend.journal,
+    confirm: async ({ binding }) => { confirmations += 1; return binding; } });
+  assert.equal(await f.panel.begin(), false);
+  assert.equal(f.panel.busy(), false); assert.equal(f.start().disabled, false);
+  assert.equal(f.container.all().find(node => node.className === 'presence-log').open, true);
+  assert.equal(confirmations, 0); assert.doesNotMatch(f.container.textContent, /private provider detail/);
+  backend.hooks.refresh = () => {};
+  showHistory(f); await settleHistoryWrites();
+  assert.equal(backend.calls.refresh.at(-1).retryPending, true);
+  assert.equal(f.starts.length, 0, 'recovery never starts the abandoned request');
+  assert.equal(await f.panel.begin(), true); f.panel.dispose();
+});
+
+test('failed journal activity stays quiet, preserves downloads and retries on an explicit reopen', async () => {
+  const backend = historyBackend(journalEntries());
+  backend.hooks.append = () => { throw new Error('write rejected'); };
+  const downloads = downloadWindow();
+  const f = fixture({ createHistoryStore: () => backend.journal, window: downloads.window });
+  downloads.window.document = f.document;
+  await settleHistoryWrites();
+  assert.equal(await f.panel.begin(), true); await settleHistoryWrites();
+  assert.equal(f.starts.length, 1); assert.match(f.messages.at(-1), /Presence finished/);
+  assert.match(f.container.textContent, /Keep this tab open.*retry/);
+  assert.match(f.container.textContent, /not included in downloads/);
+  assert.equal(historyControl(f, 'Download log').disabled, false);
+  historyControl(f, 'Download log').fire('click');
+  const exported = JSON.parse(await downloads.blobs[0].text());
+  assert.equal(exported.pendingActivityExcluded, true); assert.equal(exported.globallyFresh, false);
+  assert.equal(exported.entries.length, 1);
+  backend.hooks.append = () => {}; showHistory(f); await settleHistoryWrites();
+  assert.equal(backend.calls.refresh.at(-1).retryPending, true);
+  assert.equal(backend.journal.snapshot().history.pendingCount, 0);
+  assert.ok(backend.journal.snapshot().entries.length > 1);
+  f.panel.dispose();
+});
+
+test('two direct Start requests during history initialization produce only one review and run', async () => {
+  const backend = historyBackend(), gate = deferredHistory(); backend.hooks.refresh = () => gate.promise;
+  let confirmations = 0;
+  const f = fixture({ createHistoryStore: () => backend.journal,
+    confirm: async ({ binding }) => { confirmations += 1; return binding; } });
+  const first = f.panel.begin(), second = f.panel.begin();
+  assert.equal(await second, false); assert.equal(confirmations, 0);
+  gate.resolve(); assert.equal(await first, true);
+  assert.equal(confirmations, 1); assert.equal(f.starts.length, 1); f.panel.dispose();
+});
+
+test('journal Clear is explicit, blocks duplicates and announces success only after acknowledgement', async () => {
+  const backend = historyBackend(journalEntries()), gate = deferredHistory(), confirmations = [];
+  backend.hooks.clearAck = () => gate.promise;
+  const f = fixture({ createHistoryStore: () => backend.journal,
+    window: { confirm: text => { confirmations.push(text); return true; } } });
+  await settleHistoryWrites();
+  const pending = historyControl(f, 'Clear log').fire('click');
+  await settleHistoryWrites();
+  assert.equal(historyControl(f, 'Clear log').disabled, true);
+  assert.match(f.container.textContent, /Clearing activity/);
+  assert.doesNotMatch(f.container.textContent, /Activity log cleared\./);
+  assert.equal(backend.journal.snapshot().entries.length, 1);
+  await historyControl(f, 'Clear log').fire('click'); assert.equal(backend.calls.clear, 1);
+  assert.match(confirmations[0], /also discards activity waiting to sync from other tabs/);
+  assert.match(confirmations[0], /Tabs can add new activity after they receive the clear/);
+  gate.resolve(); assert.equal(await pending, true);
+  assert.match(f.container.textContent, /Activity log cleared\./);
+  assert.equal(historyControl(f, 'Clear log').disabled, false, 'an empty confirmed view can clear waiting activity');
+  assert.equal(historyControl(f, 'Download log').disabled, true); f.panel.dispose();
+});
+
+for (const drift of ['account', 'disposed']) {
+  test(`queued journal Clear rechecks ${drift} immediately before dispatch`, async () => {
+    const first = historyBackend(journalEntries()), second = historyBackend(), gate = deferredHistory();
+    let actor = 'a'; first.hooks.beforeClear = () => gate.promise;
+    const f = fixture({ createHistoryStore: key => key === 'key-a' ? first.journal : second.journal,
+      inspectAccount: () => ({ accountVerified: true, usable: true, accountId: `owner_${actor}`, accountKey: `key-${actor}` }),
+      window: { confirm: () => true } });
+    await settleHistoryWrites(); const pending = historyControl(f, 'Clear log').fire('click');
+    await settleHistoryWrites();
+    if (drift === 'disposed') f.panel.dispose();
+    else { actor = 'b'; f.panel.refreshLog(); }
+    gate.resolve(); assert.equal(await pending, false);
+    assert.equal(first.calls.committedClear, 0); assert.equal(second.calls.committedClear, 0);
+    assert.equal(first.journal.snapshot().entries.length, 1);
+    f.panel.dispose();
+  });
+}
+
+test('a journal Clear failure retains the loaded view and never claims success', async () => {
+  const backend = historyBackend(journalEntries()); backend.hooks.clearAck = () => { throw new Error('private-clear-error'); };
+  const f = fixture({ createHistoryStore: () => backend.journal, window: { confirm: () => true } });
+  await settleHistoryWrites(); assert.equal(await historyControl(f, 'Clear log').fire('click'), false);
+  assert.equal(backend.journal.snapshot().entries.length, 1);
+  assert.doesNotMatch(f.container.textContent, /Activity log cleared\.|private-clear-error/);
+  assert.equal(historyControl(f, 'Download log').disabled, false);
+  assert.deepEqual(f.messages, []); f.panel.dispose();
+});
+
+test('journal status reports reconciliation and remote Clear quietly without changing Presence progress', async () => {
+  const backend = historyBackend(journalEntries());
+  const f = fixture({ createHistoryStore: () => backend.journal }); await settleHistoryWrites();
+  backend.update({ unresolvedCount: 1 });
+  assert.match(f.container.textContent, /still being reconciled/);
+  assert.doesNotMatch(f.container.textContent, /could not be saved/);
+  backend.update({ unresolvedCount: 0, remoteClearRevision: 1 }, []);
+  assert.match(f.container.textContent, /Activity log cleared in another tab/);
+  assert.deepEqual(f.messages, []); f.panel.dispose();
+});
+
+test('log popup opens in the click before async refresh and blocked popups leave inline history usable', async () => {
+  const backend = historyBackend(journalEntries()), gate = deferredHistory(), order = [];
+  const downloads = downloadWindow();
+  const document = { createElement: tag => new Element(tag), head: new Element('head'), body: new Element('body') };
+  const popup = { ...downloads.window, document, closed: false, confirm: () => false };
+  let blocked = false;
+  const f = fixture({ createHistoryStore: () => backend.journal,
+    window: { open: () => { order.push('open'); return blocked ? null : popup; }, setTimeout: () => 0 } });
+  await settleHistoryWrites();
+  backend.hooks.refresh = () => { order.push('refresh'); return gate.promise; };
+  historyControl(f, 'Open log window').fire('click');
+  assert.equal(order[0], 'open'); await settleHistoryWrites(); assert.deepEqual(order, ['open', 'refresh']);
+  assert.match(popup.document.body.textContent, /Loading activity/);
+  gate.resolve(); await settleHistoryWrites();
+  blocked = true; historyControl(f, 'Open log window').fire('click');
+  assert.match(f.container.textContent, /log window was blocked.*Activity log here/);
+  assert.equal(historyControl(f, 'Download log').disabled, false); assert.deepEqual(f.messages, []);
+  f.panel.dispose();
+});
+
+test('teardown disposes every bound journal and late initial completion cannot start Presence', async () => {
+  const a = historyBackend(), b = historyBackend(), gate = deferredHistory(); let actor = 'a';
+  a.hooks.refresh = () => gate.promise;
+  const f = fixture({ createHistoryStore: key => key === 'key-a' ? a.journal : b.journal,
+    inspectAccount: () => ({ accountVerified: true, usable: true, accountId: `owner_${actor}`, accountKey: `key-${actor}` }) });
+  const pending = f.panel.begin(); actor = 'b'; f.panel.refreshLog();
+  f.panel.dispose(); gate.resolve(); assert.equal(await pending, false);
+  assert.equal(a.calls.disposed, 1); assert.equal(b.calls.disposed, 1); assert.equal(f.starts.length, 0);
+  assert.equal(f.panel.busy(), false);
+});
+
+for (const drift of ['disposed', 'busy', 'account-key']) {
+  test(`a pending Presence confirmation cannot start after ${drift} changes`, async () => {
+    const backends = new Map(), gate = deferredHistory();
+    let busy = false, key = 'original-key', reviewed;
+    const f = fixture({ busy: () => busy,
+      createHistoryStore: accountKey => {
+        if (!backends.has(accountKey)) backends.set(accountKey, historyBackend());
+        return backends.get(accountKey).journal;
+      },
+      inspectAccount: () => ({ accountVerified: true, usable: true, accountId: 'same_owner', accountKey: key }),
+      confirm: ({ binding }) => { reviewed = binding; return gate.promise; } });
+    await settleHistoryWrites(); const pending = f.panel.begin(); await settleHistoryWrites();
+    assert.ok(reviewed);
+    if (drift === 'disposed') f.panel.dispose();
+    if (drift === 'busy') busy = true;
+    if (drift === 'account-key') key = 'different-key';
+    gate.resolve(reviewed); assert.equal(await pending, false); assert.equal(f.starts.length, 0);
+    f.panel.dispose();
+  });
+}
+
+test('journal mode performs no factory, storage, Clear or export work for an unknown account', async () => {
+  let factories = 0, confirmations = 0;
+  const f = fixture({ createHistoryStore: () => { factories += 1; return historyBackend().journal; },
+    inspectAccount: () => ({ accountVerified: false, usable: false }),
+    window: { confirm: () => { confirmations += 1; return true; } } });
+  showHistory(f); historyControl(f, 'Download log').fire('click');
+  await historyControl(f, 'Clear log').fire('click'); assert.equal(await f.panel.begin(), false);
+  assert.equal(factories, 0); assert.equal(confirmations, 0); assert.equal(f.starts.length, 0); f.panel.dispose();
+});
+
+test('journal Saving and acknowledged Saved stay inside history while Presence completion remains intact', async () => {
+  const backend = historyBackend(journalEntries()), gate = deferredHistory(); backend.hooks.append = () => gate.promise;
+  const f = fixture({ createHistoryStore: () => backend.journal }); await settleHistoryWrites();
+  assert.equal(await f.panel.begin(), true); await settleHistoryWrites();
+  const completed = f.messages.at(-1); assert.match(completed, /Presence finished/);
+  assert.match(f.container.textContent, /Saving activity/);
+  assert.doesNotMatch(f.container.textContent, /Activity saved\./);
+  gate.resolve(); await settleHistoryWrites();
+  assert.match(f.container.textContent, /Activity saved\./); assert.equal(f.messages.at(-1), completed);
+  f.panel.dispose();
+});
+
+test('blocked popup and Clear transports are contained without changing stored activity', async () => {
+  const backend = historyBackend(journalEntries());
+  const f = fixture({ createHistoryStore: () => backend.journal,
+    window: { open() { throw new Error('browser popup policy'); }, confirm() { throw new Error('closed popup'); } } });
+  await settleHistoryWrites();
+  historyControl(f, 'Open log window').fire('click'); assert.match(f.container.textContent, /log window was blocked/);
+  assert.equal(await historyControl(f, 'Clear log').fire('click'), false);
+  assert.equal(backend.calls.clear, 0); assert.equal(backend.journal.snapshot().entries.length, 1);
+  assert.deepEqual(f.messages, []); f.panel.dispose();
+});
+
+test('an unavailable journal factory cannot fall back to full-snapshot history or start actions', async () => {
+  let reads = 0, writes = 0;
+  const f = fixture({ createHistoryStore: () => null,
+    readLog: () => { reads += 1; }, writeLog: () => { writes += 1; } });
+  assert.equal(await f.panel.begin(), false);
+  assert.equal(reads, 0); assert.equal(writes, 0); assert.equal(f.starts.length, 0);
+  assert.equal(f.container.all().find(node => node.className === 'presence-log').open, true);
+  assert.match(f.container.textContent, /could not be loaded.*retry/); f.panel.dispose();
+});
+
 test('late verified actor appends to all ninety stored history entries instead of replacing them', async () => {
   const f = scopedHistoryFixture();
   f.setActor('a');

@@ -59,7 +59,7 @@ export function mountPresenceGrowthPanel({
   cancel.className = 'button quiet';
   follow.className = 'button primary';
   due.className = 'button quiet';
-  const progress = make('p', 'Check your Following list in Mutual Checker first.');
+  const progress = make('p', 'Find mutual connections prepares profile links for a read-only search.');
   const candidatesList = make('div');
   candidatesList.className = 'presence-growth-candidates';
   const dueList = make('p');

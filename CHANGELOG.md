@@ -2,6 +2,27 @@
 
 This project uses [Semantic Versioning](https://semver.org/).
 
+## 4.3.8 - 2026-11-10 (development)
+
+- Replace cached history snapshots with independent private changes and
+  acknowledged writes. Preserve same-account events across tabs and retain
+  actor/run isolation. Async history controls wait for initial readiness,
+  retry on reopening, report write state quietly and confirm Clear only after
+  acknowledgement. The history component passed 85 checks and review.
+- Keep discovered views explicitly partial across tabs. Clear fences older or
+  concurrent waiting history when discovered; retain the private legacy backup
+  and quarantine later import after Clear. Keep 500 visible/export entries and
+  bounded cleanup without global freshness or physical-erasure promises.
+- Add four private manager-storage grants and no network, cookie or domain
+  permission. Preserve legacy grants, identity and held release safeguards.
+- Permit one native empty-skeleton to typed-dialog handoff inside the same
+  newly opened portal. Retain fresh account controls, exact counts, Stop and
+  deadlines; accept rows only after full scoped validation. Native review and
+  209 focused checks passed. Keep routine history updates quiet.
+- Generate the development candidate and pass all required local source,
+  package, native, sandbox, background and rendered gates. Installed and CI
+  acceptance remain pending. The 4.3.7 update remains held; no official release is recorded.
+
 ## 4.3.7 - 2026-11-10 (development)
 
 - Repair Presence history loading when startup account verification arrives
@@ -14,9 +35,10 @@ This project uses [Semantic Versioning](https://semver.org/).
 - Keep opening and row readiness within the existing shared deadline, with
   Stop and drift guards intact. Preserve storage keys, history schema, grants
   and action authority. Both functional reviews and focused checks passed;
-  generation and complete same-build local QA passed. Installation, live
-  acceptance and exact-candidate CI remain pending. No official release is
-  recorded.
+  generation, the local matrix and all eight candidate CI checks passed.
+  Installed activation and cold history retention passed; known multi-tab and
+  native-handoff failures keep full acceptance on hold. No official release
+  is recorded.
 
 ## 4.3.6 - 2026-11-10 (development)
 

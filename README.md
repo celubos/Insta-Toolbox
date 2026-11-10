@@ -117,9 +117,9 @@ pnpm run qa:overlay:check
 pnpm run verify:repo-hygiene
 ```
 
-The development matrix covers the PWA, extension, userscript, layout controls, and packaged apps. The 4.3.7 userscript is a development candidate; its final-build automated checks, installed-build acceptance and CI remain pending. Official release also requires authorized maintainer dispatch and review access, which is currently unavailable. Reviewed screenshot captures retain their original version and runtime identities. Automated fixtures do not prove current authenticated Instagram behavior.
+The development matrix covers the PWA, extension, userscript, layout controls, and packaged apps. Version 4.3.8 is in preparation to address a confirmed same-account history overwrite between cached tabs. Its approved design uses independent private history changes and acknowledged writes; discovery may lag other tabs. Four manager-storage API grants are added, with no network or domain permission. History implementation and component review passed 85 focused checks. The bounded native skeleton handoff passed review and 209 focused checks. The generated candidate passed all required local checks; installed validation and exact-candidate CI remain pending. Hold the 4.3.7 candidate update: its local matrix passed, but a later synthetic multi-tab check failed. No actual user history loss was observed. Official release also requires authorized maintainer dispatch and review access, which is currently unavailable. Reviewed captures retain their original versions; fixtures do not prove authenticated Instagram behavior.
 
-See [Contributing](CONTRIBUTING.md), [Maintainer Guide](docs/MAINTAINER_GUIDE.md), [4.3.7 compatibility](docs/compatibility/4.3.7.md), and [4.3.7 acceptance](docs/acceptance/4.3.7.md). The held packages retain their [4.3.1 compatibility](docs/compatibility/4.3.1.md) and [acceptance record](docs/acceptance/4.3.1.md).
+See [Contributing](CONTRIBUTING.md), [Maintainer Guide](docs/MAINTAINER_GUIDE.md), [4.3.8 compatibility](docs/compatibility/4.3.8.md), and [4.3.8 acceptance](docs/acceptance/4.3.8.md). The held packages retain their [4.3.1 compatibility](docs/compatibility/4.3.1.md) and [acceptance record](docs/acceptance/4.3.1.md).
 
 ## License and credit
 

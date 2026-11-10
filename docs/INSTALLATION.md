@@ -174,8 +174,26 @@ Read the reason shown in the active tool. Challenge, rate-limit, wrong-thread, c
 
 ## Acceptance and support
 
-- [4.3.7 userscript candidate acceptance](acceptance/4.3.7.md)
-- [4.3.7 userscript compatibility](compatibility/4.3.7.md)
+Version 4.3.8 is in preparation. Its metadata adds GM.getValue, GM.setValue,
+GM.listValues and GM.deleteValue for this userscript's private history storage.
+All legacy grants and the isolated sandbox remain; no network, cookie,
+connection or domain permission is added. History implementation and focused
+review passed. The bounded native handoff passed independent review and
+209 focused checks. The generated candidate passed all required local
+checks; installed validation and exact-candidate CI remain pending. The log/export limit is 500 visible entries; private backing
+records and the retained legacy backup are not a global storage-cap promise.
+
+Hold the 4.3.7 development candidate update
+while a confirmed same-account multi-tab history overwrite is repaired and
+validated. Its passing local matrix does not cover this later regression.
+No actual user history loss was observed. Settings verified installed 4.3.7,
+and a cold read/export kept all 95 prior records without Start or Clear. A
+subsequent native Growth read failed before rows; complete acceptance is not
+claimed.
+
+
+- [4.3.8 userscript candidate acceptance](acceptance/4.3.8.md)
+- [4.3.8 userscript compatibility](compatibility/4.3.8.md)
 - [4.3.1 acceptance record](acceptance/4.3.1.md)
 - [4.3.1 compatibility](compatibility/4.3.1.md)
 - [Operator acceptance guide](OPERATOR_ACCEPTANCE.md)

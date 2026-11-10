@@ -28,8 +28,27 @@
     catch { return fallback; }
   };
   const storeKey='sandbox:gm:';
+  // Ordinary fake private-manager storage, using the existing sandbox namespace.
+  // Promise completion acknowledges this store operation, not cache freshness;
+  // adversarial source tests exercise independently stale manager instances.
+  const gmListeners=new Map();let gmListenerId=0;
+  const gmChanged=(key,previous,next)=>{
+    const before=structuredClone(previous),after=structuredClone(next);
+    for(const[id,listener]of gmListeners)if(listener.key===key)queueMicrotask(()=>{
+      if(gmListeners.get(id)===listener)listener.callback(key,structuredClone(before),structuredClone(after),false);
+    });
+  };
   globalThis.GM_getValue=(key,fallback)=>structuredClone(read(storeKey+key,fallback));
-  globalThis.GM_setValue=(key,value)=>localStorage.setItem(storeKey+key,JSON.stringify(value));
+  globalThis.GM_setValue=(key,value)=>{const previous=GM_getValue(key);localStorage.setItem(storeKey+key,JSON.stringify(value));gmChanged(key,previous,value);};
+  globalThis.GM_addValueChangeListener=(key,callback)=>{const id=++gmListenerId;gmListeners.set(id,{key,callback});return id;};
+  globalThis.GM_removeValueChangeListener=id=>gmListeners.delete(id);
+  globalThis.GM=Object.freeze({
+    getValue:async(key,fallback)=>GM_getValue(key,fallback),
+    setValue:async(key,value)=>{GM_setValue(key,value);},
+    listValues:async()=>Array.from({length:localStorage.length},(_,index)=>localStorage.key(index))
+      .filter(key=>key?.startsWith(storeKey)).map(key=>key.slice(storeKey.length)),
+    deleteValue:async key=>{const previous=GM_getValue(key);localStorage.removeItem(storeKey+key);gmChanged(key,previous,undefined);},
+  });
   globalThis.GM_getTab=callback=>callback(structuredClone(read('sandbox:manager-tab',{})));
   globalThis.GM_saveTab=value=>localStorage.setItem('sandbox:manager-tab',JSON.stringify(value));
   globalThis.GM_info={script:{name:'Insta Toolbox sandbox',version:'fixture'}};

@@ -51,6 +51,7 @@ export function normalizePresenceActivityLog(value, { limit = DEFAULT_LIMIT } = 
 }
 
 export function createPresenceActivityLog({
+  journal = null,
   read = () => null,
   write = () => {},
   onWriteError = () => {},
@@ -60,6 +61,33 @@ export function createPresenceActivityLog({
   if (typeof read !== 'function' || typeof write !== 'function'
     || typeof onWriteError !== 'function' || typeof now !== 'function') {
     throw new Error('presence-log-adapter-required');
+  }
+  if (journal !== null) {
+    for (const name of ['refresh', 'append', 'clear', 'snapshot', 'settled', 'exportRecord', 'subscribe', 'dispose']) {
+      if (typeof journal?.[name] !== 'function') throw new Error('presence-log-journal-required');
+    }
+    const report = (promise) => {
+      void promise.catch(error => { try { onWriteError(error); } catch { /* Storage failure remains in journal state. */ } });
+      return promise;
+    };
+    return Object.freeze({
+      append(value = {}) {
+        const at = timestamp(value.at) || timestamp(now());
+        const eventId = clean(value.eventId, 160)
+          || `${at}:${clean(value.kind, 24)}:${clean(value.action, 48)}:${clean(value.outcome, 32)}`;
+        const entry = normalizeEntry({ ...value, at, eventId });
+        if (!entry) throw new Error('presence-log-entry-invalid');
+        report(journal.append([entry]));
+        return entry;
+      },
+      clear: options => report(journal.clear(options)),
+      refresh: options => journal.refresh(options),
+      snapshot: () => journal.snapshot(),
+      settled: () => journal.settled(),
+      exportRecord: () => journal.exportRecord(),
+      subscribe: listener => journal.subscribe(listener),
+      dispose: () => journal.dispose(),
+    });
   }
   let record = normalizePresenceActivityLog(read(), { limit });
   let writeQueue = Promise.resolve();

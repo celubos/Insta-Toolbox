@@ -3905,13 +3905,25 @@
       confirmAction: confirmRun,
       readPreferences: () => GM_getValue('instaToolboxPresenceSessionV1', null),
       writePreferences: value => GM_setValue('instaToolboxPresenceSessionV1', value),
-      readLog: accountKey => {
+      createHistoryStore: accountKey => {
         if (typeof accountKey !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(accountKey)) throw new Error('presence-log-account-unverified');
-        return GM_getValue(`instaToolboxPresenceActivityLogV1:${accountKey}`, null);
-      },
-      writeLog: (value, accountKey) => {
-        if (typeof accountKey !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(accountKey)) throw new Error('presence-log-account-unverified');
-        return GM_setValue(`instaToolboxPresenceActivityLogV1:${accountKey}`, value);
+        const manager = typeof GM === 'undefined' ? null : GM;
+        if (!manager || ['getValue', 'setValue', 'listValues', 'deleteValue'].some(name => typeof manager[name] !== 'function')
+          || typeof GM_addValueChangeListener !== 'function' || typeof GM_removeValueChangeListener !== 'function'
+          || typeof globalThis.InstaToolboxPresenceHistoryJournal?.create !== 'function') {
+          throw new Error('presence-history-private-storage-unavailable');
+        }
+        return globalThis.InstaToolboxPresenceHistoryJournal.create({ accountKey,
+          readLegacy: () => manager.getValue(`instaToolboxPresenceActivityLogV1:${accountKey}`, null),
+          storage: {
+            getValue: (key, fallback) => manager.getValue(key, fallback),
+            setValue: (key, value) => manager.setValue(key, value),
+            listValues: () => manager.listValues(),
+            deleteValue: key => manager.deleteValue(key),
+            listen: (key, callback) => GM_addValueChangeListener(key, (_key, _old, value) => callback(value)),
+            unlisten: id => GM_removeValueChangeListener(id),
+          },
+        });
       },
       onAccountReady: () => {
         const dm = dmRunner?.snapshot();

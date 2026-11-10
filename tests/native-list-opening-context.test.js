@@ -97,10 +97,10 @@ function openingFixture() {
   const following = f.element('a', { role: 'link', href: '#' }, [], '1 following');
   const header = f.element('header', {}, [heading, followers, following]);
   header.parentElement = f.main; f.main.children = [header];
-  let restricted = false;
+  let restricted = false, active = true;
   const options = { document: f.document, location: f.location, profileHeader: header,
     username: 'fixture.target', listType: 'followers', actor: f.owner,
-    readSession: () => ({ rateLimited: restricted }), isActive: () => true };
+    readSession: () => ({ rateLimited: restricted }), isActive: () => active };
   const open = (title = '') => {
     const modalTitle = f.element('h2', {}, [], title);
     const modal = f.element('div', { role: 'dialog' }, [modalTitle], '');
@@ -109,7 +109,7 @@ function openingFixture() {
     return { modal, modalTitle };
   };
   return { ...f, header, heading, followers, following, options, open,
-    setRestricted(value) { restricted = value; } };
+    setRestricted(value) { restricted = value; }, setActive(value) { active = value; } };
 }
 
 test('native opening guard re-proves the retained rail through a blank modal without generic account authority', () => {
@@ -152,6 +152,223 @@ function nativeSearchSkeleton(f, modal) {
   Object.defineProperty(modal, 'innerText', { get: () => renderedText(modal) });
   return close;
 }
+
+function portalFixture({ reused = false } = {}) {
+  const f = openingFixture();
+  const portal = f.element('div');
+  const attach = () => {
+    if (!f.document.body.children.includes(portal)) {
+      portal.parentElement = f.document.body; f.document.body.children.push(portal);
+    }
+  };
+  if (reused) attach();
+  const role = (title = '') => {
+    attach();
+    const modalTitle = f.element('h2', {}, [], title);
+    const modal = f.element('div', { role: 'dialog', ...(title ? { 'aria-label': title } : {}) }, [modalTitle]);
+    modal.parentElement = portal; portal.children = [modal]; f.root.attributes['aria-hidden'] = 'true';
+    nativeSearchSkeleton(f, modal);
+    return { modal, modalTitle };
+  };
+  const retire = modal => {
+    portal.children = portal.children.filter(node => node !== modal);
+    modal.parentElement = null; modal.isConnected = false;
+  };
+  return { ...f, portal, attach, role, retire };
+}
+
+test('one empty skeleton can hand off through a roleless gap to a typed list in the same new portal', () => {
+  const f = portalFixture();
+  const guard = f.context.InstaToolboxInstagramViewer.captureNativeListReadGuard(f.options);
+  const first = f.role(); assert.equal(guard.check().phase, 'opening');
+  f.retire(first.modal);
+  const gap = guard.check();
+  assert.equal(gap.phase, 'opening'); assert.equal(gap.dialog, null);
+  assert.equal('accountVerified' in gap, false); assert.equal('accountId' in gap, false);
+  assert.equal(f.identity(), '', 'the private gap never grants ordinary account authority');
+  const second = f.role('Followers'); second.modal.style = { opacity: '0' };
+  assert.equal(guard.check().phase, 'opening');
+  second.modal.style.opacity = '1';
+  const ready = guard.check(); assert.equal(ready.phase, 'ready'); assert.equal(ready.dialog, second.modal);
+});
+
+test('native reader observes no rows in the skeleton gap and accepts only the fully qualified successor', async () => {
+  const f = portalFixture(), calls = [], phases = [];
+  let qualified = false;
+  const putRows = (modal, type) => {
+    for (const name of type === 'followers' ? ['one.fixture', 'two.fixture'] : ['two.fixture']) {
+      const row = f.element('a', { href: `/${name}/` }, [], name); row.parentElement = modal; modal.children.push(row);
+    }
+    modal.querySelector('[aria-label="Close"]').click = () => {
+      calls.push(`close:${type}`);
+      for (const node of [...f.portal.children]) f.retire(node);
+      delete f.root.attributes['aria-hidden'];
+    };
+  };
+  f.followers.click = () => {
+    calls.push('open:followers'); const first = f.role();
+    setTimeout(() => f.retire(first.modal), 25);
+    setTimeout(() => {
+      const next = f.role('Followers'); putRows(next.modal, 'followers'); qualified = true;
+    }, 220);
+  };
+  f.following.click = () => {
+    calls.push('open:following');
+    // The earlier native portal persists, but this next list is typed first.
+    const next = f.role('Following'); putRows(next.modal, 'following');
+  };
+  const result = await f.context.InstaToolboxInstagramInspector.fetchFollowerComparison({ username: 'fixture.target',
+    allowNativeListFallback: true,
+    fetchImpl: async () => ({ status: 404, ok: false, async json() { throw new Error('HTML'); } }),
+    onNativeReadContext: value => phases.push(value?.phase || null),
+    onProgress(update) {
+      if (update.phase === 'native-reading') assert.equal(qualified, true, 'no row progress occurs before strict typed qualification');
+    },
+  });
+  assert.deepEqual(calls, ['open:followers', 'close:followers', 'open:following', 'close:following']);
+  assert.deepEqual(Array.from(result.followers, row => row.username), ['one.fixture', 'two.fixture']);
+  assert.deepEqual(Array.from(result.following, row => row.username), ['two.fixture']);
+  assert.equal(result.complete.followers, true); assert.equal(result.complete.following, true);
+  assert.deepEqual(phases, ['opening', 'ready', 'opening', 'ready', null]);
+});
+
+test('a direct empty-skeleton handoff needs the same newly inserted portal', () => {
+  const f = portalFixture(); const guard = f.context.InstaToolboxInstagramViewer.captureNativeListReadGuard(f.options);
+  const first = f.role(); assert.equal(guard.check().phase, 'opening');
+  f.retire(first.modal); const next = f.role('Followers');
+  assert.equal(guard.check().phase, 'ready'); assert.equal(guard.check().dialog, next.modal);
+});
+
+test('an existing portal keeps ordinary same-role waiting and typed-first fade behavior', () => {
+  for (const typedFirst of [false, true]) {
+    const f = portalFixture({ reused: true });
+    const guard = f.context.InstaToolboxInstagramViewer.captureNativeListReadGuard(f.options);
+    const first = f.role(typedFirst ? 'Followers' : '');
+    if (typedFirst) first.modal.style = { opacity: '0' };
+    assert.equal(guard.check().phase, 'opening');
+    first.modal.style = { opacity: '1' }; first.modalTitle.text = 'Followers';
+    assert.equal(guard.check().phase, 'ready');
+  }
+});
+
+for (const [name, mutate] of [
+  ['an existing reused portal', () => {}],
+  ['a nonempty Loading skeleton', (_f, first) => { first.modal.text = 'Loading…'; }],
+  ['a skeleton with a profile link', (f, first) => {
+    const row = f.element('a', { href: '/unread.fixture/' }); row.parentElement = first.modal; first.modal.children.push(row);
+  }],
+  ['a typed first dialog', (_f, first) => { first.modalTitle.text = 'Followers'; }],
+]) {
+  test(`the handoff exception cannot be captured from ${name}`, () => {
+    const reused = name === 'an existing reused portal';
+    const f = portalFixture({ reused }); const guard = f.context.InstaToolboxInstagramViewer.captureNativeListReadGuard(f.options);
+    const first = f.role(); mutate(f, first);
+    assert.ok(['opening', 'ready'].includes(guard.check().phase));
+    f.retire(first.modal); f.role('Followers');
+    assert.equal(guard.check().phase, 'invalid');
+  });
+}
+
+for (const [name, change] of [
+  ['a different portal', (f) => {
+    const other = f.element('div', {}, [f.element('div', { role: 'dialog', 'aria-label': 'Followers' }, [f.element('h2', {}, [], 'Followers')])]);
+    other.parentElement = f.document.body; f.document.body.children.push(other);
+  }],
+  ['a removed portal', (f) => { f.document.body.children = [f.root]; f.portal.isConnected = false; f.portal.parentElement = null; }],
+  ['a reparented portal', (f) => {
+    const wrapper = f.element('div', {}, [f.portal]); wrapper.parentElement = f.document.body;
+    f.document.body.children = [f.root, wrapper];
+  }],
+  ['a wrong successor type', (f) => { f.role('Following'); }],
+  ['an unrelated successor heading', (f) => { f.role('Confirm your identity'); }],
+  ['a second simultaneous dialog', (f) => {
+    const next = f.role('Followers'); const extra = f.element('div', { role: 'dialog' });
+    extra.parentElement = f.portal; f.portal.children = [next.modal, extra];
+  }],
+  ['changed profile totals', (f) => { f.followers.text = '3 followers'; }],
+  ['a replacement counter control', (f) => {
+    const next = f.element('a', { role: 'link', href: '#' }, [], '2 followers');
+    next.parentElement = f.header; f.header.children = [f.heading, next, f.following];
+  }],
+  ['changed actor evidence', (f) => { f.profile.children[0].attributes.alt = 'other.fixture\'s profile picture'; }],
+  ['a replacement avatar', (f) => {
+    const image = f.element('img', { alt: `${f.owner}'s profile picture` }); image.parentElement = f.profile; f.profile.children = [image];
+  }],
+  ['a changed profile route', (f) => { f.location.pathname = '/different.fixture/'; }],
+  ['a restriction', (f) => { f.setRestricted(true); }],
+  ['Stop', (f) => { f.setActive(false); }],
+  ['a hidden original rail', (f) => { f.rail.style = { display: 'none' }; }],
+]) {
+  test(`the roleless gap refuses ${name} without granting account authority`, () => {
+    const f = portalFixture(); const guard = f.context.InstaToolboxInstagramViewer.captureNativeListReadGuard(f.options);
+    const first = f.role(); assert.equal(guard.check().phase, 'opening');
+    f.retire(first.modal); assert.equal(guard.check().phase, 'opening');
+    change(f); const outcome = guard.check();
+    assert.equal(outcome.phase, 'invalid'); assert.equal(outcome.dialog, null);
+    assert.equal('accountVerified' in outcome, false); assert.equal('accountId' in outcome, false);
+  });
+}
+
+test('only one successor is permitted and a typed dialog can never restart the handoff', () => {
+  for (const typed of [false, true]) {
+    const f = portalFixture(); const guard = f.context.InstaToolboxInstagramViewer.captureNativeListReadGuard(f.options);
+    const first = f.role(); assert.equal(guard.check().phase, 'opening'); f.retire(first.modal);
+    const second = f.role(typed ? 'Followers' : '');
+    assert.equal(guard.check().phase, typed ? 'ready' : 'opening');
+    f.retire(second.modal); f.role('Followers');
+    assert.equal(guard.check().phase, 'invalid');
+  }
+});
+
+test('a roleless gap retains the original deadline and gives no public Viewer authority', () => {
+  const f = portalFixture(); let clock = 499;
+  f.options.deadline = 500; f.options.now = () => clock;
+  const guard = f.context.InstaToolboxInstagramViewer.captureNativeListReadGuard(f.options);
+  const first = f.role(); assert.equal(guard.check().phase, 'opening'); f.retire(first.modal);
+  clock = 500; assert.equal(guard.check().phase, 'timeout');
+  assert.equal(f.context.InstaToolboxInstagramViewer.inspect({ document: f.document, location: f.location, session: {},
+    opening: true, openingPortal: f.portal, nativeListDialog: { ...f.options, dialog: null } }).accountVerified, false);
+  f.setRestricted(true); assert.equal(guard.check().phase, 'invalid', 'deadline cannot mask a fresh restriction');
+});
+
+test('Stop during an actual reader skeleton gap accepts zero rows and never opens Following', async () => {
+  const f = portalFixture(), controller = new AbortController(), calls = [], phases = [];
+  f.followers.click = () => {
+    calls.push('open:followers'); const first = f.role();
+    setTimeout(() => f.retire(first.modal), 20); setTimeout(() => controller.abort(), 160);
+  };
+  f.following.click = () => calls.push('open:following');
+  await assert.rejects(f.context.InstaToolboxInstagramInspector.fetchFollowerComparison({ username: 'fixture.target',
+    allowNativeListFallback: true, signal: controller.signal,
+    fetchImpl: async () => ({ status: 404, ok: false, async json() { throw new Error('HTML'); } }),
+    onNativeReadContext: value => phases.push(value?.phase || null),
+    onProgress: update => assert.notEqual(update.phase, 'native-reading'),
+  }), error => error.code === 'stopped');
+  assert.deepEqual(calls, ['open:followers']); assert.deepEqual(phases, ['opening', null]);
+});
+
+test('an actual reader roleless gap cannot extend the existing twenty-second opening budget', async () => {
+  const f = portalFixture(), calls = [], phases = [];
+  let clock = Date.now(), skeleton = null;
+  const started = clock;
+  f.context.Date = class extends Date { static now() { return clock; } };
+  f.context.setTimeout = (callback, ms) => setTimeout(() => {
+    clock += ms;
+    if (skeleton?.isConnected) f.retire(skeleton);
+    callback();
+  }, 1);
+  f.followers.click = () => { calls.push('open:followers'); skeleton = f.role().modal; };
+  f.following.click = () => calls.push('open:following');
+  await assert.rejects(f.context.InstaToolboxInstagramInspector.fetchFollowerComparison({ username: 'fixture.target',
+    now: () => clock, maxDurationMs: 240_000, allowNativeListFallback: true,
+    setTimer: setTimeout, clearTimer: clearTimeout,
+    fetchImpl: async () => ({ status: 404, ok: false, async json() { throw new Error('HTML'); } }),
+    onNativeReadContext: value => phases.push(value?.phase || null),
+    onProgress: update => assert.notEqual(update.phase, 'native-reading'),
+  }), error => error.code === 'native-list-loading-timeout');
+  assert.equal(clock - started, 20_000);
+  assert.deepEqual(calls, ['open:followers']); assert.deepEqual(phases, ['opening', null]);
+});
 
 test('native opening ignores unrendered Close and Search SVG titles in a titleless search skeleton', () => {
   const f = openingFixture();

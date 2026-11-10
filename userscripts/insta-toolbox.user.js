@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta Toolbox
 // @namespace    https://github.com/slaveofsolace/Insta-Toolbox
-// @version      4.3.7
+// @version      4.3.8
 // @description  Mutual Checker, Presence, and DM Unsend on Instagram.
 // @author       @slaveofsolace
 // @homepageURL  https://github.com/slaveofsolace/Insta-Toolbox
@@ -12,6 +12,10 @@
 // @license      MIT
 // @match        https://www.instagram.com/*
 // @sandbox      DOM
+// @grant        GM.getValue
+// @grant        GM.setValue
+// @grant        GM.listValues
+// @grant        GM.deleteValue
 // @grant        GM_getTab
 // @grant        GM_getValue
 // @grant        GM_addValueChangeListener
@@ -6441,9 +6445,11 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
         && !url.search && !url.hash ? url.pathname : '';
     } catch { return ''; }
   }
-  function nativeListBackdrop({ document, location, context }, { capture = false, opening = false } = {}) {
+  function nativeListBackdrop({ document, location, context }, { capture = false, opening = false, openingPortal = null } = {}) {
     const owner = username(context?.username), type = context?.listType;
     const header = context?.profileHeader, dialog = context?.dialog;
+    const gap = !capture && opening && openingPortal && dialog === null;
+    const surface = gap ? openingPortal : dialog;
     if (!owner || !['followers', 'following'].includes(type)
       || !new RegExp(`^/${owner.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/?$`, 'i').test(location.pathname)) return null;
     const backdrop = header?.closest?.('[aria-hidden="true"]');
@@ -6459,11 +6465,11 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
       return true;
     };
     if (capture ? backdrop || !rendered(header) : !backdrop || backdrop === header
-      || backdrop.contains(dialog) || !rendered(header, backdrop) || !rendered(dialog, null, opening ? dialog : null)) return null;
+      || backdrop.contains(surface) || !rendered(header, backdrop) || !rendered(surface, null, opening && !gap ? dialog : null)) return null;
     const dialogs = [...document.querySelectorAll('[role="dialog"]')]
       .filter(node => rendered(node, null, capture || opening ? node : null));
-    if (capture ? dialogs.length !== 0 : dialogs.length !== 1 || dialogs[0] !== dialog) return null;
-    const labels = capture ? [] : [dialog.getAttribute('aria-label'),
+    if (capture ? dialogs.length !== 0 : gap ? dialogs.length !== 0 : dialogs.length !== 1 || dialogs[0] !== dialog) return null;
+    const labels = capture || gap ? [] : [dialog.getAttribute('aria-label'),
       ...[...dialog.querySelectorAll('[role="heading"], h1, h2')]
         .filter(node => rendered(node, null, opening ? dialog : null)).map(node => node.textContent),
       String((opening && typeof dialog.innerText === 'string' ? dialog.innerText : dialog.textContent) || '')
@@ -6471,8 +6477,10 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
     const types = new Set(labels.map(label => String(label || '').normalize('NFKC').trim().toLowerCase().match(/^(followers|following)(?:\s|$)/)?.[1]).filter(Boolean));
     if (!capture && (types.size > 1 || types.size === 1 && !types.has(type))) return null;
     const typed = types.size === 1 && types.has(type);
-    const ready = typed && (!opening || rendered(dialog));
-    if (!capture && (opening || !ready) && (!opening || (typed ? labels.slice(0, -1) : labels).some(label => {
+    const ready = !gap && typed && (!opening || rendered(dialog));
+    const empty = !capture && !gap && labels.every(label => !String(label || '').normalize('NFKC').trim())
+      && !dialog.querySelector('a[href], main, article');
+    if (!capture && !gap && (opening || !ready) && (!opening || (typed ? labels.slice(0, -1) : labels).some(label => {
       const text = String(label || '').normalize('NFKC').trim();
       return text && !/^loading[.\s\u2026]*$/i.test(text)
         && !new RegExp(`^${type}(?:\\s|$)`, 'i').test(text);
@@ -6501,19 +6509,19 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
       if (counts.size !== 1) return null;
       countControls.push(control); totals.push([...counts][0]);
     }
-    return { backdrop, controls: countControls, totals, ready, shown: node => rendered(node, backdrop)
+    return { backdrop, controls: countControls, totals, ready, typed, empty, shown: node => rendered(node, backdrop)
       && node.closest?.('[aria-hidden="true"]') === backdrop };
   }
   function inspectCurrent({ document = globalThis.document, location = globalThis.location,
     session = globalThis.InstaToolboxInstagramInspector?.inspectSession?.() || {},
-    reactionDialog = false, nativeListDialog = null } = {}, opening = false, evidence = null) {
+    reactionDialog = false, nativeListDialog = null } = {}, opening = false, evidence = null, openingPortal = null) {
     const unavailable = { accountVerified: false, usable: false, accountId: null, threadId: null };
     if (location?.origin !== origin) return { ...unavailable, reason: 'instagram-origin-required' };
     const threadId = String(location.pathname).match(/^\/direct\/t\/([0-9]+)\/?$/)?.[1] || null;
     const restriction = session.sessionExpired || session.challenge || session.actionBlocked || session.rateLimited;
     if (restriction) return { ...unavailable, threadId, restriction: true, reason: 'instagram-restricted' };
     const nativeBackdrop = nativeListDialog === null ? null
-      : nativeListBackdrop({ document, location, context: nativeListDialog }, { opening });
+      : nativeListBackdrop({ document, location, context: nativeListDialog }, { opening, openingPortal });
     if (nativeListDialog !== null && !nativeBackdrop) return { ...unavailable, threadId, reason: 'native-list-context-unavailable' };
     const rawLists = [...document.querySelectorAll('[aria-label="Thread list"]')];
     const dialogs = reactionDialog ? [...document.querySelectorAll('[role="dialog"]')]
@@ -6584,6 +6592,7 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
     deadline = Infinity, now = Date.now } = {}) {
     if (typeof readSession !== 'function' || typeof isActive !== 'function' || !username(actor)) return null;
     const initialPath = location.pathname;
+    const originalBodyRoots = new Set(document.body?.children || []);
     const context = { profileHeader, username: owner, listType, dialog: null };
     let captured, originalNavigation;
     try {
@@ -6597,6 +6606,13 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
     const originalAncestors = new Set();
     for (let node = profileHeader; node; node = node.parentElement) originalAncestors.add(node);
     let retainedDialog = null, retainedBackdrop = null, invalid = false;
+    let openingPortal = null, handoffEligible = false, handoffUsed = false, handoffGap = false, initialRoleSeen = false;
+    const portalOf = node => {
+      let root = node;
+      while (root?.parentElement && root.parentElement !== document.body) root = root.parentElement;
+      return root && root !== node && root.parentElement === document.body && !originalBodyRoots.has(root)
+        && !root.contains(profileHeader) && !root.contains(originalNavigation.rail) ? root : null;
+    };
     const refuse = () => { invalid = true; return Object.freeze({ phase: 'invalid', dialog: null }); };
     return Object.freeze({ check() {
       if (invalid) return refuse();
@@ -6615,23 +6631,40 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
           return true;
         };
         const dialogs = [...document.querySelectorAll('[role="dialog"]')].filter(rendered);
-        if (dialogs.length > 1 || retainedDialog && dialogs[0] !== retainedDialog) return refuse();
+        if (dialogs.length > 1) return refuse();
+        let gap = false;
+        if (retainedDialog && (dialogs[0] !== retainedDialog || handoffGap)) {
+          // One empty native skeleton may retire before its typed successor is
+          // mounted. Keep only this newly inserted portal, never another popup.
+          if (!handoffEligible || handoffUsed || !openingPortal?.isConnected
+            || openingPortal.parentElement !== document.body) return refuse();
+          if (dialogs.length) {
+            if (portalOf(dialogs[0]) !== openingPortal || handoffGap && dialogs[0] === retainedDialog) return refuse();
+            retainedDialog = dialogs[0]; handoffUsed = true; handoffEligible = false; handoffGap = false;
+          } else { gap = true; handoffGap = true; }
+        }
         if (dialogs.length) retainedDialog ||= dialogs[0];
-        context.dialog = retainedDialog;
+        context.dialog = gap ? null : retainedDialog;
         const profile = nativeListBackdrop({ document, location, context },
-          retainedDialog ? { opening: true } : { capture: true });
+          retainedDialog ? { opening: true, openingPortal: gap ? openingPortal : null } : { capture: true });
         if (!profile || profile.backdrop && (!originalAncestors.has(profile.backdrop)
           || retainedBackdrop && profile.backdrop !== retainedBackdrop)
           || profile.controls.some((control, index) => control !== captured.controls[index]
           || profile.totals[index] !== captured.totals[index])) return refuse();
         retainedBackdrop ||= profile.backdrop;
+        if (retainedDialog && !initialRoleSeen) {
+          initialRoleSeen = true;
+          openingPortal = profile.empty ? portalOf(retainedDialog) : null;
+          handoffEligible = Boolean(openingPortal);
+        }
+        if (profile.typed) handoffEligible = false;
         const evidence = {}, value = inspectCurrent({ document, location, session: readSession(),
-          ...(retainedDialog ? { nativeListDialog: context } : {}) }, true, evidence);
+          ...(retainedDialog ? { nativeListDialog: context } : {}) }, true, evidence, gap ? openingPortal : null);
         if (value.accountVerified !== true || value.accountId !== actor
           || ['profile', 'rail', 'picture'].some(key => evidence[key] !== originalNavigation[key]
             || !profile.shown(evidence[key]))) return refuse();
         if (profile.ready && inspectCurrent({ document, location, session: readSession(), nativeListDialog: context }).accountId !== actor) return refuse();
-        return Object.freeze({ phase: now() >= deadline ? 'timeout' : profile.ready ? 'ready' : 'opening', dialog: retainedDialog });
+        return Object.freeze({ phase: now() >= deadline ? 'timeout' : profile.ready ? 'ready' : 'opening', dialog: context.dialog });
       } catch { return refuse(); }
     } });
   }
@@ -10974,6 +11007,7 @@ function normalizePresenceActivityLog(value, { limit = DEFAULT_LIMIT } = {}) {
 }
 
 function createPresenceActivityLog({
+  journal = null,
   read = () => null,
   write = () => {},
   onWriteError = () => {},
@@ -10983,6 +11017,33 @@ function createPresenceActivityLog({
   if (typeof read !== 'function' || typeof write !== 'function'
     || typeof onWriteError !== 'function' || typeof now !== 'function') {
     throw new Error('presence-log-adapter-required');
+  }
+  if (journal !== null) {
+    for (const name of ['refresh', 'append', 'clear', 'snapshot', 'settled', 'exportRecord', 'subscribe', 'dispose']) {
+      if (typeof journal?.[name] !== 'function') throw new Error('presence-log-journal-required');
+    }
+    const report = (promise) => {
+      void promise.catch(error => { try { onWriteError(error); } catch { /* Storage failure remains in journal state. */ } });
+      return promise;
+    };
+    return Object.freeze({
+      append(value = {}) {
+        const at = timestamp(value.at) || timestamp(now());
+        const eventId = clean(value.eventId, 160)
+          || `${at}:${clean(value.kind, 24)}:${clean(value.action, 48)}:${clean(value.outcome, 32)}`;
+        const entry = normalizeEntry({ ...value, at, eventId });
+        if (!entry) throw new Error('presence-log-entry-invalid');
+        report(journal.append([entry]));
+        return entry;
+      },
+      clear: options => report(journal.clear(options)),
+      refresh: options => journal.refresh(options),
+      snapshot: () => journal.snapshot(),
+      settled: () => journal.settled(),
+      exportRecord: () => journal.exportRecord(),
+      subscribe: listener => journal.subscribe(listener),
+      dispose: () => journal.dispose(),
+    });
   }
   let record = normalizePresenceActivityLog(read(), { limit });
   let writeQueue = Promise.resolve();
@@ -11047,6 +11108,382 @@ function createPresenceActivityLog({
 
 return Object.freeze({ normalizePresenceActivityLog, createPresenceActivityLog });
 })();
+localModules["extension/presence-history-journal.js"] = (() => {
+const { normalizePresenceActivityLog } = localModules["extension/presence-activity-log.js"];
+
+const prefix = actor => 'instaToolboxPresenceActivityLogV1:' + actor + ':journal:v1:op:';
+const legacyKey = actor => 'instaToolboxPresenceActivityLogV1:' + actor;
+const noticeKey = actor => legacyKey(actor) + ':journal:v1:notice';
+const failure = reason => new Error(reason);
+const secureId = () => {
+  if (typeof globalThis.crypto?.getRandomValues !== 'function') throw failure('history-randomness-unavailable');
+  return [...globalThis.crypto.getRandomValues(new Uint8Array(16))]
+    .map(value => value.toString(16).padStart(2, '0')).join('');
+};
+const contentHash = async value => {
+  if (typeof globalThis.crypto?.subtle?.digest !== 'function') throw failure('history-hash-unavailable');
+  const bytes = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(value)));
+  return [...new Uint8Array(bytes)].map(value => value.toString(16).padStart(2, '0')).join('');
+};
+
+const clone = value => structuredClone(value);
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+function validOperation(key, value, actor) {
+  if (!value || value.version !== 1 || value.actor !== actor
+    || !['baseline', 'append', 'clear', 'checkpoint'].includes(value.kind)
+    || typeof value.id !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(value.id)
+    || key !== prefix(actor) + value.id || !Array.isArray(value.clearIds)
+    || value.clearIds.some(id => typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(id))
+    || new Set(value.clearIds).size !== value.clearIds.length
+    || !Array.isArray(value.entries) || value.entries.length > 500) return null;
+  const normalized = normalizePresenceActivityLog({ entries: value.entries });
+  if (!same(normalized.entries, value.entries)) return null;
+  if (value.kind === 'clear' && value.entries.length) return null;
+  if (value.kind === 'baseline' && (value.clearIds.length || !/^baseline_[a-f0-9]{64}$/.test(value.id))) return null;
+  if (value.kind === 'checkpoint' && (!Array.isArray(value.covers) || value.covers.length > 32
+    || value.covers.some(ref => !ref || !ref.key?.startsWith(prefix(actor)) || !/^[a-f0-9]{64}$/.test(ref.hash))
+    || !Array.isArray(value.rows) || value.rows.length > 500 || value.entries.length
+    || value.rows.some(row => !row || !same(normalizePresenceActivityLog({ entries: [row.entry] }).entries, [row.entry])
+      || !Array.isArray(row.contexts) || !row.contexts.length || row.contexts.some(context => !Array.isArray(context)
+        || context.some(id => typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(id))))
+    || !Array.isArray(value.legacyImportIds)
+    || value.legacyImportIds.some(id => typeof id !== 'string' || !/^baseline_[a-f0-9]{64}$/.test(id)))) return null;
+  return clone(value);
+}
+
+function reduceView(known, actor, unresolvedKeys = []) {
+  const operations = [...known].flatMap(([key, value]) => {
+    const operation = validOperation(key, value, actor);
+    return operation ? [operation] : [];
+  });
+  // Every observed immutable Clear barrier remains in the applied fence set.
+  // Time never chooses a winning Clear or establishes discovery completeness.
+  const clearIds = [...new Set(operations.flatMap(op => [
+    ...(op.kind === 'clear' ? [op.id] : []),
+    ...(op.kind === 'checkpoint' ? op.clearIds : []),
+  ]))].sort();
+  const legacyImportIds = [...new Set(operations.flatMap(op => op.kind === 'baseline'
+    ? [op.id] : op.kind === 'checkpoint' ? op.legacyImportIds : []))].sort();
+  const byId = new Map(), conflicts = new Set(), contextsById = new Map();
+  let fencedOperationCount = 0;
+  for (const operation of operations) {
+    if (operation.kind === 'clear') continue;
+    const rows = operation.kind === 'checkpoint' ? operation.rows
+      : operation.entries.map(entry => ({ entry, contexts: [operation.clearIds] }));
+    for (const { entry, contexts } of rows) {
+      const eligible = contexts.filter(context => clearIds.every(id => context.includes(id)));
+      if (!eligible.length) { fencedOperationCount += 1; continue; }
+      const old = byId.get(entry.eventId);
+      if (old && !same(old, entry)) conflicts.add(entry.eventId);
+      else byId.set(entry.eventId, entry);
+      const original = contextsById.get(entry.eventId) || new Map();
+      for (const context of eligible) original.set(JSON.stringify([...context].sort()), [...context].sort());
+      contextsById.set(entry.eventId, original);
+    }
+  }
+  const entries = [...byId.values()].filter(entry => !conflicts.has(entry.eventId))
+    .sort((a, b) => b.at - a.at || a.eventId.localeCompare(b.eventId)).slice(0, 500);
+  const rows = entries.map(entry => ({ entry, contexts: [...contextsById.get(entry.eventId).values()] }));
+  return Object.freeze({ version: 1, entries, rows, clearIds, legacyImportIds,
+    viewScope: 'confirmed-discovered-operations', globallyFresh: false,
+    discoveredOperationCount: operations.length, unresolvedKeys: [...unresolvedKeys],
+    fencedOperationCount, conflictingEventIds: [...conflicts].sort(),
+  });
+}
+
+
+/**
+ * Private, actor-bound history only. Immutable acknowledged operations avoid
+ * overwriting another instance's history. Discovery is never a freshness/CAS
+ * claim. The 500 bound is the visible/exported view, not all backing storage.
+ */
+function createPresenceHistoryJournal({
+  accountKey, readLegacy, storage, randomId = secureId, hash = contentHash,
+  now = Date.now, timeoutMs = 10_000,
+} = {}) {
+  if (typeof accountKey !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(accountKey)
+    || typeof readLegacy !== 'function' || typeof randomId !== 'function'
+    || typeof hash !== 'function' || typeof now !== 'function'
+    || !Number.isFinite(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000
+    || ['getValue', 'listValues', 'setValue', 'deleteValue', 'listen', 'unlisten']
+      .some(name => typeof storage?.[name] !== 'function')) throw failure('history-adapter-unavailable');
+  const actor = accountKey;
+  const known = new Map(), pending = new Map(), issued = new Set(), listeners = new Set();
+  const cleanupUncertain = new Set();
+  let unresolved = [], tail = Promise.resolve(), latest = Promise.resolve();
+  let initialized = false, loading = false, clearing = false, readFailed = false;
+  let disposed = false, refreshing = null, compacting = null, remoteClearRevision = 0;
+  let applied = new Set();
+
+  const view = () => reduceView(known, actor, unresolved);
+  const pendingRelevant = () => {
+    const fences = view().clearIds;
+    return [...pending.values()].filter(item => ['append', 'clear'].includes(item.operation.kind)
+      && (item.operation.kind === 'clear' || fences.every(id => item.operation.clearIds.includes(id))));
+  };
+  const snapshot = () => {
+    const current = view(), waiting = pendingRelevant();
+    return clone({ version: 1, entries: current.entries, history: {
+      initialized, loading, saving: waiting.some(item => !item.failed),
+      clearing, error: readFailed || waiting.some(item => item.failed),
+      pendingCount: waiting.length, unresolvedCount: unresolved.length + cleanupUncertain.size,
+      conflictCount: current.conflictingEventIds.length, scope: 'confirmed-discovered',
+      globallyFresh: false, remoteClearRevision,
+    } });
+  };
+  function publish() {
+    const next = new Set(view().clearIds);
+    for (const id of next) if (!applied.has(id) && !issued.has(id)) remoteClearRevision += 1;
+    applied = next;
+    if (disposed) return;
+    const value = snapshot();
+    for (const listener of listeners) { try { listener(value); } catch { /* A view cannot authorize or abort storage work. */ } }
+  }
+  const alive = signal => {
+    if (disposed || signal.aborted) throw failure('history-operation-interrupted');
+  };
+  function awaitSignal(value, signal) {
+    if (signal.aborted) { void Promise.resolve(value).catch(() => {}); return Promise.reject(failure('history-operation-timeout')); }
+    return new Promise((resolve, reject) => {
+      const abort = () => { signal.removeEventListener('abort', abort); reject(failure('history-operation-timeout')); };
+      signal.addEventListener('abort', abort, { once: true });
+      Promise.resolve(value).then(result => {
+        signal.removeEventListener('abort', abort);
+        if (signal.aborted) reject(failure('history-operation-timeout')); else resolve(result);
+      }, error => { signal.removeEventListener('abort', abort); reject(error); });
+    });
+  }
+  async function call(name, args, signal) {
+    alive(signal);
+    const result = storage[name](...args);
+    if (!result || typeof result.then !== 'function') throw failure('history-acknowledged-adapter-required');
+    const value = await awaitSignal(result, signal);
+    alive(signal);
+    return value;
+  }
+  function schedule(operation) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const result = tail.then(() => { alive(controller.signal); return operation(controller.signal); });
+    tail = result.catch(() => {});
+    const bounded = awaitSignal(result, controller.signal).finally(() => clearTimeout(timer));
+    void bounded.catch(() => {});
+    return bounded;
+  }
+  function checkGuard(guard) {
+    if (guard === undefined) return;
+    if (typeof guard !== 'function') throw failure('history-account-changed');
+    const result = guard();
+    if (result !== true) {
+      if (result && typeof result.then === 'function') void Promise.resolve(result).catch(() => {});
+      throw failure('history-account-changed');
+    }
+  }
+  function operation(kind, entries = []) {
+    const id = randomId();
+    if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(id)) throw failure('history-operation-id-invalid');
+    return { version: 1, actor, id, kind,
+      clearIds: [...new Set([...view().clearIds, ...issued])].sort(),
+      entries: normalizePresenceActivityLog({ entries }).entries };
+  }
+  function prepare(value, guard) {
+    const key = prefix(actor) + value.id;
+    const clean = validOperation(key, value, actor);
+    if (!clean) throw failure('history-operation-invalid');
+    checkGuard(guard);
+    const existing = pending.get(key);
+    if (existing && !same(existing.operation, clean)) throw failure('history-operation-retry-changed');
+    const item = existing || { operation: clean, failed: false };
+    pending.set(key, item);
+    if (clean.kind === 'clear') issued.add(clean.id);
+    return { key, item, guard };
+  }
+  async function commitInside(prepared, signal) {
+    const { key, item, guard } = prepared;
+    let dispatched = false;
+    try {
+      alive(signal);
+      checkGuard(guard); // No await between fresh actor proof and dispatch.
+      dispatched = true;
+      prepared.dispatched = true;
+      item.failed = false;
+      await call('setValue', [key, clone(item.operation)], signal);
+      known.set(key, clone(item.operation));
+      pending.delete(key);
+      publish();
+      // Notice is an optional discovery hint, never a canonical record or receipt.
+      try {
+        const hint = storage.setValue(noticeKey(actor), { version: 1, operationKey: key });
+        void Promise.resolve(hint).catch(() => {});
+      } catch { /* The immutable operation is already acknowledged. */ }
+      return { operationId: item.operation.id, acknowledged: true,
+        fenced: item.operation.kind !== 'clear' && !view().clearIds.every(id => item.operation.clearIds.includes(id)),
+        view: snapshot() };
+    } catch (error) {
+      if (!dispatched && item.operation.kind === 'clear') {
+        pending.delete(key); issued.delete(item.operation.id);
+      } else item.failed = true;
+      publish();
+      throw error;
+    }
+  }
+  function submit(value, guard) {
+    let prepared;
+    try { prepared = prepare(value, guard); }
+    catch (error) { return Promise.reject(error); }
+    publish();
+    const result = schedule(signal => commitInside(prepared, signal));
+    void result.catch(() => { prepared.item.failed = true; publish(); });
+    return result;
+  }
+  async function discoverInside(signal) {
+    const keys = await call('listValues', [], signal);
+    if (!Array.isArray(keys) || keys.some(key => typeof key !== 'string')) throw failure('history-discovery-invalid');
+    const missing = [];
+    for (const key of keys) {
+      if (!key.startsWith(prefix(actor)) || pending.has(key)) continue;
+      const value = await call('getValue', [key, null], signal);
+      const clean = validOperation(key, value, actor);
+      if (!clean) { missing.push(key); continue; }
+      const old = known.get(key);
+      if (old && !same(old, clean)) { missing.push(key); continue; }
+      known.set(key, clean);
+    }
+    unresolved = missing;
+    alive(signal);
+  }
+  async function importInside(signal) {
+    const record = await awaitSignal(readLegacy(), signal);
+    alive(signal);
+    const entries = normalizePresenceActivityLog(record).entries;
+    const id = 'baseline_' + await awaitSignal(hash(entries), signal);
+    alive(signal);
+    if (!/^baseline_[a-f0-9]{64}$/.test(id)) throw failure('history-hash-invalid');
+    if (view().legacyImportIds.includes(id)) return;
+    // Import is always original generation, including after Clear/reload.
+    await commitInside(prepare({ version: 1, actor, id, kind: 'baseline', clearIds: [], entries }), signal);
+  }
+  async function retryInside(signal) {
+    for (const [key, item] of [...pending]) {
+      if (item.operation.kind !== 'append' || !item.failed) continue;
+      if (!view().clearIds.every(id => item.operation.clearIds.includes(id))) { pending.delete(key); continue; }
+      await commitInside({ key, item }, signal);
+    }
+  }
+  function refresh({ retryPending = false } = {}) {
+    if (refreshing) return refreshing;
+    loading = true; publish();
+    refreshing = schedule(async signal => {
+      await discoverInside(signal);
+      await importInside(signal);
+      if (retryPending) await retryInside(signal);
+      alive(signal);
+      initialized = true; readFailed = false;
+      return snapshot();
+    }).catch(error => { readFailed = true; throw error; }).finally(() => {
+      loading = false; refreshing = null; publish();
+    }).then(() => snapshot());
+    void refreshing.catch(() => {});
+    return refreshing;
+  }
+  function append(entries) {
+    if (!Array.isArray(entries) || !entries.length || entries.length > 500) return Promise.reject(failure('history-entry-invalid'));
+    const normalized = normalizePresenceActivityLog({ entries }).entries;
+    if (normalized.length !== entries.length) return Promise.reject(failure('history-entry-invalid'));
+    const value = operation('append', normalized); // Capture original context before queue wait.
+    latest = submit(value);
+    void latest.then(() => { if (known.size > 64) void compact().catch(() => {}); }, () => {});
+    return latest;
+  }
+  function clear({ beforeCommit } = {}) {
+    if (clearing) return Promise.reject(failure('history-clear-pending'));
+    let prepared;
+    try { prepared = prepare(operation('clear'), beforeCommit); }
+    catch (error) { return Promise.reject(error); }
+    clearing = true; publish();
+    latest = schedule(signal => commitInside(prepared, signal)).catch(error => {
+      if (!prepared.dispatched) { pending.delete(prepared.key); issued.delete(prepared.item.operation.id); }
+      throw error;
+    }).finally(() => { clearing = false; publish(); });
+    void latest.catch(() => {});
+    return latest;
+  }
+  async function compactInside(signal) {
+    const before = view(), conflicts = new Set(before.conflictingEventIds);
+    const candidates = [...known].filter(([, value]) => value.kind !== 'clear'
+      && !(value.kind === 'checkpoint' ? value.rows.map(row => row.entry) : value.entries)
+        .some(entry => conflicts.has(entry.eventId))).slice(0, 32);
+    if (!candidates.length) return snapshot();
+    const value = operation('checkpoint');
+    value.clearIds = [...before.clearIds];
+    value.rows = clone(before.rows);
+    value.legacyImportIds = [...before.legacyImportIds];
+    value.covers = [];
+    for (const [key, covered] of candidates) {
+      const fingerprint = await awaitSignal(hash(covered), signal);
+      alive(signal);
+      if (!/^[a-f0-9]{64}$/.test(fingerprint)) throw failure('history-hash-invalid');
+      value.covers.push({ key, hash: fingerprint });
+    }
+    await commitInside(prepare(value), signal);
+    // The acknowledged checkpoint establishes logical 500-entry retirement.
+    // Physical deletion is separate and may fail/settle indeterminately.
+    const cleanup = [];
+    const currentConflicts = new Set(view().conflictingEventIds);
+    for (const ref of value.covers) {
+      const covered = known.get(ref.key);
+      if (!covered || covered.kind === 'clear') continue;
+      const fingerprint = await awaitSignal(hash(covered), signal);
+      alive(signal);
+      const rows = covered.kind === 'checkpoint' ? covered.rows.map(row => row.entry) : covered.entries;
+      if (fingerprint !== ref.hash || rows.some(entry => currentConflicts.has(entry.eventId))) continue;
+      cleanup.push(ref.key);
+    }
+    for (const key of cleanup) known.delete(key);
+    publish();
+    for (const key of cleanup) {
+      try { await call('deleteValue', [key], signal); cleanupUncertain.delete(key); }
+      catch (error) { cleanupUncertain.add(key); publish(); throw error; }
+    }
+    publish();
+    return snapshot();
+  }
+  function compact() {
+    if (compacting) return compacting;
+    compacting = schedule(signal => compactInside(signal)).finally(() => { compacting = null; publish(); });
+    void compacting.catch(() => {});
+    return compacting;
+  }
+  const listenerId = storage.listen(noticeKey(actor), value => {
+    if (disposed || value?.version !== 1 || typeof value.operationKey !== 'string'
+      || !value.operationKey.startsWith(prefix(actor))) return;
+    void refresh().catch(() => {});
+  });
+  return Object.freeze({
+    refresh, append, clear, compact, snapshot,
+    settled: () => latest,
+    exportRecord() {
+      const value = snapshot();
+      return Object.freeze({ schemaVersion: 1, kind: 'insta-toolbox-presence-log',
+        generatedAt: new Date(now()).toISOString(), entries: value.entries,
+        historyScope: 'confirmed-discovered', globallyFresh: false,
+        pendingActivityExcluded: value.history.pendingCount > 0 });
+    },
+    subscribe(listener) {
+      if (typeof listener !== 'function') throw failure('presence-log-listener-required');
+      listeners.add(listener); listener(snapshot());
+      return () => listeners.delete(listener);
+    },
+    dispose() {
+      if (disposed) return;
+      disposed = true; listeners.clear(); storage.unlisten(listenerId);
+    },
+  });
+}
+
+return Object.freeze({ createPresenceHistoryJournal });
+})();
 localModules["extension/presence-session-panel.js"] = (() => {
 const { PRESENCE_ACTION_LABELS, normalizePresenceSessionOptions } = localModules["extension/presence-session.js"];
 const { createPresenceActivityLog } = localModules["extension/presence-activity-log.js"];
@@ -11073,6 +11510,7 @@ function mountPresenceSessionPanel({
   writePreferences = () => {},
   readLog = () => null,
   writeLog = () => {},
+  createHistoryStore = null,
   onAccountReady = () => {},
   busy = () => false,
   onStatus = () => {},
@@ -11085,6 +11523,7 @@ function mountPresenceSessionPanel({
     || typeof inspectAccount !== 'function' || typeof confirmAction !== 'function'
     || typeof readPreferences !== 'function' || typeof writePreferences !== 'function'
     || typeof readLog !== 'function' || typeof writeLog !== 'function'
+    || (createHistoryStore !== null && typeof createHistoryStore !== 'function')
     || typeof onAccountReady !== 'function' || typeof busy !== 'function' || typeof onStatus !== 'function' || typeof now !== 'function') {
     throw new Error('presence-panel-adapter-required');
   }
@@ -11214,6 +11653,8 @@ function mountPresenceSessionPanel({
   const logSummary = create('summary', 'Activity log');
   const logBody = create('div', null, 'presence-log-body');
   const logEmpty = create('p', 'No Presence activity yet.', 'presence-log-empty');
+  const logStatus = create('p', '', 'presence-log-empty');
+  const logHint = create('p', '', 'presence-log-empty');
   const logRecent = create('ul', null, 'presence-results');
   logRecent.setAttribute('aria-label', 'Recent Presence activity');
   const logControls = create('div', null, 'presence-controls');
@@ -11221,13 +11662,14 @@ function mountPresenceSessionPanel({
   const exportLog = create('button', 'Download log', 'button quiet'); exportLog.type = 'button';
   const clearLog = create('button', 'Clear log', 'button quiet'); clearLog.type = 'button';
   logControls.append(openLog, exportLog, clearLog);
-  logBody.append(logEmpty, logRecent, logControls);
+  logBody.append(logStatus, logHint, logEmpty, logRecent, logControls);
   logDetails.append(logSummary, logBody);
   root.append(style, heading, intro, options, runGrid, modeHelp, statusBox, actions, results, logDetails);
   container.replaceChildren(root);
 
   let disposed = false;
   let confirming = false;
+  let historyStart = null;
   let lastSessionActions = 10;
   let logWindow = null;
   const loggedEvents = new Set();
@@ -11238,6 +11680,9 @@ function mountPresenceSessionPanel({
   let unsubscribeLog = null;
   let currentRunLog = null;
   let logReadFailed = false;
+  const initialHistory = new Map();
+  const historyUi = new Map();
+  const clearingLogs = new Set();
   const verifiedLogAccount = (value) => {
     try {
       const account = value === undefined ? inspectAccount() : value;
@@ -11256,18 +11701,30 @@ function mountPresenceSessionPanel({
     let binding;
     try {
       const owner = Object.freeze({ ...account });
-      const log = createPresenceActivityLog({ read: () => readLog(owner.accountKey),
-        write: value => writeLog(value, owner.accountKey), now,
+      const journal = createHistoryStore ? createHistoryStore(owner.accountKey) : null;
+      if (createHistoryStore && journal == null) throw new Error('presence-log-journal-required');
+      const log = createPresenceActivityLog({
+        ...(createHistoryStore ? { journal }
+          : { read: () => readLog(owner.accountKey), write: value => writeLog(value, owner.accountKey) }), now,
         onWriteError: () => {
-          if (visibleLog === binding) onStatus('Presence activity could not be saved. Existing history is unchanged.');
+          if (binding) historyUi.get(binding).error = true;
+          if (visibleLog === binding) renderLog();
         } });
       binding = Object.freeze({ account: owner, log });
       logs.set(owner.accountKey, binding);
+      historyUi.set(binding, { error: false, notice: '', saving: false, remoteClearRevision: 0 });
+      if (typeof log.refresh === 'function') {
+        const ready = Promise.resolve(log.refresh()).catch(() => {
+          historyUi.get(binding).error = true;
+          if (!disposed && visibleLog === binding) renderLog();
+          return log.snapshot();
+        });
+        initialHistory.set(binding, ready);
+      }
       logReadFailed = false;
       return binding;
     } catch {
       logReadFailed = true;
-      onStatus('Presence history could not be loaded. Existing history is unchanged.');
       return null;
     }
   }
@@ -11280,12 +11737,12 @@ function mountPresenceSessionPanel({
       unsubscribeLog?.();
       visibleLog = next;
       unsubscribeLog = next?.log.subscribe(record => {
-        if (visibleLog !== next) return;
+        if (disposed || visibleLog !== next) return;
         if (sameLogAccount(verifiedLogAccount(), next.account)) renderLog(record);
         else refreshLog();
       }) || null;
       if (!next) renderLog();
-      if (next) { try { onAccountReady(next.account); } catch { /* History does not authorize or block a run. */ } }
+      if (next) { try { onAccountReady(next.account); } catch { /* Context guidance cannot change action authority. */ } }
     } else renderLog();
     return next;
   }
@@ -11400,6 +11857,7 @@ function mountPresenceSessionPanel({
     if (statusDetail.textContent !== detail) statusDetail.textContent = detail;
     start.hidden = snapshot.status !== 'idle' && !['completed', 'stopped', 'expired', 'needs-attention'].includes(snapshot.status);
     start.disabled = confirming || busy();
+    start.textContent = historyStart ? 'Loading history…' : 'Start';
     pause.hidden = snapshot.canPause !== true;
     pause.disabled = snapshot.canPause !== true;
     resume.hidden = snapshot.canResume !== true;
@@ -11427,21 +11885,48 @@ function mountPresenceSessionPanel({
     const label = entry.target || PRESENCE_ACTION_LABELS[entry.action] || 'Presence';
     return { label, detail: `${time} · ${entry.outcome}${entry.detail ? ` · ${entry.detail}` : ''}` };
   }
+  function historyPresentation(record, binding = visibleLog) {
+    const history = record.history, ui = historyUi.get(binding);
+    if (!binding) return { ready: false, status: logReadFailed
+      ? 'Activity history could not be loaded. Reopen Activity log to retry.'
+      : 'Verify your account to load its local Presence history.', hint: '' };
+    if (!history) return { ready: true, status: ui?.error ? 'Some activity could not be saved. Keep this tab open.' : ui?.notice || '', hint: '' };
+    const remoteClear = ui && history.remoteClearRevision > ui.remoteClearRevision;
+    if (ui?.saving && !history.saving && !history.pendingCount && !history.error) ui.notice = 'Activity saved.';
+    if (remoteClear) { ui.remoteClearRevision = history.remoteClearRevision; ui.notice = 'Activity log cleared in another tab.'; }
+    if (ui) ui.saving = history.saving || history.pendingCount > 0;
+    const status = history.clearing || clearingLogs.has(binding) ? 'Clearing activity…'
+      : history.loading ? 'Loading activity…'
+        : history.error || ui?.error ? 'Activity history could not be updated. Keep this tab open and reopen Activity log to retry.'
+          : history.saving || history.pendingCount > 0 ? 'Saving activity…'
+            : !history.initialized ? 'Activity history is unavailable. Reopen Activity log to retry before starting.'
+              : history.unresolvedCount ? 'Some history updates are still being reconciled.'
+                : history.conflictCount ? 'Some activity could not be read. The loaded log may be incomplete.'
+                : ui?.notice || '';
+    const hint = 'Shows up to 500 activity entries received by this tab. Other tabs may take time to appear.'
+      + (history.pendingCount > 0 ? ' Activity still being saved is not included in downloads.' : '');
+    return { ready: history.initialized === true, status, hint };
+  }
   function renderLog(record = visibleLog?.log.snapshot() || { entries: [] }) {
     if (disposed) return;
+    if (visibleLog && !sameLogAccount(verifiedLogAccount(), visibleLog.account)) { refreshLog(); return; }
+    const presentation = historyPresentation(record);
     logRecent.replaceChildren();
-    logEmpty.textContent = visibleLog ? 'No Presence activity yet.' : logReadFailed
-      ? 'Presence history could not be loaded. Existing history is unchanged.'
-      : 'Verify your account to load its local Presence history.';
-    logEmpty.hidden = record.entries.length > 0;
+    if (logStatus.textContent !== presentation.status) logStatus.textContent = presentation.status;
+    logStatus.hidden = !presentation.status;
+    logHint.textContent = presentation.hint;
+    logHint.hidden = !presentation.hint;
+    logEmpty.textContent = record.history ? 'No activity to show.' : 'No Presence activity yet.';
+    logEmpty.hidden = !presentation.ready || record.entries.length > 0;
     for (const entry of record.entries.slice(0, 5)) {
       const row = create('li');
       const formatted = formatEntry(entry);
       row.append(create('strong', formatted.label), create('small', formatted.detail));
       logRecent.append(row);
     }
-    clearLog.disabled = record.entries.length === 0;
-    exportLog.disabled = record.entries.length === 0;
+    clearLog.disabled = !presentation.ready || clearingLogs.has(visibleLog) || record.history?.clearing === true
+      || (!record.history && record.entries.length === 0);
+    exportLog.disabled = !visibleLog || record.entries.length === 0;
     openLog.disabled = !visibleLog;
     renderLogWindow(record);
   }
@@ -11455,7 +11940,8 @@ function mountPresenceSessionPanel({
     targetWindow.setTimeout(() => targetWindow.URL.revokeObjectURL(href), 0);
   }
   function renderLogWindow(record = visibleLog?.log.snapshot() || { entries: [] }) {
-    if (!logWindow || logWindow.closed) return;
+    if (disposed || !logWindow || logWindow.closed) return;
+    if (visibleLog && !sameLogAccount(verifiedLogAccount(), visibleLog.account)) { refreshLog(); return; }
     const target = logWindow.document;
     const styleNode = target.createElement('style');
     styleNode.textContent = 'html{color-scheme:light dark}body{margin:0;padding:24px;background:#101114;color:#f4f1e8;font:15px/1.5 system-ui,sans-serif}main{max-width:760px;margin:auto}h1{font-size:22px;margin:0 0 4px}p{color:#b8b8bd;margin:0 0 20px}ol{list-style:none;margin:0;padding:0;border-top:1px solid #34363d}li{padding:12px 0;border-bottom:1px solid #34363d}strong,small{display:block;overflow-wrap:anywhere}small{color:#b8b8bd;margin-top:2px}.actions{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 20px}button{min-height:44px;padding:8px 14px;border:1px solid #545760;border-radius:8px;background:#202228;color:inherit;font:inherit;cursor:pointer}button:focus-visible{outline:2px solid #d94d7c;outline-offset:2px}@media(forced-colors:active){button{border-color:CanvasText}}';
@@ -11464,12 +11950,16 @@ function mountPresenceSessionPanel({
     const displayedLog = visibleLog;
     const note = target.createElement('p'); note.textContent = displayedLog
       ? `Stored only in this browser for @${displayedLog.account.accountId}.` : 'Verify your account to load its local Presence history.';
+    const presentation = historyPresentation(record, displayedLog);
+    const state = target.createElement('p'); state.textContent = presentation.status;
+    const hint = target.createElement('p'); hint.textContent = presentation.hint;
     const buttons = target.createElement('div'); buttons.className = 'actions';
     const download = target.createElement('button'); download.type = 'button'; download.textContent = 'Download log';
-    download.disabled = record.entries.length === 0;
+    download.disabled = !displayedLog || record.entries.length === 0;
     download.addEventListener('click', () => exportHistory(displayedLog, logWindow));
     const clear = target.createElement('button'); clear.type = 'button'; clear.textContent = 'Clear log';
-    clear.disabled = record.entries.length === 0;
+    clear.disabled = !presentation.ready || clearingLogs.has(displayedLog) || record.history?.clearing === true
+      || (!record.history && record.entries.length === 0);
     clear.addEventListener('click', () => clearHistory(displayedLog, logWindow));
     buttons.append(download, clear);
     const list = target.createElement('ol');
@@ -11480,10 +11970,10 @@ function mountPresenceSessionPanel({
       const small = target.createElement('small'); small.textContent = formatted.detail;
       row.append(strong, small); list.append(row);
     }
-    if (!record.entries.length) {
-      const empty = target.createElement('p'); empty.textContent = 'No Presence activity yet.'; list.append(empty);
+    if (!record.entries.length && presentation.ready) {
+      const empty = target.createElement('p'); empty.textContent = record.history ? 'No activity to show.' : 'No Presence activity yet.'; list.append(empty);
     }
-    main.append(title, note, buttons, list);
+    main.append(title, note, state, hint, buttons, list);
     target.head.replaceChildren(styleNode);
     target.title = 'Insta Toolbox · Presence activity';
     target.body.replaceChildren(main);
@@ -11494,17 +11984,49 @@ function mountPresenceSessionPanel({
     downloadRecord(binding.log.exportRecord(), targetWindow);
     return true;
   }
-  function clearHistory(expected = visibleLog, targetWindow = window) {
+  async function refreshHistory(expected = visibleLog) {
     const binding = refreshLog();
-    if (!binding || expected !== binding) return false;
-    if (!targetWindow?.confirm?.(`Clear the local Presence activity log for @${binding.account.accountId}?`)) return false;
-    if (!sameLogAccount(verifiedLogAccount(), binding.account)) { refreshLog(); return false; }
-    binding.log.clear();
-    return true;
+    if (!binding || binding !== expected || typeof binding.log.refresh !== 'function') return false;
+    if (binding.log.snapshot().history?.loading) return false;
+    const ui = historyUi.get(binding);
+    ui.error = false;
+    try { await binding.log.refresh({ retryPending: true }); }
+    catch { ui.error = true; }
+    if (disposed || binding !== visibleLog || !sameLogAccount(verifiedLogAccount(), binding.account)) return false;
+    renderLog();
+    return binding.log.snapshot().history?.initialized === true;
+  }
+  async function clearHistory(expected = visibleLog, targetWindow = window) {
+    const binding = refreshLog();
+    if (!binding || expected !== binding || clearingLogs.has(binding)
+      || binding.log.snapshot().history?.initialized === false || binding.log.snapshot().history?.clearing) return false;
+    const ui = historyUi.get(binding);
+    try {
+      if (targetWindow?.confirm?.(`Clear the local Presence activity log for @${binding.account.accountId}? This also discards activity waiting to sync from other tabs. Tabs can add new activity after they receive the clear.`) !== true) return false;
+    } catch { ui.error = true; renderLog(); return false; }
+    if (disposed || visibleLog !== binding || !sameLogAccount(verifiedLogAccount(), binding.account)) { refreshLog(); return false; }
+    clearingLogs.add(binding); ui.error = false; ui.notice = '';
+    renderLog();
+    try {
+      await binding.log.clear({ beforeCommit: () => !disposed && visibleLog === binding
+        && sameLogAccount(verifiedLogAccount(), binding.account) });
+      if (disposed || visibleLog !== binding || !sameLogAccount(verifiedLogAccount(), binding.account)) return false;
+      ui.notice = 'Activity log cleared.';
+      return true;
+    } catch {
+      if (!disposed && visibleLog === binding && sameLogAccount(verifiedLogAccount(), binding.account)) ui.error = true;
+      return false;
+    } finally {
+      clearingLogs.delete(binding);
+      if (!disposed) refreshLog();
+    }
   }
   function appendLog(value, binding) {
     if (!binding) return;
-    try { binding.log.append(value); } catch { onStatus('Presence ran, but its activity log could not be updated.'); }
+    try { binding.log.append(value); } catch {
+      historyUi.get(binding).error = true;
+      if (visibleLog === binding) renderLog();
+    }
   }
   const logRunFor = snapshot => snapshot.accountId ? runLogs.get(snapshot.accountId) : currentRunLog;
   function logResultEntries(snapshot, run = logRunFor(snapshot)) {
@@ -11516,8 +12038,9 @@ function mountPresenceSessionPanel({
       loggedEvents.add(entry.eventId);
     }
   }
+  const sessionActive = () => ['running', 'searching', 'waiting', 'quiet', 'paused', 'stopping'].includes(session.snapshot().status);
   async function begin() {
-    if (disposed || confirming || busy()) return false;
+    if (disposed || confirming || historyStart || busy() || sessionActive()) return false;
     let options;
     try { options = save(); } catch { onStatus('Choose a valid action limit.'); return false; }
     const enabled = ACTIONS.filter(([key]) => options.actions[key]);
@@ -11527,8 +12050,28 @@ function mountPresenceSessionPanel({
       onStatus('Instagram account could not be verified. Reload Instagram and try again.');
       return false;
     }
-    refreshLog();
+    const binding = refreshLog();
     const reviewedSignature = signature(options);
+    if (createHistoryStore && !binding) { logDetails.open = true; renderLog(); return false; }
+    if (binding?.log.snapshot().history?.initialized === false) {
+      const attempt = {};
+      historyStart = attempt;
+      confirming = true;
+      render();
+      let ownsAttempt = false;
+      try { await initialHistory.get(binding); }
+      finally {
+        ownsAttempt = historyStart === attempt;
+        if (ownsAttempt) { historyStart = null; confirming = false; }
+        render();
+      }
+      let unchangedOptions = false;
+      try { unchangedOptions = signature(readOptions()) === reviewedSignature; } catch { /* Refuse changed choices. */ }
+      if (!ownsAttempt || disposed || confirming || busy() || sessionActive()
+        || !sameLogAccount(verifiedLogAccount(), binding.account) || !unchangedOptions) return false;
+      if (binding.log.snapshot().history?.initialized !== true) { logDetails.open = true; renderLog(); return false; }
+    }
+    if (disposed || busy() || sessionActive()) return false;
     const expiresAt = now() + (options.mode === 'live'
       ? options.liveDurationMinutes * 60_000 : 15 * 60_000);
     confirming = true;
@@ -11561,6 +12104,7 @@ function mountPresenceSessionPanel({
       confirming = false;
       render();
     }
+    if (disposed || busy() || sessionActive()) return false;
     if (!confirmation) { render(); onStatus('Presence canceled. Nothing changed.'); return false; }
     const current = inspectAccount();
     let currentOptions;
@@ -11569,6 +12113,7 @@ function mountPresenceSessionPanel({
     }
     if (current?.accountVerified !== true || current.usable !== true
       || current.accountId !== account.accountId || signature(currentOptions) !== reviewedSignature
+      || (createHistoryStore && current.accountKey !== account.accountKey)
       || confirmation.action !== 'presence' || confirmation.accountId !== account.accountId
       || confirmation.maxActions !== options.maxActions || confirmation.options !== reviewedSignature
       || Number(confirmation.expiresAt) !== expiresAt || expiresAt <= now()) {
@@ -11577,7 +12122,7 @@ function mountPresenceSessionPanel({
       return false;
     }
     const review = session.createReview({ accountId: account.accountId, options, expiresAt });
-    const runLog = Object.freeze({ accountId: current.accountId, binding: scopedLog(verifiedLogAccount(current)) });
+    const runLog = Object.freeze({ accountId: current.accountId, binding: binding || scopedLog(verifiedLogAccount(current)) });
     currentRunLog = runLog;
     runLogs.set(runLog.accountId, runLog);
     appendLog({ eventId: `${review.reviewedDigest}:started`, at: now(), kind: 'session',
@@ -11600,12 +12145,16 @@ function mountPresenceSessionPanel({
       outcome: ['completed', 'stopped', 'expired', 'needs-attention'].includes(outcome.status)
         ? outcome.status : 'needs-attention', detail: describe(outcome)[0] }, runLog.binding);
     render(outcome);
-    onStatus(describe(outcome).join('. '));
+    if (!disposed) onStatus(describe(outcome).join('. '));
     return outcome.status === 'completed';
   }
 
   load();
-  listen(logDetails, 'toggle', () => { if (logDetails.open) refreshLog(); });
+  listen(logDetails, 'toggle', () => {
+    if (!logDetails.open) return;
+    const binding = refreshLog();
+    if (binding) void refreshHistory(binding);
+  });
   listen(start, 'click', () => { void begin(); });
   listen(pause, 'click', () => { if (session.pause()) { const state = session.snapshot(); appendLog({ eventId: `${state.runId}:paused:${now()}`, at: now(), kind: 'session', outcome: 'paused', detail: 'Paused' }, logRunFor(state)?.binding); render(); onStatus('Presence paused.'); } });
   listen(resume, 'click', () => { if (session.resume()) { const state = session.snapshot(); appendLog({ eventId: `${state.runId}:resumed:${now()}`, at: now(), kind: 'session', outcome: 'resumed', detail: 'Resumed' }, logRunFor(state)?.binding); render(); onStatus('Presence resumed.'); } });
@@ -11618,12 +12167,18 @@ function mountPresenceSessionPanel({
   listen(limit, 'change', saveChanges);
   for (const input of [mode, duration, breaks, burst, quiet]) listen(input, 'change', saveChanges);
   listen(openLog, 'click', () => {
-    if (!refreshLog()) return;
-    logWindow = window?.open?.('', 'insta-toolbox-presence-log', 'popup=yes,width=620,height=760,resizable=yes,scrollbars=yes') || null;
-    if (!logWindow) { onStatus('Allow pop-ups to open the Presence log window.'); return; }
+    const binding = refreshLog();
+    if (!binding) return;
+    try { logWindow = window?.open?.('', 'insta-toolbox-presence-log', 'popup=yes,width=620,height=760,resizable=yes,scrollbars=yes') || null; }
+    catch { logWindow = null; }
+    if (!logWindow) {
+      historyUi.get(binding).notice = 'The log window was blocked. Allow pop-ups and try again, or use Activity log here.';
+      renderLog(); return;
+    }
     logWindow.addEventListener?.('load', () => renderLogWindow(), { once: true });
     renderLogWindow();
     window.setTimeout?.(() => renderLogWindow(), 0);
+    void refreshHistory(binding);
   });
   listen(exportLog, 'click', () => exportHistory());
   listen(clearLog, 'click', () => clearHistory());
@@ -11634,14 +12189,16 @@ function mountPresenceSessionPanel({
     render,
     refreshLog: () => Boolean(refreshLog()),
     stop: () => session.stop(),
-    busy: () => ['running', 'searching', 'waiting', 'quiet', 'paused', 'stopping']
-      .includes(session.snapshot().status),
+    busy: () => !disposed && (confirming || sessionActive()),
     snapshot: () => session.snapshot(),
     dispose() {
       if (disposed) return;
       session.stop();
       disposed = true;
+      confirming = false;
+      historyStart = null;
       unsubscribeLog?.();
+      for (const binding of logs.values()) binding.log.dispose?.();
       listeners.splice(0).forEach((remove) => remove());
       root.remove();
     },
@@ -12047,7 +12604,7 @@ function mountPresenceGrowthPanel({
   cancel.className = 'button quiet';
   follow.className = 'button primary';
   due.className = 'button quiet';
-  const progress = make('p', 'Check your Following list in Mutual Checker first.');
+  const progress = make('p', 'Find mutual connections prepares profile links for a read-only search.');
   const candidatesList = make('div');
   candidatesList.className = 'presence-growth-candidates';
   const dueList = make('p');
@@ -12717,6 +13274,7 @@ globalThis.InstaToolboxInboxCheckpoints = Object.freeze({ create: localModules['
 globalThis.InstaToolboxPresenceInputs = Object.freeze({ create: localModules['extension/presence-native-inputs.js'].createPresenceNativeInputs });
 globalThis.InstaToolboxPresenceNativeActions = Object.freeze({ create: localModules['extension/presence-native-actions.js'].createPresenceNativeActions });
 globalThis.InstaToolboxPresenceSession = Object.freeze({ create: localModules['extension/presence-session.js'].createPresenceSession });
+globalThis.InstaToolboxPresenceHistoryJournal = Object.freeze({ create: localModules['extension/presence-history-journal.js'].createPresenceHistoryJournal });
 globalThis.InstaToolboxPresenceSessionPanel = Object.freeze({ mount: localModules['extension/presence-session-panel.js'].mountPresenceSessionPanel });
 globalThis.InstaToolboxPresenceGrowth = Object.freeze({ ...localModules['extension/presence-growth.js'] });
 globalThis.InstaToolboxPresenceGrowthPanel = Object.freeze({ mount: localModules['extension/presence-growth-panel.js'].mountPresenceGrowthPanel });
@@ -16628,13 +17186,25 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
       confirmAction: confirmRun,
       readPreferences: () => GM_getValue('instaToolboxPresenceSessionV1', null),
       writePreferences: value => GM_setValue('instaToolboxPresenceSessionV1', value),
-      readLog: accountKey => {
+      createHistoryStore: accountKey => {
         if (typeof accountKey !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(accountKey)) throw new Error('presence-log-account-unverified');
-        return GM_getValue(`instaToolboxPresenceActivityLogV1:${accountKey}`, null);
-      },
-      writeLog: (value, accountKey) => {
-        if (typeof accountKey !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(accountKey)) throw new Error('presence-log-account-unverified');
-        return GM_setValue(`instaToolboxPresenceActivityLogV1:${accountKey}`, value);
+        const manager = typeof GM === 'undefined' ? null : GM;
+        if (!manager || ['getValue', 'setValue', 'listValues', 'deleteValue'].some(name => typeof manager[name] !== 'function')
+          || typeof GM_addValueChangeListener !== 'function' || typeof GM_removeValueChangeListener !== 'function'
+          || typeof globalThis.InstaToolboxPresenceHistoryJournal?.create !== 'function') {
+          throw new Error('presence-history-private-storage-unavailable');
+        }
+        return globalThis.InstaToolboxPresenceHistoryJournal.create({ accountKey,
+          readLegacy: () => manager.getValue(`instaToolboxPresenceActivityLogV1:${accountKey}`, null),
+          storage: {
+            getValue: (key, fallback) => manager.getValue(key, fallback),
+            setValue: (key, value) => manager.setValue(key, value),
+            listValues: () => manager.listValues(),
+            deleteValue: key => manager.deleteValue(key),
+            listen: (key, callback) => GM_addValueChangeListener(key, (_key, _old, value) => callback(value)),
+            unlisten: id => GM_removeValueChangeListener(id),
+          },
+        });
       },
       onAccountReady: () => {
         const dm = dmRunner?.snapshot();

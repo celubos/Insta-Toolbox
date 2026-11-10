@@ -105,7 +105,7 @@ Provenance-verified partial comparisons remain visible and downloadable with unc
 
 ## Local app and web delivery
 
-The PWA service worker uses network-first same-origin GET handling, caches only successful same-origin responses, bypasses the HTTP cache for service-worker update checks, and removes earlier cache generations. Version 4.1.4 used `insta-toolbox-v414`; the 4.3.7 candidate uses `insta-toolbox-v437`. Persisted workspace and settings keys are unchanged. Public web/PWA delivery remains on hold at 4.3.1.
+The PWA service worker uses network-first same-origin GET handling, caches only successful same-origin responses, bypasses the HTTP cache for service-worker update checks, and removes earlier cache generations. Version 4.1.4 used `insta-toolbox-v414`; the 4.3.8 preparation uses `insta-toolbox-v438`. Persisted workspace and settings keys are unchanged. Public web/PWA delivery remains on hold at 4.3.1.
 
 The loopback development server accepts only loopback Host headers and serves an explicit asset allowlist. Repository metadata, tests, documentation, and Git internals are not served. Framing protection is sent as HTTP headers because `frame-ancestors` is ineffective in a meta policy.
 
@@ -123,7 +123,7 @@ When release credentials are available, remove the library-validation exception,
 
 Earlier reviews fixed structural profile-control binding, pre-existing-dialog confusion, missing extension reservations, malformed migration fields, discard races, weak message identity, unbound or noninteractive DM controls, synthetic confirmation acceptance, and incomplete oldest-edge traversal. Regression fixtures cover these boundaries.
 
-Historical releases retain their own acceptance records. They are not evidence that the current 4.3.7 candidate passed authenticated acceptance. Current authenticated compatibility, human screen-reader use, Windows publisher trust, Apple notarization, and physical Intel Mac behavior require fresh acceptance.
+Historical releases retain their own acceptance records. They are not evidence that the current 4.3.8 preparation passed authenticated acceptance. Current authenticated compatibility, human screen-reader use, Windows publisher trust, Apple notarization, and physical Intel Mac behavior require fresh acceptance.
 
 ## Dependencies and supply chain
 
@@ -222,8 +222,49 @@ with zero failures or skips, 31 package checks, 50 native browser gates,
 15 sandbox journeys, seven background cases, 45 overlay states and 11 PWA
 states. Reviewed visual baselines and tolerances are unchanged. The production
 dependency audit reported no known vulnerabilities.
-Installation, authenticated acceptance and exact CI remain pending in
+All eight exact-candidate 4.3.7 CI checks passed, and the userscript checksum
+matched. Installed activation and cold read-only history retention passed;
+broader live acceptance and current-main promotion remain blocked in
 [4.3.7 acceptance](./acceptance/4.3.7.md).
+A later synthetic two-panel/session test confirmed inherited same-account
+multi-tab history loss in 4.3.7: a cached later writer removed the previous
+run's three new events. This behavior predates the account-scope repair; no
+actual user history loss was observed and the preserved real records remain
+intact. Hold the 4.3.7 update. Its passing matrix does not establish multi-tab
+retention. Installed 4.3.7 Settings and its single userscript host were
+verified; a cold read/export retained all 95 prior records with no Start,
+Clear or social writes. A later Growth seed read failed before rows when
+Instagram replaced its empty opening dialog with a typed list in the same
+portal. No complete Growth or all-tools acceptance is claimed.
+
+Version 4.3.8 implements the private history repair and async UI, independently
+reviewed with 85 combined focused checks. The bounded native skeleton handoff
+passed independent review and 209 focused regressions without granting action
+authority during opening. The generated candidate passed all required local
+gates; installation, authenticated acceptance and exact CI remain pending in
+[4.3.8 acceptance](./acceptance/4.3.8.md).
+
+The approved private-manager journal uses independent immutable operations and
+confirms writes only after acknowledgement. Its discovered confirmed view
+can lag other tabs; no globally fresh discovery claim is made. Clear fences
+observed and older/concurrent waiting activity upon discovery. New entries
+created after a tab observes the fence can be logged normally. The legacy V1
+private backup is retained, and later legacy import is quarantined after
+Clear; logical clearing is not a promise to erase every physical backing key.
+Display and export retain at most 500 entries. Cleanup work is bounded to
+32-record batches, not a global physical-key cap.
+
+Userscript metadata adds only GM.getValue, GM.setValue, GM.listValues and
+GM.deleteValue for this userscript's own private manager storage, preserving
+all legacy grants. No @connect, network, cookie or domain permission is added.
+Identity, author, stable URLs and action authority are unchanged. The dedicated
+history module consumes the existing activity normalizer through a separate
+optional backend; wiring must preserve that boundary without a circular import.
+History implementation and UI review passed, including actual two-panel
+serial-session retention of 101 records and late-outcome account isolation.
+The native skeleton handoff review passed; complete same-build/live proof
+remains pending.
+
 Official release is also held because authorized maintainer dispatch and
 review access are currently unavailable; existing protections remain required.
 Fixtures do not prove current authenticated Instagram behavior.
