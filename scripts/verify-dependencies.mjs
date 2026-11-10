@@ -8,6 +8,9 @@ const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const lockfile = await readFile(path.join(projectRoot, "pnpm-lock.yaml"), "utf8");
 const workspaceConfig = await readFile(path.join(projectRoot, "pnpm-workspace.yaml"), "utf8");
 const requireFromProject = createRequire(path.join(projectRoot, "package.json"));
+const projectMetadata = JSON.parse(await readFile(path.join(projectRoot, "package.json"), "utf8"));
+assert.equal(projectMetadata.devDependencies.electron, "44.9.1");
+assert.equal(requireFromProject("electron/package.json").version, "44.9.1");
 const expectedVersions = ["1.1.21", "2.1.7", "5.0.12"];
 
 for (const version of expectedVersions) {
@@ -54,13 +57,18 @@ const patchedBuildDependencies = [
   },
   {
     name: "undici",
-    version: "6.29.0",
-    override: '"undici@^6.0.0": 6.29.0',
+    version: "6.29.1",
+    override: '"undici@^6.0.0": 6.29.1',
+  },
+  {
+    name: "undici",
+    version: "7.30.1",
+    override: '"undici@^7.0.0": 7.30.1',
   },
   {
     name: "fast-uri",
-    version: "3.1.8",
-    override: '"fast-uri@<3.1.8": 3.1.8',
+    version: "3.1.9",
+    override: '"fast-uri@<3.1.9": 3.1.9',
   },
   {
     name: "js-yaml",
@@ -99,5 +107,5 @@ for (const dependency of patchedBuildDependencies) {
 }
 
 console.log(
-  `Dependency verification passed: brace-expansion ${expectedVersions.join(", ")} enforce the expansion bound; fast-uri 3.1.8, js-yaml 4.3.2, and xmldom 0.8.15 are patched.`,
+  `Dependency verification passed: Electron 44.9.1; undici 6.29.1 and 7.30.1; brace-expansion ${expectedVersions.join(", ")} enforce the expansion bound; fast-uri 3.1.9, js-yaml 4.3.2, and xmldom 0.8.15 are patched.`,
 );

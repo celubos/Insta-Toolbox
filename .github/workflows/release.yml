@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       tag:
-        description: Release tag, for example v4.3.1
+        description: Release tag matching the tested package version
         required: true
         type: string
 
@@ -44,12 +44,17 @@ jobs:
           event="$(jq -r .event <<<"$run_json")"
           [[ "$event" = "push" || "$event" = "workflow_dispatch" ]]
           test "$(jq -r .head_branch <<<"$run_json")" = "main"
+          test "$(jq -r .head_repository.full_name <<<"$run_json")" = "$GITHUB_REPOSITORY"
           test "$(jq -r .status <<<"$run_json")" = "completed"
           test "$(jq -r .conclusion <<<"$run_json")" = "success"
           sha="$(jq -r .head_sha <<<"$run_json")"
           [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
           main_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
           test "$sha" = "$main_sha" || { echo "CI run is not for the current main commit" >&2; exit 1; }
+          jobs_json="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$CI_RUN_ID/jobs?per_page=100")"
+          for job in test overlay-windows package-windows package-macos release-checksums; do
+            jq -e --arg name "$job" '[.[].jobs[] | select(.name == $name)] | length == 1 and all(.[]; .conclusion == "success")' <<<"$jobs_json" >/dev/null
+          done
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
       - name: Check out the tested source identity
@@ -108,33 +113,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="$(node -p "require('./package.json').version")"
-          test "$RELEASE_TAG" = "v$version"
-          test "$version" = "4.3.1"
-          mkdir -p release
-          copy_exact() {
-            local name="$1"
-            mapfile -d '' matches < <(find incoming -type f -name "$name" -print0)
-            test "${#matches[@]}" -eq 1 || { echo "Expected one $name, found ${#matches[@]}" >&2; exit 1; }
-            cp -- "${matches[0]}" "release/$name"
-          }
-          copy_exact "insta-toolbox.user.js"
-          copy_exact "Insta-Toolbox-Extension-$version.zip"
-          copy_exact "insta-toolbox-web-$version.zip"
-          copy_exact "Insta-Toolbox-Setup-$version.exe"
-          copy_exact "Insta-Toolbox-$version-universal.dmg"
-          copy_exact "Insta-Toolbox-$version-universal.zip"
-          copy_exact "SHA256SUMS.txt"
-          test "$(find release -maxdepth 1 -type f | wc -l)" -eq 7
-          grep -Eq "^// @version[[:space:]]+$version[[:space:]]*$" release/insta-toolbox.user.js
-          test "$(unzip -p "release/Insta-Toolbox-Extension-$version.zip" manifest.json | jq -r .version)" = "$version"
-          test "$(unzip -p "release/insta-toolbox-web-$version.zip" insta-toolbox-web/VERSION.txt | tr -d '\r\n')" = "$version"
+          node scripts/prepare-release-promotion.mjs
           (
             cd release
-            test "$(wc -l < SHA256SUMS.txt)" -eq 6
             sha256sum --check --strict SHA256SUMS.txt
           )
-          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Generate SBOM for promoted files
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
@@ -150,7 +133,8 @@ jobs:
           set -euo pipefail
           cd release
           sha256sum "Insta-Toolbox-${{ steps.assets.outputs.version }}.spdx.json" >> SHA256SUMS.txt
-          test "$(wc -l < SHA256SUMS.txt)" -eq 7
+          test "$(wc -l < SHA256SUMS.txt)" -eq "$(( ${{ steps.assets.outputs.artifact_count }} + 1 ))"
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq "$(( ${{ steps.assets.outputs.artifact_count }} + 2 ))"
           sha256sum --check --strict SHA256SUMS.txt
 
       - name: Attest promoted release files
@@ -170,7 +154,8 @@ jobs:
             echo "Tag $RELEASE_TAG already exists" >&2
             exit 1
           fi
-          release_notes="$(cat <<'EOF'
+          if [ "${{ steps.assets.outputs.mode }}" = "legacy" ]; then
+            cat > release-notes.md <<'EOF'
           Version 4.3.1 fixes Ghost workers that land on the inbox instead of their assigned thread. Workers recover through native conversation rows and start the shared Unsend runner. Finished ten-tab groups close before the next opens; all Unsend clicks share account pacing. Desktop dependencies and pinned GitHub Actions are also updated.
 
           Presence growth reviews candidates from selected accounts' mutuals and tracks verified follows for a later 7–14 day Unfollow review. It does not perform unattended browser-closed follow/unfollow cycles.
@@ -187,10 +172,12 @@ jobs:
           - Ghost worker tabs must remain open and loaded. Tab discard, computer sleep, browser shutdown, or lost account evidence stops or pauses the job.
           - Automated CI does not prove current authenticated Instagram mutation compatibility or a completed human screen-reader walkthrough. Consult the 4.3.1 acceptance record for separately recorded manual evidence.
           EOF
-          )"
+          else
+            cp -- "${{ steps.assets.outputs.notes_file }}" release-notes.md
+          fi
           gh release create "$RELEASE_TAG" release/* \
             --target "${{ steps.ci.outputs.sha }}" \
             --title "Insta Toolbox ${{ steps.assets.outputs.version }}" \
             --generate-notes \
-            --notes "$release_notes" \
+            --notes-file release-notes.md \
             --latest

@@ -451,28 +451,50 @@ export function createPresenceNativeActions({
           : { verified: false, skipped: true, reason: STORY_PATH.test(String(location.pathname))
             ? 'Next story did not finish loading' : 'End of stories' };
       }
+      const sentContext = inspectContext();
+      if (sentContext.accountVerified !== true || sentContext.usable !== true || !clean(sentContext.accountId)) {
+        throw fail('presence-context-changed');
+      }
+      assertCurrent();
       current.control.click();
-      const verified = await waitFor(() => {
-        if (!current.root.isConnected) return false;
-        if (action === 'reactStories') {
-          const displayed = currentStory();
-          if (!displayed || displayed.username !== current.target.username
-            || displayed.storyId !== current.target.storyId) return false;
-        }
-        if (action === 'likePosts' || action === 'reactStories') {
-          return exactButtons(current.root, new Set(['unlike'])).length === 1;
-        }
-        if (action === 'followPeople') {
-          return exactButtons(current.root, new Set(['following', 'requested'])).length === 1;
-        }
-        if (action === 'acceptRequests') {
-          return exactButtons(current.root, new Set(['following', 'remove'])).length === 1;
-        }
-        return false;
-      }, signal);
+      let verified;
+      try {
+        // Stop revokes further clicks. It must not discard the outcome of a
+        // click already sent: finish this bounded, read-only verification and
+        // keep an unconfirmed attempt separate from a proven result.
+        verified = await waitFor(() => {
+          const observed = inspectContext();
+          if (observed.accountVerified !== true || observed.usable !== true
+            || observed.accountId !== sentContext.accountId
+            || (sentContext.accountKey && observed.accountKey !== sentContext.accountKey)
+            || observed.challenge || observed.actionBlocked || observed.rateLimited
+            || observed.sessionExpired || observed.frozen || observed.discarded || document.wasDiscarded === true) {
+            throw fail('presence-verification-context-changed');
+          }
+          if (!current.root.isConnected) return false;
+          if (action === 'reactStories') {
+            const displayed = currentStory();
+            if (!displayed || displayed.username !== current.target.username
+              || displayed.storyId !== current.target.storyId) return false;
+          }
+          if (action === 'likePosts' || action === 'reactStories') {
+            return exactButtons(current.root, new Set(['unlike'])).length === 1;
+          }
+          if (action === 'followPeople') {
+            return exactButtons(current.root, new Set(['following', 'requested'])).length === 1;
+          }
+          if (action === 'acceptRequests') {
+            return exactButtons(current.root, new Set(['following', 'remove'])).length === 1;
+          }
+          return false;
+        });
+      } catch {
+        return { verified: false, uncertain: true,
+          reason: 'The account or Instagram context changed before the action could be confirmed' };
+      }
       if (!verified) return { verified: false, uncertain: true, reason: 'Instagram did not confirm the action' };
       const reason = action === 'likePosts' ? 'Post liked'
-        : action === 'reactStories' ? 'Story reaction added'
+        : action === 'reactStories' ? 'Story liked'
           : action === 'followPeople'
             ? (exactButtons(current.root, new Set(['requested'])).length === 1
               ? 'Follow requested'

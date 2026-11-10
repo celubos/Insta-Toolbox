@@ -3,13 +3,15 @@ import { createPresenceActivityLog } from './presence-activity-log.js';
 
 const ACTIONS = Object.freeze([
   ['viewStories', 'View stories'],
-  ['reactStories', 'React to stories'],
+  ['reactStories', 'Like stories'],
   ['likePosts', 'Like posts'],
   ['followPeople', 'Follow on Explore'],
   ['acceptRequests', 'Accept incoming requests'],
 ]);
 
 const clean = (value) => String(value ?? '').trim();
+const durationLabelFor = minutes => minutes % 60 === 0
+  ? `${minutes / 60} hour${minutes === 60 ? '' : 's'}` : `${minutes} minutes`;
 
 export function mountPresenceSessionPanel({
   container,
@@ -98,6 +100,8 @@ export function mountPresenceSessionPanel({
   liveOption.value = 'live';
   mode.append(sessionOption, liveOption);
   modeLabel.append(mode);
+  const modeHelp = create('p', '', 'lead');
+  modeHelp.setAttribute('data-presence-mode-help', '');
   const limitLabel = create('label', 'Actions this session', 'presence-limit');
   const limit = create('input');
   limit.type = 'number';
@@ -110,8 +114,8 @@ export function mountPresenceSessionPanel({
   const liveOptions = create('div', null, 'presence-live-options');
   const durationLabel = create('label', 'Keep running', 'presence-limit');
   const duration = create('select');
-  for (const [value, label] of [[60, '1 hour'], [120, '2 hours'], [240, '4 hours'], [480, '8 hours'], [720, '12 hours']]) {
-    const option = create('option', label); option.value = String(value); duration.append(option);
+  for (const value of [30, 60, 120, 240, 480, 720]) {
+    const option = create('option', durationLabelFor(value)); option.value = String(value); duration.append(option);
   }
   durationLabel.append(duration);
   const breaksLabel = create('label', null, 'presence-option');
@@ -146,6 +150,9 @@ export function mountPresenceSessionPanel({
   stop.setAttribute('data-presence-stop', '');
   actions.append(start, pause, resume, stop);
   const statusBox = create('div', null, 'presence-status');
+  statusBox.setAttribute('role', 'status');
+  statusBox.setAttribute('aria-live', 'polite');
+  statusBox.setAttribute('aria-atomic', 'true');
   const statusTitle = create('strong', 'Ready');
   const statusDetail = create('span', 'Nothing happens until you confirm.');
   statusBox.append(statusTitle, statusDetail);
@@ -164,11 +171,12 @@ export function mountPresenceSessionPanel({
   logControls.append(openLog, exportLog, clearLog);
   logBody.append(logEmpty, logRecent, logControls);
   logDetails.append(logSummary, logBody);
-  root.append(style, heading, intro, options, runGrid, statusBox, actions, results, logDetails);
+  root.append(style, heading, intro, options, runGrid, modeHelp, statusBox, actions, results, logDetails);
   container.replaceChildren(root);
 
   let disposed = false;
   let confirming = false;
+  let lastSessionActions = 10;
   let logWindow = null;
   const loggedEvents = new Set();
   const listeners = [];
@@ -185,7 +193,7 @@ export function mountPresenceSessionPanel({
 
   function readOptions() {
     const maxActions = Number(limit.value);
-    if (!Number.isInteger(maxActions) || maxActions < 1 || maxActions > 50) {
+    if (mode.value !== 'live' && (!Number.isInteger(maxActions) || maxActions < 1 || maxActions > 50)) {
       throw new Error('presence-action-limit-invalid');
     }
     return normalizePresenceSessionOptions({
@@ -210,7 +218,11 @@ export function mountPresenceSessionPanel({
     breaks.checked = options.scheduledBreaks;
     burst.value = String(options.liveBurstActions);
     quiet.value = String(options.quietMinutes);
-    writePreferences({ ...structuredClone(options), sessionActions: Number(limit.value) });
+    const sessionActions = Number(limit.value);
+    if (Number.isInteger(sessionActions) && sessionActions >= 1 && sessionActions <= 50) {
+      lastSessionActions = sessionActions;
+    }
+    writePreferences({ ...structuredClone(options), sessionActions: lastSessionActions });
     return options;
   }
   function load() {
@@ -223,23 +235,44 @@ export function mountPresenceSessionPanel({
     const sessionActions = Number(source.sessionActions ?? (saved.mode === 'session' ? saved.maxActions : 10));
     limit.value = String(Number.isInteger(sessionActions) && sessionActions >= 1 && sessionActions <= 50
       ? sessionActions : 10);
-    duration.value = String(saved.liveDurationMinutes);
+    lastSessionActions = Number(limit.value);
+    const restoreChoice = (select, value, label) => {
+      if (![...select.children].some(option => option.value === String(value))) {
+        const option = create('option', label); option.value = String(value); select.append(option);
+      }
+      select.value = String(value);
+    };
+    restoreChoice(duration, saved.liveDurationMinutes, durationLabelFor(saved.liveDurationMinutes));
     breaks.checked = saved.scheduledBreaks;
-    burst.value = String(saved.liveBurstActions);
-    quiet.value = String(saved.quietMinutes);
+    restoreChoice(burst, saved.liveBurstActions, `${saved.liveBurstActions} actions`);
+    restoreChoice(quiet, saved.quietMinutes, `${saved.quietMinutes} minutes`);
   }
   function describe(snapshot) {
     const count = Number(snapshot.completed || 0);
+    const progress = `${count}${Number.isInteger(snapshot.maxActions) && snapshot.maxActions > 0
+      ? ` of ${snapshot.maxActions}` : ''} verified action${snapshot.maxActions === 1 || (count === 1 && !snapshot.maxActions) ? '' : 's'}.`
+      + (snapshot.skipped ? ` ${snapshot.skipped} skipped.` : '');
+    const time = value => new Date(value).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    const ends = snapshot.expiresAt ? ` Run ends at ${time(snapshot.expiresAt)}.` : '';
     if (snapshot.status === 'idle') return ['Ready', 'Nothing happens until you confirm.'];
-    if (snapshot.status === 'running') return [snapshot.current?.label || 'Presence is running', `${count} verified action${count === 1 ? '' : 's'}.`];
-    if (snapshot.status === 'searching') return ['Looking for something to do', `${count} verified action${count === 1 ? '' : 's'}. Presence is checking the loaded Instagram tab now.`];
-    if (snapshot.status === 'waiting') return ['Presence is running', `${count} verified action${count === 1 ? '' : 's'}. Next action coming up.`];
-    if (snapshot.status === 'quiet') return ['Scheduled break', `${count} verified action${count === 1 ? '' : 's'}. Presence will continue in this loaded tab.`];
-    if (snapshot.status === 'paused') return ['Paused', `${count} verified action${count === 1 ? '' : 's'}. Resume or stop when ready.`];
-    if (snapshot.status === 'stopping') return ['Stopping', 'No new action will begin.'];
-    if (snapshot.status === 'stopped') return ['Stopped', `${count} verified action${count === 1 ? '' : 's'}.`];
-    if (snapshot.status === 'completed') return ['Presence finished', `${count} verified action${count === 1 ? '' : 's'}.`];
-    if (snapshot.status === 'expired') return ['Time limit reached', `${count} verified action${count === 1 ? '' : 's'}. Start again to continue.`];
+    if (snapshot.status === 'running') return [snapshot.current?.label || 'Presence is running', progress + ends];
+    if (snapshot.status === 'searching') return ['Looking for something to do', `${progress} Checking the loaded Instagram tab now.${ends}`];
+    if (snapshot.status === 'waiting' && snapshot.waitingReason === 'no-activities') {
+      return ['Waiting for eligible activity', `${progress} Nothing eligible is loaded. Checking again${snapshot.nextActionAt
+        ? ` at ${new Date(snapshot.nextActionAt).toLocaleTimeString()}` : ' shortly'}.${ends}`];
+    }
+    if (snapshot.status === 'waiting') return ['Presence is running', `${progress} Next action coming up.${ends}`];
+    if (snapshot.status === 'quiet') return ['Scheduled break', `${progress} Continuing${snapshot.nextActionAt
+      ? ` at ${time(snapshot.nextActionAt)}` : ' after this break'} in this loaded tab.${ends}`];
+    if (snapshot.status === 'paused') return ['Paused', `${progress} Resume before the time limit, or stop.${ends}`];
+    if (snapshot.status === 'stopping') return ['Stopping', 'No new action will begin. Checking the outcome of any action already sent.'];
+    if (snapshot.status === 'stopped') return ['Stopped', progress];
+    if (snapshot.status === 'completed' && snapshot.reason === 'presence-no-activities') {
+      return [count ? 'No more eligible activity found' : 'No eligible activity found',
+        `${progress} The loaded pages had no remaining eligible targets. You can choose different activities and start again.`];
+    }
+    if (snapshot.status === 'completed') return ['Presence finished', progress];
+    if (snapshot.status === 'expired') return ['Time limit reached', `${progress} Start again to continue.`];
     return ['Needs attention', clean(snapshot.reason) || 'Check Instagram before starting again.'];
   }
   function render(snapshot = session.snapshot()) {
@@ -250,13 +283,17 @@ export function mountPresenceSessionPanel({
     intro.hidden = active;
     options.hidden = active;
     runGrid.hidden = active;
+    modeHelp.hidden = active;
+    modeHelp.textContent = mode.value === 'live'
+      ? 'Live like me repeats only your selected activities until the time limit. It does not learn your tastes. Keep this Instagram tab open.'
+      : 'One session stops at your action limit or when no eligible activity is found. Only verified actions count toward the limit.';
     limitLabel.hidden = mode.value === 'live';
     liveOptions.hidden = mode.value !== 'live';
     burstLabel.hidden = !breaks.checked;
     quietLabel.hidden = !breaks.checked;
     statusBox.hidden = snapshot.status === 'idle';
-    statusTitle.textContent = title;
-    statusDetail.textContent = detail;
+    if (statusTitle.textContent !== title) statusTitle.textContent = title;
+    if (statusDetail.textContent !== detail) statusDetail.textContent = detail;
     start.hidden = snapshot.status !== 'idle' && !['completed', 'stopped', 'expired', 'needs-attention'].includes(snapshot.status);
     start.disabled = confirming || busy();
     pause.hidden = snapshot.canPause !== true;
@@ -368,10 +405,11 @@ export function mountPresenceSessionPanel({
       ? options.liveDurationMinutes * 60_000 : 15 * 60_000);
     confirming = true;
     render();
-    const confirmation = await confirmAction({
+    let confirmation;
+    try { confirmation = await confirmAction({
       title: `Start Presence for @${account.accountId}?`,
       message: options.mode === 'live'
-        ? `Run Presence for up to ${options.liveDurationMinutes / 60} hour${options.liveDurationMinutes === 60 ? '' : 's'} in this loaded tab.`
+        ? `Run Presence for up to ${durationLabelFor(options.liveDurationMinutes)} in this loaded tab.`
         : `Allow up to ${options.maxActions} action${options.maxActions === 1 ? '' : 's'} in this tab.`,
       detail: 'Presence stops on Instagram restrictions, an account change, an uncertain result, or when you press Stop.',
       confirmLabel: 'Start Presence',
@@ -388,11 +426,19 @@ export function mountPresenceSessionPanel({
       ],
       binding: { action: 'presence', accountId: account.accountId, expiresAt,
         maxActions: options.maxActions, options: reviewedSignature },
-    });
-    confirming = false;
+    }); } catch {
+      onStatus('The confirmation could not open. Nothing changed. Try again.');
+      return false;
+    } finally {
+      confirming = false;
+      render();
+    }
     if (!confirmation) { render(); onStatus('Presence canceled. Nothing changed.'); return false; }
     const current = inspectAccount();
-    const currentOptions = readOptions();
+    let currentOptions;
+    try { currentOptions = readOptions(); } catch {
+      render(); onStatus('The Presence choices changed. Check them and start again.'); return false;
+    }
     if (current?.accountVerified !== true || current.usable !== true
       || current.accountId !== account.accountId || signature(currentOptions) !== reviewedSignature
       || confirmation.action !== 'presence' || confirmation.accountId !== account.accountId
@@ -433,9 +479,13 @@ export function mountPresenceSessionPanel({
   listen(pause, 'click', () => { if (session.pause()) { const state = session.snapshot(); appendLog({ eventId: `${state.runId}:paused:${now()}`, at: now(), kind: 'session', outcome: 'paused', detail: 'Paused' }); render(); onStatus('Presence paused.'); } });
   listen(resume, 'click', () => { if (session.resume()) { const state = session.snapshot(); appendLog({ eventId: `${state.runId}:resumed:${now()}`, at: now(), kind: 'session', outcome: 'resumed', detail: 'Resumed' }); render(); onStatus('Presence resumed.'); } });
   listen(stop, 'click', () => { if (session.stop()) { const state = session.snapshot(); appendLog({ eventId: `${state.runId}:stopped:${now()}`, at: now(), kind: 'session', outcome: 'stopped', detail: 'Stop requested' }); render(); onStatus('Stopping Presence.'); } });
-  for (const input of controls.values()) listen(input, 'change', () => { save(); render(); });
-  listen(limit, 'change', () => { save(); render(); });
-  for (const input of [mode, duration, breaks, burst, quiet]) listen(input, 'change', () => { save(); render(); });
+  const saveChanges = () => {
+    try { save(); } catch { onStatus('Choose an action limit from 1 to 50 for One session.'); }
+    render();
+  };
+  for (const input of controls.values()) listen(input, 'change', saveChanges);
+  listen(limit, 'change', saveChanges);
+  for (const input of [mode, duration, breaks, burst, quiet]) listen(input, 'change', saveChanges);
   listen(openLog, 'click', () => {
     logWindow = window?.open?.('', 'insta-toolbox-presence-log', 'popup=yes,width=620,height=760,resizable=yes,scrollbars=yes') || null;
     if (!logWindow) { onStatus('Allow pop-ups to open the Presence log window.'); return; }

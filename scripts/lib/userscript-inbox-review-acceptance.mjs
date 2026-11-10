@@ -291,7 +291,8 @@ export async function acceptUserscriptInboxReview({
         return {controls,overlap,width:innerWidth,height:innerHeight,
           panel:{left:bounds.left,right:bounds.right,top:bounds.top,bottom:bounds.bottom},
           overflow:inbox.scrollWidth-inbox.clientWidth,scrollOverflow:scroll.scrollWidth-scroll.clientWidth,
-          liveRegions:root.querySelectorAll('[aria-live]').length};
+          liveRegions:[...root.querySelectorAll('[aria-live]')].filter(node =>
+            node.getClientRects().length && !node.closest('[hidden], [aria-hidden="true"]')).length};
       })()`);
       assert.equal(metrics.controls.length, 13, `${viewport.label}: populated review controls`);
       assert.ok(metrics.controls.some(control => control.name === 'Managed worker tabs'),

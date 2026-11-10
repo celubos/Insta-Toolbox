@@ -1610,7 +1610,8 @@ async function acceptUserscriptFieldSpacing(webContents, baseUrl) {
               .map(e => ({ text: e.textContent.trim(), color: getComputedStyle(e).color,
                 textFill: getComputedStyle(e).webkitTextFillColor })),
             reducedMotion: getComputedStyle(s.querySelector('.panel')).animationName,
-            liveRegions: s.querySelectorAll('[aria-live]').length };
+            liveRegions: [...s.querySelectorAll('[aria-live]')].filter(node =>
+              node.getClientRects().length && !node.closest('[hidden], [aria-hidden="true"]')).length };
         })()`, true);
         assert.ok(metrics.fields.length > 0, `${state}: no visible fields`);
         assert.ok(metrics.fields.every(field => field.gap >= 4 && field.gap <= 8.1), `${state}: label gap ${JSON.stringify(metrics)}`);
@@ -1743,7 +1744,10 @@ async function acceptUserscriptInboxPanelLayout(webContents, baseUrl) {
           summary: summary.textContent.trim(), disclosureOpen: details.open,
           sectionOptions: [...inbox.querySelector('select').options].map(option => option.textContent),
           reviewHidden: [...inbox.querySelectorAll('button')].find(button => /^Review /.test(button.textContent)).hidden,
-          liveRegions: root.querySelectorAll('[aria-live]').length,
+          // A hidden tab's status is not exposed to assistive technology.
+          // Count announced regions in this journey, retaining the one-region gate.
+          liveRegions: [...root.querySelectorAll('[aria-live]')].filter(node =>
+            node.getClientRects().length && !node.closest('[hidden], [aria-hidden="true"]')).length,
           fastControls: root.querySelectorAll('[data-role="unsend-speed"], [data-cleanup-preference="speed"]').length,
           fastLabels: [...root.querySelectorAll('[data-panel="messages"] button, [data-panel="messages"] label, [data-panel="messages"] option')]
             .filter(node => /\\bFast\\b/.test(node.textContent)).map(node => node.textContent),
@@ -2245,7 +2249,8 @@ async function acceptUserscriptToolbox(webContents, baseUrl) {
       ],
       header: shadow.querySelector('.header h1')?.textContent,
       credit: shadow.querySelector('.footer a')?.textContent,
-      liveRegions: shadow.querySelectorAll('[aria-live]').length,
+      liveRegions: [...shadow.querySelectorAll('[aria-live]')].filter(node =>
+        node.getClientRects().length && !node.closest('[hidden], [aria-hidden="true"]')).length,
       hasGlobalUnlock: Boolean(shadow.querySelector('[data-role="live-actions"]')),
       liveControls: [
         Boolean(shadow.querySelector('[data-presence-start]')),

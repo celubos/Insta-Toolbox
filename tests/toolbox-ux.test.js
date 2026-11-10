@@ -476,7 +476,7 @@ test('finite run confirmation replaces global unlock controls and phrases', () =
   assert.match(confirmation, /immutableCopy\(request\.binding \|\| \{\}\)/);
   assert.doesNotMatch(shell, /globalThis\.confirm|window\.confirm/);
   assert.match(shell, /approvedTargets: \[\.\.\.queue\]/);
-  assert.match(shell, /capabilityExpiresAt: Date\.now\(\) \+ RUN_CAPABILITY_MS/);
+  assert.match(shell, /capabilityExpiresAt: Math\.min\(Date\.now\(\) \+ RUN_CAPABILITY_MS,/);
   assert.doesNotMatch(labels, /currentEligibleCount !== plan\.eligibleCount/);
   assert.match(labels, /\[2, PLAN_VERSION\]\.includes\(version\)/);
   assert.doesNotMatch(labels, /liveAuthority\?\.enable|ARM UNSEND/);

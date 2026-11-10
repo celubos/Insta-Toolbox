@@ -4,8 +4,16 @@ const visible = node => Boolean(node?.isConnected && node.getClientRects?.().len
   && !node.closest?.('[hidden], [aria-hidden="true"]'));
 const route = href => {
   if (typeof href !== 'string' || !href.trim()) return null;
-  try { const url = new URL(href, ORIGIN); return url.origin === ORIGIN ? url.pathname : null; }
+  try { const url = new URL(href, ORIGIN); return url.origin === ORIGIN && !url.username && !url.password ? url.pathname : null; }
   catch { return null; }
+};
+const RESERVED_PROFILE_PREFIXES = new Set([
+  'accounts', 'about', 'api', 'direct', 'explore', 'p', 'reel', 'reels', 'settings', 'stories', 'web',
+]);
+const postIdentity = path => {
+  const match = String(path || '').match(/^\/(?:([A-Za-z0-9._]{1,30})\/)?(p|reel|reels)\/([\w-]+)\/?$/);
+  if (!match || (match[1] && RESERVED_PROFILE_PREFIXES.has(match[1].toLowerCase()))) return null;
+  return { id: match[3], path };
 };
 
 export function summarizeLoadedPosts(observations, { sourceUrl, capturedAt = new Date().toISOString() } = {}) {
@@ -15,9 +23,9 @@ export function summarizeLoadedPosts(observations, { sourceUrl, capturedAt = new
   const posts = new Map();
   for (const observation of observations) {
     const path = route(observation.url);
-    const match = path?.match(/^\/(p|reel|reels)\/([\w-]+)\/?$/);
-    if (!match) continue;
-    const id = match[2];
+    const identity = postIdentity(path);
+    if (!identity) continue;
+    const id = identity.id;
     const timestamp = Date.parse(observation.publishedAt);
     const hashtags = [...new Set((observation.hashtags || []).map(tag => clean(tag, 100).replace(/^#/, '').toLowerCase())
       .filter(tag => /^[\p{L}\p{M}\p{N}_]+$/u.test(tag)))];
@@ -52,8 +60,8 @@ export function readLoadedInsights({ document = globalThis.document, location = 
     const paths = [...article.querySelectorAll('a[href]')].filter(visible)
       .map(link => route(link.getAttribute('href'))).filter(Boolean);
     const identities = new Map(paths.map(path => {
-      const match = path.match(/^\/(p|reel|reels)\/([\w-]+)\/?$/);
-      return match ? [match[2], path] : null;
+      const identity = postIdentity(path);
+      return identity ? [identity.id, path] : null;
     }).filter(Boolean));
     if (identities.size !== 1) return [];
     const hashtags = paths.filter(path => path.startsWith('/explore/tags/')).flatMap(path => {
@@ -64,7 +72,7 @@ export function readLoadedInsights({ document = globalThis.document, location = 
     const type = carousel ? 'carousel' : article.querySelector('video') ? 'video' : 'unknown';
     const times = [...article.querySelectorAll('time[datetime]')].filter(node => {
       const path = route(node.closest('a[href]')?.getAttribute('href'));
-      return path && identities.has(path.match(/^\/(?:p|reel|reels)\/([\w-]+)\/?$/)?.[1]);
+      return path && identities.has(postIdentity(path)?.id);
     }).map(node => node.getAttribute('datetime'));
     return [{ url: `${ORIGIN}${[...identities.values()][0]}`, type, hashtags,
       publishedAt: new Set(times).size === 1 ? times[0] : null }];
@@ -72,19 +80,29 @@ export function readLoadedInsights({ document = globalThis.document, location = 
   for (const link of document.querySelectorAll('main a[href]')) {
     if (!visible(link) || link.closest('article') || observations.length >= 1000) continue;
     const path = route(link.getAttribute('href'));
-    if (!/^\/(p|reel|reels)\/[\w-]+\/?$/.test(path || '')) continue;
+    if (!postIdentity(path)) continue;
     observations.push({ url: `${ORIGIN}${path}`, type: 'unknown', hashtags: [] });
   }
   const report = summarizeLoadedPosts(observations, { sourceUrl: location.href, capturedAt: now() });
   const username = String(location.pathname).match(/^\/([a-zA-Z0-9_.]{1,30})\/?$/)?.[1];
   report.profile = null;
   if (username) {
+    const ownerPath = `/${username.toLowerCase()}`;
+    const pathOf = node => route(node.getAttribute?.('href'))?.replace(/\/+$/, '').toLowerCase();
+    const counter = (link, list) => {
+      const label = clean(link.textContent);
+      if (!visible(link) || !new RegExp(`^[0-9][0-9., ]*(?:[kmb])? ${list}$`, 'i').test(label)) return false;
+      const path = pathOf(link);
+      return path === `${ownerPath}/${list}` || path === ownerPath;
+    };
     const headers = [...document.querySelectorAll('main header')].filter(visible).filter(header =>
-      [...header.querySelectorAll('a[href]')].some(link => route(link.getAttribute('href')) === `/${username}/followers/`));
+      [...header.querySelectorAll('a[href], h1, h2, [role="heading"]')].filter(visible)
+        .some(node => pathOf(node) === ownerPath || pathOf(node) === `${ownerPath}/followers`
+          || clean(node.textContent).toLowerCase() === username.toLowerCase()));
     if (headers.length === 1) {
       const count = list => {
         const links = [...headers[0].querySelectorAll('a[href]')].filter(visible)
-          .filter(link => route(link.getAttribute('href')) === `/${username}/${list}/`);
+          .filter(link => counter(link, list));
         return links.length === 1 ? clean(links[0].textContent) : null;
       };
       report.profile = { username, followers: count('followers'), following: count('following') };

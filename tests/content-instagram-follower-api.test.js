@@ -8,6 +8,7 @@ const [actionLabelsSource, inspectorSource] = await Promise.all([
   readFile(new URL('../extension/action-labels.js', import.meta.url), 'utf8'),
   readFile(new URL('../extension/content-instagram.js', import.meta.url), 'utf8'),
 ]);
+const nativeProfileContract = JSON.parse(await readFile(new URL('./fixtures/native-instagram-profile-contract.json', import.meta.url), 'utf8'));
 
 test('partial diagnostics retain exact counts and observed pagination reasons in summary and downloads', () => {
   const inspector = createInspector();
@@ -349,6 +350,46 @@ for (const titled of [false, true]) {
     assert.deepEqual({ ...result.expectedCounts }, { followers: 1_001, following: 2 });
     assert.deepEqual({ ...result.complete }, { followers: true, following: true });
     assert.equal(paths.length, 23);
+  });
+}
+
+test('native same-profile counter links use exact labels inside the uniquely verified profile header', async () => {
+  const inspector = createInspector({ pathname: nativeProfileContract.pathname,
+    headerUsername: nativeProfileContract.username,
+    profileLinks: [...nativeProfileContract.counterLinks,
+      { href: nativeProfileContract.pathname, text: '999 followers', outsideHeader: true }],
+  });
+  const paths = [];
+  const result = await inspector.fetchFollowerComparison({ username: nativeProfileContract.username,
+    sleepImpl: async () => {}, fetchImpl: async input => {
+      const url = new URL(input); paths.push(url.pathname);
+      if (url.pathname.includes('topsearch')) return response({ users: [{ user: { pk: '77', username: nativeProfileContract.username } }] });
+      assert.ok(url.pathname.includes('/friendships/'), 'exact native counters must not need profile metadata fallback');
+      const total = url.pathname.includes('/followers/') ? 3 : 2;
+      return response({ users: Array.from({ length: total }, (_, i) => ({ username: `fixture.${i}` })) });
+    } });
+  assert.deepEqual({ ...result.expectedCounts }, { followers: 3, following: 2 });
+  assert.deepEqual({ ...result.complete }, { followers: true, following: true });
+  assert.equal(paths.length, 3);
+});
+
+for (const invalid of ['missing-header', 'ambiguous-header', 'outside-header', 'different-owner', 'external-origin']) {
+  test(`same-profile native counters reject ${invalid} evidence`, async () => {
+    const inspector = createInspector({ pathname: nativeProfileContract.pathname,
+      headerUsername: invalid === 'missing-header' ? null : nativeProfileContract.username,
+      headerCopies: invalid === 'ambiguous-header' ? 2 : 1,
+      profileLinks: nativeProfileContract.counterLinks.map(link => ({ ...link,
+        href: invalid === 'different-owner' ? '/another_owner/' : invalid === 'external-origin'
+          ? 'https://example.org/target_name/' : link.href,
+        outsideHeader: invalid === 'outside-header',
+      })),
+    });
+    await assert.rejects(inspector.fetchFollowerComparison({ username: nativeProfileContract.username,
+      fetchImpl: async input => {
+        if (input.includes('topsearch')) return response({ users: [{ user: { pk: '77', username: nativeProfileContract.username } }] });
+        assert.ok(input.includes('web_profile_info'), 'unbound labels cannot authorize a relationship-list read');
+        return response({}, 429);
+      } }), { code: 'rate-limited' });
   });
 }
 

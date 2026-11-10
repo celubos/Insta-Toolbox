@@ -97,6 +97,14 @@ function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function electronEvidence({ required, runtime, captured = runtime }) {
+  const version = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+  assert.match(String(required || ''), version, 'package Electron version must be pinned');
+  assert.match(String(captured || ''), version, 'baseline Electron capture identity is invalid');
+  assert.equal(runtime, required, 'candidate Electron runtime differs from the package pin');
+  return Object.freeze({ required, runtime, captured });
+}
+
 async function readProductEvidenceMetadata() {
   const packageJson = JSON.parse(await readFile(path.join(repositoryRoot, 'package.json'), 'utf8'));
   const productVersion = String(packageJson.version || '').trim();
@@ -112,6 +120,7 @@ async function readProductEvidenceMetadata() {
 
   return {
     productVersion,
+    requiredElectron: packageJson.devDependencies?.electron,
     captureTimestamp: `${releaseDate}T00:00:00.000Z`,
   };
 }
@@ -640,8 +649,10 @@ async function writeActualManifest(manifest) {
 
 async function checkBaselines(captures, manifest) {
   let expected;
+  let expectedBytes;
   try {
-    expected = JSON.parse(await readFile(manifestPath, 'utf8'));
+    expectedBytes = await readFile(manifestPath);
+    expected = JSON.parse(expectedBytes.toString('utf8'));
   } catch (error) {
     const baselineLabel = baselineVariant
       ? `${process.platform}/${baselineVariant}`
@@ -656,7 +667,22 @@ async function checkBaselines(captures, manifest) {
   assert.equal(expected.productVersion, manifest.productVersion, 'baseline product version changed');
   assert.equal(expected.captureTimestamp, manifest.captureTimestamp, 'baseline capture timestamp changed');
   assert.equal(expected.platform, manifest.platform, 'baseline platform changed');
-  assert.equal(expected.electron, manifest.electron, 'baseline Electron version changed');
+  const versions = electronEvidence({
+    required: manifest.requiredElectron,
+    runtime: manifest.electron,
+    captured: expected.electron,
+  });
+  // A patched candidate must use its pinned runtime. The reviewed images keep
+  // their original capture identity and still undergo exact pixel comparison.
+  manifest.baseline = {
+    manifestSha256: sha256(expectedBytes),
+    electron: versions.captured,
+    productVersion: expected.productVersion,
+    captureTimestamp: expected.captureTimestamp,
+    capturedProductVersion: expected.capturedProductVersion || expected.productVersion,
+    originalCaptureTimestamp: expected.originalCaptureTimestamp || expected.captureTimestamp,
+  };
+  await writeActualManifest(manifest);
   assert.equal(expected.deviceScaleFactor, manifest.deviceScaleFactor, 'baseline scale changed');
   assert.equal(expected.variant || '', manifest.variant || '', 'baseline renderer variant changed');
   assert.deepEqual(expected.viewports, manifest.viewports, 'baseline viewport contract changed');
@@ -688,6 +714,8 @@ async function runBrowserQa() {
   let exitCode = 0;
   try {
   report('Electron is ready.');
+    const evidenceMetadata = await readProductEvidenceMetadata();
+    electronEvidence({ required: evidenceMetadata.requiredElectron, runtime: process.versions.electron });
     await rm(actualRoot, { recursive: true, force: true });
     const address = await listen(server);
     const baseUrl = `http://127.0.0.1:${address.port}/`;
@@ -696,7 +724,6 @@ async function runBrowserQa() {
       report(`Checking ${viewport.id} at ${viewport.width}x${viewport.height}.`);
       captures.push(...await captureViewport(baseUrl, viewport));
     }
-    const evidenceMetadata = await readProductEvidenceMetadata();
     const manifest = {
       schemaVersion: 2,
       kind: 'insta-toolbox-pwa-screenshot-baseline',

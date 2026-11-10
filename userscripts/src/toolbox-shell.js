@@ -188,10 +188,15 @@
       .map(normalizeUsername)
       .filter(Boolean))].slice(0, 250);
     const capabilityId = safeText(value.capabilityId);
+    const accountUsername = normalizeUsername(value.accountUsername);
     if (!capabilityId
+      || !accountUsername
+      || (safeText(value.growthCampaignId) && normalizeUsername(value.growthAccount) !== accountUsername)
       || !approvedTargets.length
       || queue.some((username) => !approvedTargets.includes(username))
       || safeText(value.capabilityDigest) !== accountCapabilityDigest(action, approvedTargets)) return null;
+    const pendingTarget = normalizeUsername(value.pendingTarget);
+    if (value.pendingTarget && (!pendingTarget || !approvedTargets.includes(pendingTarget))) return null;
     const boundedCount = (candidate) => Math.max(0, Math.min(250, Math.round(Number(candidate) || 0)));
     return {
       status: 'running',
@@ -202,12 +207,15 @@
       completed: boundedCount(value.completed),
       skipped: boundedCount(value.skipped),
       failed: boundedCount(value.failed),
+      uncertain: boundedCount(value.uncertain),
       current: safeText(value.current),
       stopReason: null,
       approvedTargets,
       capabilityDigest: accountCapabilityDigest(action, approvedTargets),
       capabilityExpiresAt,
       capabilityId,
+      accountUsername,
+      pendingTarget,
       growthCampaignId: safeText(value.growthCampaignId),
       growthAccount: normalizeUsername(value.growthAccount),
       nextAt: Number(value.nextAt) > Date.now() ? Number(value.nextAt) : null,
@@ -398,6 +406,10 @@
     GM_setValue(PREFERENCES_KEY, preferences);
     applyLayout();
     renderShellState();
+    if (Object.prototype.hasOwnProperty.call(patch, 'view')) {
+      clearContextStatus();
+      renderContext();
+    }
   }
 
   function currentQueueItem() {
@@ -833,7 +845,7 @@
       .run-bar { overflow: hidden; height: 5px; margin: 8px 0 6px; border-radius: 999px; background: var(--insta-toolbox-line, #d8ddd4); }
       .run-bar span { display: block; width: 0%; height: 100%; border-radius: 999px; background: var(--insta-toolbox-accent, #b83d67); transition: width var(--insta-toolbox-motion-base, 180ms) var(--insta-toolbox-ease, ease); }
       .run-panel .list { max-height: 118px; overflow-y: auto; }
-      .button.danger { background: var(--insta-toolbox-danger, #b42318); color: var(--insta-toolbox-on-danger, #fff); }
+      .button.danger { background: var(--insta-toolbox-danger-fill, #b42331); color: var(--insta-toolbox-on-danger, #fff); }
       .button.primary { background: var(--insta-toolbox-accent, #b83d67); color: var(--insta-toolbox-on-accent, #fff); border: 0; font-weight: 600; }
       .button.primary:hover { filter: brightness(1.08); }
       .button.big { width: 100%; padding: 10px 12px; font-size: var(--system-14-font-size, 14px); line-height: var(--system-14-line-height, 18px); border-radius: 8px; }
@@ -970,10 +982,16 @@
   const queryAll = (selector) => [...shadow.querySelectorAll(selector)];
   const setText = (role, value) => {
     const element = query(`[data-role="${role}"]`);
-    if (element) element.textContent = String(value ?? '');
+    const text = String(value ?? '');
+    if (element && element.textContent !== text) element.textContent = text;
   };
   let contextStatus = null;
   let contextStatusTimer = null;
+  function clearContextStatus() {
+    contextStatus = null;
+    clearTimeout(contextStatusTimer);
+    contextStatusTimer = null;
+  }
   const statusTone = (message) => {
     const text = safeText(message).toLocaleLowerCase();
     if (/blocked|could not|disabled|error|expired|failed|rate limit|security check|signed out|unclear|unavailable|wrong thread/.test(text)) return 'blocked';
@@ -1416,7 +1434,7 @@
     panel.hidden = !run;
     if (!run) return;
 
-    const done = (run.completed || 0) + (run.skipped || 0) + (run.failed || 0);
+    const done = (run.completed || 0) + (run.skipped || 0) + (run.failed || 0) + (run.uncertain || 0);
     const total = run.total || 0;
     const title = query('[data-role="run-title"]');
     if (title) {
@@ -1435,6 +1453,7 @@
       const parts = [`${done}/${total} processed`, `${run.completed || 0} done`];
       if (run.skipped) parts.push(`${run.skipped} skipped`);
       if (run.failed) parts.push(`${run.failed} failed`);
+      if (run.uncertain) parts.push(`${run.uncertain} unconfirmed`);
       detail.textContent = parts.join(' · ');
     }
     const fill = query('[data-role="run-fill"]');
@@ -1515,6 +1534,7 @@
   // same exact-target checks the extension gets.
 
   let batchAbort = false;
+  let accountActionController = null;
   let accountRunDraft = null;
   let relationshipController = null;
   let relationshipProgress = null;
@@ -1528,6 +1548,7 @@
   let presencePanel = null;
   let presenceGrowthPanel = null;
   let presenceSession = null;
+  let presenceContextRunId = null;
   let presenceCapture = null;
 
   const engine = globalThis.InstaToolboxInstagramInspector;
@@ -1558,6 +1579,15 @@
   const stopPresenceSession = () => {
     presenceSession?.stop();
   };
+
+  function onPresenceUpdate(next) {
+    if (next.runId && next.runId !== presenceContextRunId) {
+      presenceContextRunId = next.runId;
+      clearContextStatus();
+    }
+    presencePanel?.render(next);
+    renderContext();
+  }
   const dmRunner = globalThis.InstaToolboxDmThreadUnsender;
   if (dmRunner) {
     dmRunnerSnapshot = dmRunner.snapshot();
@@ -1592,6 +1622,8 @@
   function runCapabilityValid(run = state.run) {
     return Boolean(
       run?.status === 'running'
+      && normalizeUsername(run.accountUsername)
+      && (!run.growthCampaignId || run.growthAccount === run.accountUsername)
       && safeText(run.capabilityId)
       && Number(run.capabilityExpiresAt) > Date.now()
       && Array.isArray(run.approvedTargets)
@@ -1758,7 +1790,7 @@
     return run.queue.every((target) => due.includes(target));
   }
 
-  async function runOneAccount(username, action) {
+  async function runOneAccount(username, action, run = state.run) {
     const observation = engine.inspectProfile(username);
     const stop = sessionStop(observation);
     if (stop) return { status: 'stopped', reason: stop, fatal: true };
@@ -1778,19 +1810,94 @@
         fatal: false,
       };
     }
-    const result = await engine.performReviewedProfileAction({
-      action,
-      expectedRelationship: expected,
-      resolutionToken: observation.resolutionToken,
-      username,
-    });
+    const controller = new AbortController();
+    accountActionController = controller;
+    let result;
+    let enteredEngine = false;
+    let checkpointing = false;
+    let laneProblem = null;
+    const locks = globalThis.navigator?.locks;
+    const accountKey = globalThis.InstaToolboxInstagramViewer?.accountKey?.(run?.accountUsername);
+    const lockName = `insta-toolbox:account-activity:${accountKey}`;
+    try {
+      if (typeof locks?.request !== 'function' || !/^[A-Za-z0-9_-]{1,128}$/.test(accountKey || '')) {
+        return { status: 'stopped', fatal: true,
+          reason: 'This browser cannot coordinate account actions safely. No profile action was sent.' };
+      }
+      result = await locks.request(lockName, { mode: 'exclusive', ifAvailable: true }, async (lock) => {
+        if (!lock || lock.name !== lockName || lock.mode !== 'exclusive') {
+          laneProblem = 'Another Presence, Ghost Mode, or account run is active for this account. Stop it before continuing.';
+          return null;
+        }
+        checkpointing = true;
+        await persistAccountRunCheckpoint({ pendingTarget: username });
+        checkpointing = false;
+        enteredEngine = true;
+        return engine.performReviewedProfileAction({
+          action,
+          expectedRelationship: expected,
+          resolutionToken: observation.resolutionToken,
+          username,
+        }, {
+          signal: controller.signal,
+          assertAuthorized: () => !batchAbort && state.run?.capabilityId === run?.capabilityId
+            && runCapabilityValid(state.run),
+          assertContext: () => Boolean(run?.accountUsername)
+            && normalizeUsername(engine.detectAuthenticatedUsername?.()) === run.accountUsername,
+        });
+      });
+    } catch {
+      return enteredEngine
+        ? { status: 'uncertain', fatal: true,
+          reason: 'The profile action ended without a reliable result. Check this profile before trying again.' }
+        : checkpointing ? { status: 'stopped', fatal: true,
+          reason: 'The next profile action could not be checkpointed. No action was sent. Check local storage before trying again.' }
+        : { status: 'stopped', fatal: true,
+          reason: 'This browser could not coordinate account actions. No profile action was sent.' };
+    } finally {
+      if (accountActionController === controller) accountActionController = null;
+    }
+    if (laneProblem) return { status: 'stopped', fatal: true, reason: laneProblem };
+    if (result?.uncertain) {
+      return { status: 'uncertain', fatal: true,
+        reason: 'The action was sent, but its result could not be verified. Check this profile before trying again.' };
+    }
     const resultStop = sessionStop(result);
     if (resultStop) return { status: 'stopped', reason: resultStop, fatal: true };
     if (!result?.result || result.ambiguous || result.unexpectedUi) {
-      return { status: 'failed', reason: result?.reason || 'not confirmed', fatal: false };
+      return { status: result?.needsAttention ? 'stopped' : 'failed',
+        reason: result?.reason || 'not confirmed', fatal: result?.needsAttention === true };
     }
-    recordAction('actions');
-    return { status: 'completed', reason: String(result.result), fatal: false };
+    try { recordAction('actions'); } catch {
+      return { status: 'completed', reason: String(result.result), fatal: true,
+        stopReason: 'Action verified, but its local activity record could not be saved. Check this profile before continuing.' };
+    }
+    return { status: 'completed', reason: String(result.result), fatal: result.needsAttention === true };
+  }
+
+  async function persistAccountRunCheckpoint(patch) {
+    if (!managerTabStorageAvailable || typeof GM_saveTab !== 'function') {
+      throw new Error('account-run-checkpoint-unavailable');
+    }
+    setRun(patch);
+    const resumable = normalizeResumableAccountRun(state.run);
+    managerTab = { ...managerTab };
+    if (resumable) managerTab[TAB_RUN_FIELD] = resumable;
+    else delete managerTab[TAB_RUN_FIELD];
+    // saveState also writes this record, but its general-purpose path tolerates
+    // manager errors. A native dispatch requires an acknowledged checkpoint.
+    await GM_saveTab(managerTab);
+    const stored = await readManagerTab();
+    if (!stored) throw new Error('account-run-checkpoint-unreadable');
+    const savedRun = stored[TAB_RUN_FIELD];
+    if (resumable) {
+      const fields = ['capabilityId', 'accountUsername', 'pendingTarget', 'capabilityDigest',
+        'capabilityExpiresAt', 'queue', 'completed', 'skipped', 'failed', 'uncertain'];
+      if (!savedRun || JSON.stringify(fields.map(field => savedRun[field]))
+        !== JSON.stringify(fields.map(field => resumable[field]))) {
+        throw new Error('account-run-checkpoint-not-confirmed');
+      }
+    } else if (savedRun) throw new Error('account-run-checkpoint-not-cleared');
   }
 
   // An account run has to visit each target's profile, and navigating tears this
@@ -1812,16 +1919,28 @@
       stopForExpiredCapability();
       return;
     }
-    if (run.growthCampaignId
-      && normalizeUsername(engine.detectAuthenticatedUsername?.()) !== run.growthAccount) {
+    if (normalizeUsername(engine.detectAuthenticatedUsername?.()) !== run.accountUsername) {
       setRun({ status: 'stopped', stopReason: 'signed-in account changed', current: '', queue: [] });
-      status('Campaign stopped because the signed-in account could not be verified.');
+      status('Run stopped because the signed-in account changed or could not be verified. Review it again for this account.');
       return;
     }
     if (run.growthCampaignId && !growthRunStillApproved(run)) {
       setRun({ status: 'stopped', stopReason: 'campaign targets changed', current: '', queue: [] });
       status('Campaign targets changed. Review them again before any further action.');
       return;
+    }
+    if (run.pendingTarget) {
+      setRun({ status: 'stopped', current: '', queue: [], nextAt: null,
+        stopReason: 'A previous profile action was interrupted before its result was saved. Check that profile and review a new run.' });
+      status(`Check @${run.pendingTarget} before continuing. Its previous action has no saved outcome, so this run will not resume automatically.`);
+      return;
+    }
+    if (Number(run.nextAt) > Date.now()) {
+      await sleep(Number(run.nextAt) - Date.now());
+      if (batchAbort || state.run?.status !== 'running'
+        || state.run.capabilityId !== run.capabilityId) return;
+      setRun({ nextAt: null });
+      return continueAccountRun();
     }
     const username = run.queue[0];
     const onTarget = engine.normalizeUsername(location.pathname) === username;
@@ -1836,9 +1955,10 @@
     setRun({ current: `@${username}` });
     let outcome;
     try {
-      outcome = await runOneAccount(username, run.action);
+      outcome = await runOneAccount(username, run.action, run);
     } catch (error) {
-      outcome = { status: 'failed', reason: error.message, fatal: false };
+      outcome = { status: 'uncertain', fatal: true,
+        reason: 'The profile action ended without a reliable result. Check this profile before trying again.' };
     }
 
     if (outcome.status === 'completed' && run.growthCampaignId
@@ -1851,25 +1971,47 @@
     }
 
     const current = state.run || {};
+    if (current.capabilityId !== run.capabilityId) return;
     const patch = {
       queue: (current.queue || []).slice(1),
+      pendingTarget: '',
       results: [{ label: `@${username}`, status: outcome.status, reason: outcome.reason },
         ...(current.results || [])].slice(0, 40),
     };
     if (outcome.status === 'completed') patch.completed = (current.completed || 0) + 1;
     else if (outcome.status === 'skipped') patch.skipped = (current.skipped || 0) + 1;
+    else if (outcome.status === 'uncertain') patch.uncertain = (current.uncertain || 0) + 1;
     else patch.failed = (current.failed || 0) + 1;
-    setRun(patch);
+    if (outcome.fatal && !batchAbort && current.status === 'running') {
+      Object.assign(patch, { status: 'stopped', stopReason: outcome.stopReason || outcome.reason,
+        current: '', queue: [], nextAt: null });
+    }
+    try { await persistAccountRunCheckpoint(patch); } catch {
+      batchAbort = true;
+      state.run = { ...current, ...patch, status: 'stopped', current: '', queue: [], nextAt: null,
+        stopReason: 'The action result is retained in this tab, but local storage failed.' };
+      // Shared storage can fail before saveState reaches manager-tab storage.
+      // Invalidate that resume record independently, preserving other tab data.
+      if (managerTabStorageAvailable) {
+        managerTab = { ...managerTab };
+        delete managerTab[TAB_RUN_FIELD];
+        try { GM_saveTab(managerTab); } catch { /* Keep the local run stopped even if both stores fail. */ }
+      }
+      renderAll();
+      status('Run stopped because its result could not be saved. Keep this tab open and check the affected profile before reloading or trying again.');
+      return;
+    }
 
-    if (outcome.fatal) {
-      setRun({ status: 'stopped', stopReason: outcome.reason, current: '', queue: [] });
-      status(`Stopped: ${outcome.reason}. Nothing further was attempted.`);
+    // A click already sent still needs its result recorded. Settling that result
+    // must never turn a stopped run back into a completed or running one.
+    if (batchAbort || state.run?.status !== 'running') {
+      if (patch.status === 'stopped') status(`Stopped: ${patch.stopReason}. Nothing further was attempted.`);
       return;
     }
     if (!(state.run?.queue || []).length) {
       const done = state.run || {};
       setRun({ status: 'completed', current: '', nextAt: null });
-      status(`Run finished: ${done.completed || 0} done, ${done.skipped || 0} skipped, ${done.failed || 0} failed.`);
+      status(`Run finished: ${done.completed || 0} done, ${done.skipped || 0} skipped, ${done.failed || 0} failed, ${done.uncertain || 0} unconfirmed.`);
       return;
     }
 
@@ -1879,18 +2021,26 @@
       + Math.floor(Math.random() * (Math.max(bounds.maxDelayMs, bounds.minDelayMs) - bounds.minDelayMs + 1));
     if (processed % REST_EVERY === 0) wait += REST_MS;
     setRun({ nextAt: Date.now() + wait });
-    await sleep(wait);
-    if (batchAbort || state.run?.status !== 'running') return;
     await continueAccountRun();
   }
 
-  async function startAccountRun({ action, usernames, growthCampaignId = '', growthAccount = '' }) {
-    if (growthCampaignId && normalizeUsername(engine.detectAuthenticatedUsername?.()) !== growthAccount) {
-      status('Campaign account changed. No account action started.');
+  async function startAccountRun({ action, usernames, growthCampaignId = '', growthAccount = '', expiresAt = null }) {
+    const accountUsername = normalizeUsername(engine.detectAuthenticatedUsername?.());
+    if (!accountUsername || (growthCampaignId && accountUsername !== growthAccount)) {
+      status('Verify the signed-in account before starting. No account action started.');
+      return;
+    }
+    const approvedExpiry = Number(expiresAt);
+    if (growthCampaignId && (!Number.isFinite(approvedExpiry) || approvedExpiry <= Date.now())) {
+      status('The campaign review expired. Review these accounts again before starting.');
       return;
     }
     if (!managerTabStorageAvailable) {
       status('This userscript manager cannot keep a run active while opening profiles. Account batches are unavailable; scans and no-click checks still work.');
+      return;
+    }
+    if (accountActionController) {
+      status('The last account action is still being checked. Wait for its result before starting another run.');
       return;
     }
     if (state.run?.status === 'running') {
@@ -1910,16 +2060,33 @@
       completed: 0,
       skipped: 0,
       failed: 0,
+      uncertain: 0,
       current: '',
       stopReason: null,
       approvedTargets: [...queue],
       capabilityDigest: accountCapabilityDigest(action, queue),
-      capabilityExpiresAt: Date.now() + RUN_CAPABILITY_MS,
+      capabilityExpiresAt: Math.min(Date.now() + RUN_CAPABILITY_MS,
+        approvedExpiry > 0 ? approvedExpiry : Infinity),
       capabilityId,
+      accountUsername,
+      pendingTarget: '',
       growthCampaignId,
       growthAccount,
       results: [],
     });
+    await continueAccountRun();
+  }
+
+  async function resumeApprovedAccountRun() {
+    const run = resumableAccountRun();
+    if (!run) return;
+    // Keep hidden manual queues retired. Only a still-reviewed, account-bound
+    // growth campaign may continue across the profile navigation it requested.
+    if (!run.growthCampaignId) {
+      setRun({ status: 'stopped', stopReason: 'legacy account run retired', current: '', queue: [] });
+      status('An older manual account run was stopped. Presence does not resume past approvals.');
+      return;
+    }
     await continueAccountRun();
   }
 
@@ -1984,13 +2151,16 @@
         view: 'account',
       };
     }
-    if (preferences.view === 'account' && inspectPresenceAccount().accountVerified) {
-      return { tone: 'ready', title: 'Presence ready',
-        detail: 'Choose activities and start. Presence can move between Instagram pages.', view: 'account' };
+    if (preferences.view === 'account') {
+      return inspectPresenceAccount().accountVerified
+        ? { tone: 'ready', title: 'Presence ready',
+          detail: 'Choose activities and a run style, then review and start.', view: 'account' }
+        : { tone: 'warning', title: 'Verify your signed-in account',
+          detail: 'Open Home, then try again after Instagram loads.', view: 'account' };
     }
 
     const path = location.pathname.toLowerCase();
-    if (path.startsWith('/direct/t/')) {
+    if (preferences.view === 'messages' && path.startsWith('/direct/t/')) {
       return {
         tone: 'ready',
         title: 'Conversation open',
@@ -1998,8 +2168,12 @@
         view: 'messages',
       };
     }
-    if (path.startsWith('/direct')) {
+    if (preferences.view === 'messages' && path.startsWith('/direct')) {
       return { tone: 'ready', title: 'Inbox open', detail: 'Use Ghost Mode for multiple conversations, or open a chat to use Unsend.' };
+    }
+    if (preferences.view === 'messages') {
+      return { tone: 'warning', title: 'Open a conversation for Unsend',
+        detail: 'Open a chat for Unsend. Ghost Mode asks for a separate review.', view: 'messages' };
     }
     const followerList = openFollowerListContext();
     if (followerList) {
@@ -2022,7 +2196,7 @@
     return {
       tone: 'ready',
       title: 'Instagram open',
-      detail: 'Use Presence here, or open your profile to check mutuals.',
+      detail: 'Enter a username to compare Followers and Following. This check does not change the account.',
     };
   }
 
@@ -2976,6 +3150,7 @@
         return;
       }
       batchAbort = true;
+      accountActionController?.abort('Stopped by you');
       // Clearing the queue is what actually stops a resumable account run; the
       // in-memory flag alone would not survive the next page load.
       setRun({
@@ -3571,7 +3746,7 @@
     presenceSession = globalThis.InstaToolboxPresenceSession.create({
       nativeActions,
       locks: globalThis.navigator?.locks || null,
-      onUpdate: next => { presencePanel?.render(next); renderContext(); },
+      onUpdate: onPresenceUpdate,
     });
     presencePanel = globalThis.InstaToolboxPresenceSessionPanel.mount({
       container: query('[data-role="presence-routine"]'), document, window,
@@ -3681,10 +3856,5 @@
   }
   renderAll();
 
-  // Presence replaces the old persisted manual account runner. Never resume a
-  // hidden legacy queue after an update or navigation.
-  if (resumableAccountRun()) {
-    setRun({ status: 'stopped', stopReason: 'legacy account run retired', current: '', queue: [] });
-    status('An older manual account run was stopped. Presence does not resume past approvals.');
-  }
+  await resumeApprovedAccountRun();
 })();

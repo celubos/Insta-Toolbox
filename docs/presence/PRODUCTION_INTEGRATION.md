@@ -6,7 +6,7 @@ Presence is the primary account tab in the generated userscript. It has five
 direct choices:
 
 - View stories
-- React to stories
+- Like stories (the story heart control)
 - Like posts
 - Follow people
 - Accept incoming requests
@@ -36,7 +36,7 @@ then finds one visible **View story** control. It does not dispatch the story
 hint URL directly or guess from screen coordinates. Completion requires the
 expected story route plus media and controls inside one visible story-viewer
 root; unrelated page media cannot prove success.
-A private-profile Follow may verify as Requested. Story reaction automatically
+A private-profile Follow may verify as Requested. Story liking automatically
 includes story viewing. This adapter does not collect credentials, call private
 endpoints, bypass restrictions, or restore authority after a reload.
 

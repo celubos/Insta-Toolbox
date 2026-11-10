@@ -115,7 +115,10 @@
       '--insta-toolbox-bg-raised': 'rgb(var(--ig-elevated-background, 255 255 255))',
       '--insta-toolbox-bg-sunken': 'rgb(var(--ig-secondary-background, 250 250 250))',
       '--insta-toolbox-text': 'rgb(var(--ig-primary-text, 0 0 0))',
-      '--insta-toolbox-text-muted': 'rgb(var(--ig-secondary-text, 115 115 115))',
+      // The panel can overlap dark media on a light page, or the reverse.
+      // Move Instagram's secondary text toward its primary text so the
+      // translucent default surface retains readable secondary copy.
+      '--insta-toolbox-text-muted': 'color-mix(in srgb, rgb(var(--ig-secondary-text, 115 115 115)) 80%, rgb(var(--ig-primary-text, 0 0 0)))',
       '--insta-toolbox-line': 'rgb(var(--ig-separator, 219 219 219))',
       '--insta-toolbox-accent': '#b83d67',
       '--insta-toolbox-accent-violet': '#7657d6',
@@ -124,6 +127,9 @@
       '--insta-toolbox-success': 'rgb(var(--ig-success, 0 148 84))',
       '--insta-toolbox-warning': '#b26a00',
       '--insta-toolbox-danger': 'rgb(var(--ig-error-or-destructive, 237 73 86))',
+      // Filled controls need stronger contrast than Instagram's alert red.
+      '--insta-toolbox-danger-fill': '#b42331',
+      '--insta-toolbox-on-danger': '#fff',
       // Deliberately not the danger colour: an uncertain outcome may well have
       // succeeded, and colouring it as a failure would assert what we do not know.
       '--insta-toolbox-uncertain': '#7a5cc4',
@@ -221,7 +227,7 @@
     const selector = (theme) => scope === ':host'
       ? `:host([data-theme-preference="${theme}"])`
       : `${scope}[data-theme-preference="${theme}"]`;
-    return `${selector('light')} { --insta-toolbox-bg:#fff; --insta-toolbox-bg-raised:#fff; --insta-toolbox-bg-sunken:#fafafa; --insta-toolbox-text:#171717; --insta-toolbox-text-muted:#666; --insta-toolbox-line:#dbdbdb; color-scheme:light; }
+    return `${selector('light')} { --insta-toolbox-bg:#fff; --insta-toolbox-bg-raised:#fff; --insta-toolbox-bg-sunken:#fafafa; --insta-toolbox-text:#171717; --insta-toolbox-text-muted:#606060; --insta-toolbox-line:#dbdbdb; color-scheme:light; }
 ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2023; --insta-toolbox-bg-sunken:#17181a; --insta-toolbox-text:#f3f3f3; --insta-toolbox-text-muted:#b3b3b3; --insta-toolbox-line:#36383c; color-scheme:dark; }`;
   }
 
@@ -5523,7 +5529,7 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
   function exactProfileListCount(listType, { requireScoped = false } = {}) {
     if (listType !== 'followers' && listType !== 'following') return null;
     const profileUsername = normalizeUsername(location.pathname);
-    const profileHeader = requireScoped ? verifiedProfileHeader(profileUsername).root : null;
+    const profileHeader = verifiedProfileHeader(profileUsername).root;
     const scopedCounts = new Set();
     const fallbackCounts = new Set();
     for (const link of document.querySelectorAll('a[role="link"], a[href="#"]')) {
@@ -5561,11 +5567,12 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
         }
         try {
           const target = new URL(href, INSTAGRAM_WEB_ORIGIN);
-          if (target.origin !== INSTAGRAM_WEB_ORIGIN) continue;
+          if (target.origin !== INSTAGRAM_WEB_ORIGIN || target.username || target.password) continue;
           const pathname = target.pathname
             .replace(/\/+$/, '')
             .toLowerCase();
-          if (pathname === `/${profileUsername}/${listType}`) scopedCounts.add(count);
+          if (pathname === `/${profileUsername}/${listType}`
+            || (pathname === `/${profileUsername}` && profileHeader?.contains(link))) scopedCounts.add(count);
         } catch {
           // Ignore malformed, non-navigation values such as JavaScript URLs.
         }
@@ -9926,28 +9933,50 @@ function createPresenceNativeActions({
           : { verified: false, skipped: true, reason: STORY_PATH.test(String(location.pathname))
             ? 'Next story did not finish loading' : 'End of stories' };
       }
+      const sentContext = inspectContext();
+      if (sentContext.accountVerified !== true || sentContext.usable !== true || !clean(sentContext.accountId)) {
+        throw fail('presence-context-changed');
+      }
+      assertCurrent();
       current.control.click();
-      const verified = await waitFor(() => {
-        if (!current.root.isConnected) return false;
-        if (action === 'reactStories') {
-          const displayed = currentStory();
-          if (!displayed || displayed.username !== current.target.username
-            || displayed.storyId !== current.target.storyId) return false;
-        }
-        if (action === 'likePosts' || action === 'reactStories') {
-          return exactButtons(current.root, new Set(['unlike'])).length === 1;
-        }
-        if (action === 'followPeople') {
-          return exactButtons(current.root, new Set(['following', 'requested'])).length === 1;
-        }
-        if (action === 'acceptRequests') {
-          return exactButtons(current.root, new Set(['following', 'remove'])).length === 1;
-        }
-        return false;
-      }, signal);
+      let verified;
+      try {
+        // Stop revokes further clicks. It must not discard the outcome of a
+        // click already sent: finish this bounded, read-only verification and
+        // keep an unconfirmed attempt separate from a proven result.
+        verified = await waitFor(() => {
+          const observed = inspectContext();
+          if (observed.accountVerified !== true || observed.usable !== true
+            || observed.accountId !== sentContext.accountId
+            || (sentContext.accountKey && observed.accountKey !== sentContext.accountKey)
+            || observed.challenge || observed.actionBlocked || observed.rateLimited
+            || observed.sessionExpired || observed.frozen || observed.discarded || document.wasDiscarded === true) {
+            throw fail('presence-verification-context-changed');
+          }
+          if (!current.root.isConnected) return false;
+          if (action === 'reactStories') {
+            const displayed = currentStory();
+            if (!displayed || displayed.username !== current.target.username
+              || displayed.storyId !== current.target.storyId) return false;
+          }
+          if (action === 'likePosts' || action === 'reactStories') {
+            return exactButtons(current.root, new Set(['unlike'])).length === 1;
+          }
+          if (action === 'followPeople') {
+            return exactButtons(current.root, new Set(['following', 'requested'])).length === 1;
+          }
+          if (action === 'acceptRequests') {
+            return exactButtons(current.root, new Set(['following', 'remove'])).length === 1;
+          }
+          return false;
+        });
+      } catch {
+        return { verified: false, uncertain: true,
+          reason: 'The account or Instagram context changed before the action could be confirmed' };
+      }
       if (!verified) return { verified: false, uncertain: true, reason: 'Instagram did not confirm the action' };
       const reason = action === 'likePosts' ? 'Post liked'
-        : action === 'reactStories' ? 'Story reaction added'
+        : action === 'reactStories' ? 'Story liked'
           : action === 'followPeople'
             ? (exactButtons(current.root, new Set(['requested'])).length === 1
               ? 'Follow requested'
@@ -9975,7 +10004,7 @@ const ACTION_ORDER = Object.freeze([
 
 const PRESENCE_ACTION_LABELS = Object.freeze({
   viewStories: 'View stories',
-  reactStories: 'React to stories',
+  reactStories: 'Like stories',
   likePosts: 'Like posts',
   followPeople: 'Follow people',
   acceptRequests: 'Accept incoming requests',
@@ -10057,6 +10086,7 @@ function createPresenceSession({
 
   let controller = null;
   let pauseGate = null;
+  let reviewDeadline = 0;
   let runSequence = 0;
   let state = Object.freeze({
     status: 'idle', reason: null, accountId: null, current: null,
@@ -10064,11 +10094,14 @@ function createPresenceSession({
     mode: 'session', runId: null, enabledActions: Object.freeze([]),
     results: Object.freeze([]), canPause: false,
     canResume: false, canStop: false,
+    startedAt: null, expiresAt: null, nextActionAt: null, waitingReason: null,
   });
 
   const publish = (patch = {}) => {
     const nextResults = patch.results || state.results;
-    state = Object.freeze({ ...state, ...patch, results: Object.freeze([...nextResults].slice(0, 50)) });
+    const clearWait = patch.status && !['waiting', 'quiet', 'paused'].includes(patch.status)
+      ? { nextActionAt: null, waitingReason: null } : {};
+    state = Object.freeze({ ...state, ...clearWait, ...patch, results: Object.freeze([...nextResults].slice(0, 50)) });
     onUpdate(snapshot());
     return state;
   };
@@ -10125,7 +10158,7 @@ function createPresenceSession({
   }
 
   async function start(review) {
-    if (active()) fail('presence-session-active');
+    if (controller) fail('presence-session-active');
     if (!review || !reviews.has(review) || consumed.has(review)) fail('presence-review-required');
     if (review.expiresAt <= now()) fail('presence-review-expired');
     if (!locks) fail('presence-account-lock-unavailable');
@@ -10137,8 +10170,14 @@ function createPresenceSession({
       if (!lock || lock.name !== lockName || lock.mode !== 'exclusive') fail('presence-account-busy');
       context(review.accountId);
       consumed.add(review);
-      controller = new AbortController();
-      const { signal } = controller;
+      const runController = new AbortController();
+      controller = runController;
+      reviewDeadline = review.expiresAt;
+      const { signal } = runController;
+      // A paused run must release its account lane at the reviewed deadline
+      // without requiring a later Resume or Stop click.
+      const expiryTimer = setTimeout(() => runController.abort('presence-session-expired'),
+        Math.max(0, review.expiresAt - now()));
       const results = [];
       const seen = new Set();
       const unavailableUntil = new Map();
@@ -10172,10 +10211,12 @@ function createPresenceSession({
         completed: 0, skipped: 0, uncertain: 0, maxActions: review.options.maxActions,
         mode: review.options.mode, runId, enabledActions: review.enabledActions,
         results, canPause: true, canResume: false, canStop: true,
+        startedAt: now(), expiresAt: review.expiresAt,
       });
       try {
         while (!signal.aborted && !reachedLimit() && now() < review.expiresAt) {
           await awaitResume(signal);
+          if (signal.aborted || now() >= review.expiresAt) break;
           context(review.accountId);
           const action = itinerary[cursor % itinerary.length];
           cursor += 1;
@@ -10185,7 +10226,8 @@ function createPresenceSession({
             if (review.enabledActions.every(value => (unavailableUntil.get(value) || 0) > now())) {
               if (review.options.mode !== 'live') break;
               const next = Math.min(...review.enabledActions.map(value => unavailableUntil.get(value)));
-              publish({ status: 'searching', current: null });
+              publish({ status: 'waiting', current: null, waitingReason: 'no-activities',
+                nextActionAt: Math.min(next, review.expiresAt) });
               await waitWithinReview(next - now());
             }
             continue;
@@ -10264,26 +10306,31 @@ function createPresenceSession({
             && review.options.scheduledBreaks
             && verifiedInBurst >= review.options.liveBurstActions) {
             verifiedInBurst = 0;
-            publish({ status: 'quiet', current: null });
+            publish({ status: 'quiet', current: null, waitingReason: 'scheduled-break',
+              nextActionAt: Math.min(now() + review.options.quietMinutes * 60_000, review.expiresAt) });
             await waitWithinReview(review.options.quietMinutes * 60_000);
             await awaitResume(signal);
             if (!signal.aborted) publish({ status: 'running' });
             continue;
           }
           const delay = Math.round(minDelayMs + random() * (maxDelayMs - minDelayMs));
-          publish({ status: 'waiting', current: null });
+          publish({ status: 'waiting', current: null, waitingReason: 'spacing',
+            nextActionAt: Math.min(now() + delay, review.expiresAt) });
           await waitWithinReview(delay);
           if (!signal.aborted && state.status !== 'paused') publish({ status: 'running' });
         }
         if (signal.aborted) throw new DOMException('Stopped', 'AbortError');
         const expired = now() >= review.expiresAt;
         publish({ status: expired ? 'expired' : 'completed',
-          reason: expired ? 'presence-session-expired' : null, current: null,
+          reason: expired ? 'presence-session-expired'
+            : reachedLimit() ? 'presence-action-limit-reached' : 'presence-no-activities', current: null,
           canPause: false, canResume: false, canStop: false });
         return snapshot();
       } catch (error) {
         if (signal.aborted || error?.name === 'AbortError') {
-          publish({ status: 'stopped', reason: 'presence-session-stopped', current: null,
+          const expired = signal.reason === 'presence-session-expired';
+          publish({ status: expired ? 'expired' : 'stopped',
+            reason: expired ? 'presence-session-expired' : 'presence-session-stopped', current: null,
             canPause: false, canResume: false, canStop: false });
           return snapshot();
         }
@@ -10291,7 +10338,9 @@ function createPresenceSession({
           canPause: false, canResume: false, canStop: false });
         return snapshot();
       } finally {
+        clearTimeout(expiryTimer);
         controller = null;
+        reviewDeadline = 0;
         pauseGate = null;
       }
     });
@@ -10308,6 +10357,11 @@ function createPresenceSession({
     },
     resume() {
       if (!controller || state.status !== 'paused') return false;
+      if (now() >= reviewDeadline) {
+        controller.abort('presence-session-expired');
+        pauseGate?.();
+        return false;
+      }
       publish({ status: 'running', canPause: true, canResume: false, canStop: true });
       pauseGate?.();
       return true;
@@ -10459,13 +10513,15 @@ const { createPresenceActivityLog } = localModules["extension/presence-activity-
 
 const ACTIONS = Object.freeze([
   ['viewStories', 'View stories'],
-  ['reactStories', 'React to stories'],
+  ['reactStories', 'Like stories'],
   ['likePosts', 'Like posts'],
   ['followPeople', 'Follow on Explore'],
   ['acceptRequests', 'Accept incoming requests'],
 ]);
 
 const clean = (value) => String(value ?? '').trim();
+const durationLabelFor = minutes => minutes % 60 === 0
+  ? `${minutes / 60} hour${minutes === 60 ? '' : 's'}` : `${minutes} minutes`;
 
 function mountPresenceSessionPanel({
   container,
@@ -10554,6 +10610,8 @@ function mountPresenceSessionPanel({
   liveOption.value = 'live';
   mode.append(sessionOption, liveOption);
   modeLabel.append(mode);
+  const modeHelp = create('p', '', 'lead');
+  modeHelp.setAttribute('data-presence-mode-help', '');
   const limitLabel = create('label', 'Actions this session', 'presence-limit');
   const limit = create('input');
   limit.type = 'number';
@@ -10566,8 +10624,8 @@ function mountPresenceSessionPanel({
   const liveOptions = create('div', null, 'presence-live-options');
   const durationLabel = create('label', 'Keep running', 'presence-limit');
   const duration = create('select');
-  for (const [value, label] of [[60, '1 hour'], [120, '2 hours'], [240, '4 hours'], [480, '8 hours'], [720, '12 hours']]) {
-    const option = create('option', label); option.value = String(value); duration.append(option);
+  for (const value of [30, 60, 120, 240, 480, 720]) {
+    const option = create('option', durationLabelFor(value)); option.value = String(value); duration.append(option);
   }
   durationLabel.append(duration);
   const breaksLabel = create('label', null, 'presence-option');
@@ -10602,6 +10660,9 @@ function mountPresenceSessionPanel({
   stop.setAttribute('data-presence-stop', '');
   actions.append(start, pause, resume, stop);
   const statusBox = create('div', null, 'presence-status');
+  statusBox.setAttribute('role', 'status');
+  statusBox.setAttribute('aria-live', 'polite');
+  statusBox.setAttribute('aria-atomic', 'true');
   const statusTitle = create('strong', 'Ready');
   const statusDetail = create('span', 'Nothing happens until you confirm.');
   statusBox.append(statusTitle, statusDetail);
@@ -10620,11 +10681,12 @@ function mountPresenceSessionPanel({
   logControls.append(openLog, exportLog, clearLog);
   logBody.append(logEmpty, logRecent, logControls);
   logDetails.append(logSummary, logBody);
-  root.append(style, heading, intro, options, runGrid, statusBox, actions, results, logDetails);
+  root.append(style, heading, intro, options, runGrid, modeHelp, statusBox, actions, results, logDetails);
   container.replaceChildren(root);
 
   let disposed = false;
   let confirming = false;
+  let lastSessionActions = 10;
   let logWindow = null;
   const loggedEvents = new Set();
   const listeners = [];
@@ -10641,7 +10703,7 @@ function mountPresenceSessionPanel({
 
   function readOptions() {
     const maxActions = Number(limit.value);
-    if (!Number.isInteger(maxActions) || maxActions < 1 || maxActions > 50) {
+    if (mode.value !== 'live' && (!Number.isInteger(maxActions) || maxActions < 1 || maxActions > 50)) {
       throw new Error('presence-action-limit-invalid');
     }
     return normalizePresenceSessionOptions({
@@ -10666,7 +10728,11 @@ function mountPresenceSessionPanel({
     breaks.checked = options.scheduledBreaks;
     burst.value = String(options.liveBurstActions);
     quiet.value = String(options.quietMinutes);
-    writePreferences({ ...structuredClone(options), sessionActions: Number(limit.value) });
+    const sessionActions = Number(limit.value);
+    if (Number.isInteger(sessionActions) && sessionActions >= 1 && sessionActions <= 50) {
+      lastSessionActions = sessionActions;
+    }
+    writePreferences({ ...structuredClone(options), sessionActions: lastSessionActions });
     return options;
   }
   function load() {
@@ -10679,23 +10745,44 @@ function mountPresenceSessionPanel({
     const sessionActions = Number(source.sessionActions ?? (saved.mode === 'session' ? saved.maxActions : 10));
     limit.value = String(Number.isInteger(sessionActions) && sessionActions >= 1 && sessionActions <= 50
       ? sessionActions : 10);
-    duration.value = String(saved.liveDurationMinutes);
+    lastSessionActions = Number(limit.value);
+    const restoreChoice = (select, value, label) => {
+      if (![...select.children].some(option => option.value === String(value))) {
+        const option = create('option', label); option.value = String(value); select.append(option);
+      }
+      select.value = String(value);
+    };
+    restoreChoice(duration, saved.liveDurationMinutes, durationLabelFor(saved.liveDurationMinutes));
     breaks.checked = saved.scheduledBreaks;
-    burst.value = String(saved.liveBurstActions);
-    quiet.value = String(saved.quietMinutes);
+    restoreChoice(burst, saved.liveBurstActions, `${saved.liveBurstActions} actions`);
+    restoreChoice(quiet, saved.quietMinutes, `${saved.quietMinutes} minutes`);
   }
   function describe(snapshot) {
     const count = Number(snapshot.completed || 0);
+    const progress = `${count}${Number.isInteger(snapshot.maxActions) && snapshot.maxActions > 0
+      ? ` of ${snapshot.maxActions}` : ''} verified action${snapshot.maxActions === 1 || (count === 1 && !snapshot.maxActions) ? '' : 's'}.`
+      + (snapshot.skipped ? ` ${snapshot.skipped} skipped.` : '');
+    const time = value => new Date(value).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    const ends = snapshot.expiresAt ? ` Run ends at ${time(snapshot.expiresAt)}.` : '';
     if (snapshot.status === 'idle') return ['Ready', 'Nothing happens until you confirm.'];
-    if (snapshot.status === 'running') return [snapshot.current?.label || 'Presence is running', `${count} verified action${count === 1 ? '' : 's'}.`];
-    if (snapshot.status === 'searching') return ['Looking for something to do', `${count} verified action${count === 1 ? '' : 's'}. Presence is checking the loaded Instagram tab now.`];
-    if (snapshot.status === 'waiting') return ['Presence is running', `${count} verified action${count === 1 ? '' : 's'}. Next action coming up.`];
-    if (snapshot.status === 'quiet') return ['Scheduled break', `${count} verified action${count === 1 ? '' : 's'}. Presence will continue in this loaded tab.`];
-    if (snapshot.status === 'paused') return ['Paused', `${count} verified action${count === 1 ? '' : 's'}. Resume or stop when ready.`];
-    if (snapshot.status === 'stopping') return ['Stopping', 'No new action will begin.'];
-    if (snapshot.status === 'stopped') return ['Stopped', `${count} verified action${count === 1 ? '' : 's'}.`];
-    if (snapshot.status === 'completed') return ['Presence finished', `${count} verified action${count === 1 ? '' : 's'}.`];
-    if (snapshot.status === 'expired') return ['Time limit reached', `${count} verified action${count === 1 ? '' : 's'}. Start again to continue.`];
+    if (snapshot.status === 'running') return [snapshot.current?.label || 'Presence is running', progress + ends];
+    if (snapshot.status === 'searching') return ['Looking for something to do', `${progress} Checking the loaded Instagram tab now.${ends}`];
+    if (snapshot.status === 'waiting' && snapshot.waitingReason === 'no-activities') {
+      return ['Waiting for eligible activity', `${progress} Nothing eligible is loaded. Checking again${snapshot.nextActionAt
+        ? ` at ${new Date(snapshot.nextActionAt).toLocaleTimeString()}` : ' shortly'}.${ends}`];
+    }
+    if (snapshot.status === 'waiting') return ['Presence is running', `${progress} Next action coming up.${ends}`];
+    if (snapshot.status === 'quiet') return ['Scheduled break', `${progress} Continuing${snapshot.nextActionAt
+      ? ` at ${time(snapshot.nextActionAt)}` : ' after this break'} in this loaded tab.${ends}`];
+    if (snapshot.status === 'paused') return ['Paused', `${progress} Resume before the time limit, or stop.${ends}`];
+    if (snapshot.status === 'stopping') return ['Stopping', 'No new action will begin. Checking the outcome of any action already sent.'];
+    if (snapshot.status === 'stopped') return ['Stopped', progress];
+    if (snapshot.status === 'completed' && snapshot.reason === 'presence-no-activities') {
+      return [count ? 'No more eligible activity found' : 'No eligible activity found',
+        `${progress} The loaded pages had no remaining eligible targets. You can choose different activities and start again.`];
+    }
+    if (snapshot.status === 'completed') return ['Presence finished', progress];
+    if (snapshot.status === 'expired') return ['Time limit reached', `${progress} Start again to continue.`];
     return ['Needs attention', clean(snapshot.reason) || 'Check Instagram before starting again.'];
   }
   function render(snapshot = session.snapshot()) {
@@ -10706,13 +10793,17 @@ function mountPresenceSessionPanel({
     intro.hidden = active;
     options.hidden = active;
     runGrid.hidden = active;
+    modeHelp.hidden = active;
+    modeHelp.textContent = mode.value === 'live'
+      ? 'Live like me repeats only your selected activities until the time limit. It does not learn your tastes. Keep this Instagram tab open.'
+      : 'One session stops at your action limit or when no eligible activity is found. Only verified actions count toward the limit.';
     limitLabel.hidden = mode.value === 'live';
     liveOptions.hidden = mode.value !== 'live';
     burstLabel.hidden = !breaks.checked;
     quietLabel.hidden = !breaks.checked;
     statusBox.hidden = snapshot.status === 'idle';
-    statusTitle.textContent = title;
-    statusDetail.textContent = detail;
+    if (statusTitle.textContent !== title) statusTitle.textContent = title;
+    if (statusDetail.textContent !== detail) statusDetail.textContent = detail;
     start.hidden = snapshot.status !== 'idle' && !['completed', 'stopped', 'expired', 'needs-attention'].includes(snapshot.status);
     start.disabled = confirming || busy();
     pause.hidden = snapshot.canPause !== true;
@@ -10824,10 +10915,11 @@ function mountPresenceSessionPanel({
       ? options.liveDurationMinutes * 60_000 : 15 * 60_000);
     confirming = true;
     render();
-    const confirmation = await confirmAction({
+    let confirmation;
+    try { confirmation = await confirmAction({
       title: `Start Presence for @${account.accountId}?`,
       message: options.mode === 'live'
-        ? `Run Presence for up to ${options.liveDurationMinutes / 60} hour${options.liveDurationMinutes === 60 ? '' : 's'} in this loaded tab.`
+        ? `Run Presence for up to ${durationLabelFor(options.liveDurationMinutes)} in this loaded tab.`
         : `Allow up to ${options.maxActions} action${options.maxActions === 1 ? '' : 's'} in this tab.`,
       detail: 'Presence stops on Instagram restrictions, an account change, an uncertain result, or when you press Stop.',
       confirmLabel: 'Start Presence',
@@ -10844,11 +10936,19 @@ function mountPresenceSessionPanel({
       ],
       binding: { action: 'presence', accountId: account.accountId, expiresAt,
         maxActions: options.maxActions, options: reviewedSignature },
-    });
-    confirming = false;
+    }); } catch {
+      onStatus('The confirmation could not open. Nothing changed. Try again.');
+      return false;
+    } finally {
+      confirming = false;
+      render();
+    }
     if (!confirmation) { render(); onStatus('Presence canceled. Nothing changed.'); return false; }
     const current = inspectAccount();
-    const currentOptions = readOptions();
+    let currentOptions;
+    try { currentOptions = readOptions(); } catch {
+      render(); onStatus('The Presence choices changed. Check them and start again.'); return false;
+    }
     if (current?.accountVerified !== true || current.usable !== true
       || current.accountId !== account.accountId || signature(currentOptions) !== reviewedSignature
       || confirmation.action !== 'presence' || confirmation.accountId !== account.accountId
@@ -10889,9 +10989,13 @@ function mountPresenceSessionPanel({
   listen(pause, 'click', () => { if (session.pause()) { const state = session.snapshot(); appendLog({ eventId: `${state.runId}:paused:${now()}`, at: now(), kind: 'session', outcome: 'paused', detail: 'Paused' }); render(); onStatus('Presence paused.'); } });
   listen(resume, 'click', () => { if (session.resume()) { const state = session.snapshot(); appendLog({ eventId: `${state.runId}:resumed:${now()}`, at: now(), kind: 'session', outcome: 'resumed', detail: 'Resumed' }); render(); onStatus('Presence resumed.'); } });
   listen(stop, 'click', () => { if (session.stop()) { const state = session.snapshot(); appendLog({ eventId: `${state.runId}:stopped:${now()}`, at: now(), kind: 'session', outcome: 'stopped', detail: 'Stop requested' }); render(); onStatus('Stopping Presence.'); } });
-  for (const input of controls.values()) listen(input, 'change', () => { save(); render(); });
-  listen(limit, 'change', () => { save(); render(); });
-  for (const input of [mode, duration, breaks, burst, quiet]) listen(input, 'change', () => { save(); render(); });
+  const saveChanges = () => {
+    try { save(); } catch { onStatus('Choose an action limit from 1 to 50 for One session.'); }
+    render();
+  };
+  for (const input of controls.values()) listen(input, 'change', saveChanges);
+  listen(limit, 'change', saveChanges);
+  for (const input of [mode, duration, breaks, burst, quiet]) listen(input, 'change', saveChanges);
   listen(openLog, 'click', () => {
     logWindow = window?.open?.('', 'insta-toolbox-presence-log', 'popup=yes,width=620,height=760,resizable=yes,scrollbars=yes') || null;
     if (!logWindow) { onStatus('Allow pop-ups to open the Presence log window.'); return; }
@@ -11066,7 +11170,7 @@ function mountPresenceGrowthPanel({
   };
   const root = make('details');
   root.className = 'presence-growth';
-  root.open = true;
+  root.open = false;
   const summary = make('summary', 'Grow through mutuals');
   const note = make('p', 'Choose up to three accounts from your Following list.');
   const seedLabel = make('label', 'Accounts you follow');
@@ -11146,6 +11250,9 @@ function mountPresenceGrowthPanel({
     const nextDue = savedCampaigns.map((campaign) => ({ campaign,
       targets: dueGrowthUnfollows(campaign, { account: owner, now: now() }) }))
       .find(({ targets }) => targets.length);
+    summary.textContent = nextDue
+      ? 'Grow through mutuals · review unfollows'
+      : 'Grow through mutuals';
     dueList.hidden = savedCampaigns.length === 0;
     due.hidden = !nextDue;
     daysLabel.hidden = candidates.length === 0;
@@ -11251,7 +11358,7 @@ function mountPresenceGrowthPanel({
     writeCampaigns([...campaigns(), campaign].slice(-100));
     setProgress(`Following ${targets.length} reviewed accounts. Use Stop in the run bar to end the batch.`);
     await runBatch({ action: 'follow', usernames: targets, growthCampaignId: campaign.id,
-      growthAccount: owner });
+      growthAccount: owner, expiresAt });
     render();
   }
 
@@ -11277,7 +11384,7 @@ function mountPresenceGrowthPanel({
       || expiresAt <= now()) return;
     setProgress(`Unfollowing ${targets.length} reviewed campaign accounts.`);
     await runBatch({ action: 'unfollow', usernames: targets,
-      growthCampaignId: entry.campaign.id, growthAccount: owner });
+      growthCampaignId: entry.campaign.id, growthAccount: owner, expiresAt });
     render();
   }
 
@@ -11304,8 +11411,16 @@ const visible = node => Boolean(node?.isConnected && node.getClientRects?.().len
   && !node.closest?.('[hidden], [aria-hidden="true"]'));
 const route = href => {
   if (typeof href !== 'string' || !href.trim()) return null;
-  try { const url = new URL(href, ORIGIN); return url.origin === ORIGIN ? url.pathname : null; }
+  try { const url = new URL(href, ORIGIN); return url.origin === ORIGIN && !url.username && !url.password ? url.pathname : null; }
   catch { return null; }
+};
+const RESERVED_PROFILE_PREFIXES = new Set([
+  'accounts', 'about', 'api', 'direct', 'explore', 'p', 'reel', 'reels', 'settings', 'stories', 'web',
+]);
+const postIdentity = path => {
+  const match = String(path || '').match(/^\/(?:([A-Za-z0-9._]{1,30})\/)?(p|reel|reels)\/([\w-]+)\/?$/);
+  if (!match || (match[1] && RESERVED_PROFILE_PREFIXES.has(match[1].toLowerCase()))) return null;
+  return { id: match[3], path };
 };
 
 function summarizeLoadedPosts(observations, { sourceUrl, capturedAt = new Date().toISOString() } = {}) {
@@ -11315,9 +11430,9 @@ function summarizeLoadedPosts(observations, { sourceUrl, capturedAt = new Date()
   const posts = new Map();
   for (const observation of observations) {
     const path = route(observation.url);
-    const match = path?.match(/^\/(p|reel|reels)\/([\w-]+)\/?$/);
-    if (!match) continue;
-    const id = match[2];
+    const identity = postIdentity(path);
+    if (!identity) continue;
+    const id = identity.id;
     const timestamp = Date.parse(observation.publishedAt);
     const hashtags = [...new Set((observation.hashtags || []).map(tag => clean(tag, 100).replace(/^#/, '').toLowerCase())
       .filter(tag => /^[\p{L}\p{M}\p{N}_]+$/u.test(tag)))];
@@ -11352,8 +11467,8 @@ function readLoadedInsights({ document = globalThis.document, location = globalT
     const paths = [...article.querySelectorAll('a[href]')].filter(visible)
       .map(link => route(link.getAttribute('href'))).filter(Boolean);
     const identities = new Map(paths.map(path => {
-      const match = path.match(/^\/(p|reel|reels)\/([\w-]+)\/?$/);
-      return match ? [match[2], path] : null;
+      const identity = postIdentity(path);
+      return identity ? [identity.id, path] : null;
     }).filter(Boolean));
     if (identities.size !== 1) return [];
     const hashtags = paths.filter(path => path.startsWith('/explore/tags/')).flatMap(path => {
@@ -11364,7 +11479,7 @@ function readLoadedInsights({ document = globalThis.document, location = globalT
     const type = carousel ? 'carousel' : article.querySelector('video') ? 'video' : 'unknown';
     const times = [...article.querySelectorAll('time[datetime]')].filter(node => {
       const path = route(node.closest('a[href]')?.getAttribute('href'));
-      return path && identities.has(path.match(/^\/(?:p|reel|reels)\/([\w-]+)\/?$/)?.[1]);
+      return path && identities.has(postIdentity(path)?.id);
     }).map(node => node.getAttribute('datetime'));
     return [{ url: `${ORIGIN}${[...identities.values()][0]}`, type, hashtags,
       publishedAt: new Set(times).size === 1 ? times[0] : null }];
@@ -11372,19 +11487,29 @@ function readLoadedInsights({ document = globalThis.document, location = globalT
   for (const link of document.querySelectorAll('main a[href]')) {
     if (!visible(link) || link.closest('article') || observations.length >= 1000) continue;
     const path = route(link.getAttribute('href'));
-    if (!/^\/(p|reel|reels)\/[\w-]+\/?$/.test(path || '')) continue;
+    if (!postIdentity(path)) continue;
     observations.push({ url: `${ORIGIN}${path}`, type: 'unknown', hashtags: [] });
   }
   const report = summarizeLoadedPosts(observations, { sourceUrl: location.href, capturedAt: now() });
   const username = String(location.pathname).match(/^\/([a-zA-Z0-9_.]{1,30})\/?$/)?.[1];
   report.profile = null;
   if (username) {
+    const ownerPath = `/${username.toLowerCase()}`;
+    const pathOf = node => route(node.getAttribute?.('href'))?.replace(/\/+$/, '').toLowerCase();
+    const counter = (link, list) => {
+      const label = clean(link.textContent);
+      if (!visible(link) || !new RegExp(`^[0-9][0-9., ]*(?:[kmb])? ${list}$`, 'i').test(label)) return false;
+      const path = pathOf(link);
+      return path === `${ownerPath}/${list}` || path === ownerPath;
+    };
     const headers = [...document.querySelectorAll('main header')].filter(visible).filter(header =>
-      [...header.querySelectorAll('a[href]')].some(link => route(link.getAttribute('href')) === `/${username}/followers/`));
+      [...header.querySelectorAll('a[href], h1, h2, [role="heading"]')].filter(visible)
+        .some(node => pathOf(node) === ownerPath || pathOf(node) === `${ownerPath}/followers`
+          || clean(node.textContent).toLowerCase() === username.toLowerCase()));
     if (headers.length === 1) {
       const count = list => {
         const links = [...headers[0].querySelectorAll('a[href]')].filter(visible)
-          .filter(link => route(link.getAttribute('href')) === `/${username}/${list}/`);
+          .filter(link => counter(link, list));
         return links.length === 1 ? clean(links[0].textContent) : null;
       };
       report.profile = { username, followers: count('followers'), following: count('following') };
@@ -11659,10 +11784,15 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
       .map(normalizeUsername)
       .filter(Boolean))].slice(0, 250);
     const capabilityId = safeText(value.capabilityId);
+    const accountUsername = normalizeUsername(value.accountUsername);
     if (!capabilityId
+      || !accountUsername
+      || (safeText(value.growthCampaignId) && normalizeUsername(value.growthAccount) !== accountUsername)
       || !approvedTargets.length
       || queue.some((username) => !approvedTargets.includes(username))
       || safeText(value.capabilityDigest) !== accountCapabilityDigest(action, approvedTargets)) return null;
+    const pendingTarget = normalizeUsername(value.pendingTarget);
+    if (value.pendingTarget && (!pendingTarget || !approvedTargets.includes(pendingTarget))) return null;
     const boundedCount = (candidate) => Math.max(0, Math.min(250, Math.round(Number(candidate) || 0)));
     return {
       status: 'running',
@@ -11673,12 +11803,15 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
       completed: boundedCount(value.completed),
       skipped: boundedCount(value.skipped),
       failed: boundedCount(value.failed),
+      uncertain: boundedCount(value.uncertain),
       current: safeText(value.current),
       stopReason: null,
       approvedTargets,
       capabilityDigest: accountCapabilityDigest(action, approvedTargets),
       capabilityExpiresAt,
       capabilityId,
+      accountUsername,
+      pendingTarget,
       growthCampaignId: safeText(value.growthCampaignId),
       growthAccount: normalizeUsername(value.growthAccount),
       nextAt: Number(value.nextAt) > Date.now() ? Number(value.nextAt) : null,
@@ -11869,6 +12002,10 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
     GM_setValue(PREFERENCES_KEY, preferences);
     applyLayout();
     renderShellState();
+    if (Object.prototype.hasOwnProperty.call(patch, 'view')) {
+      clearContextStatus();
+      renderContext();
+    }
   }
 
   function currentQueueItem() {
@@ -12304,7 +12441,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
       .run-bar { overflow: hidden; height: 5px; margin: 8px 0 6px; border-radius: 999px; background: var(--insta-toolbox-line, #d8ddd4); }
       .run-bar span { display: block; width: 0%; height: 100%; border-radius: 999px; background: var(--insta-toolbox-accent, #b83d67); transition: width var(--insta-toolbox-motion-base, 180ms) var(--insta-toolbox-ease, ease); }
       .run-panel .list { max-height: 118px; overflow-y: auto; }
-      .button.danger { background: var(--insta-toolbox-danger, #b42318); color: var(--insta-toolbox-on-danger, #fff); }
+      .button.danger { background: var(--insta-toolbox-danger-fill, #b42331); color: var(--insta-toolbox-on-danger, #fff); }
       .button.primary { background: var(--insta-toolbox-accent, #b83d67); color: var(--insta-toolbox-on-accent, #fff); border: 0; font-weight: 600; }
       .button.primary:hover { filter: brightness(1.08); }
       .button.big { width: 100%; padding: 10px 12px; font-size: var(--system-14-font-size, 14px); line-height: var(--system-14-line-height, 18px); border-radius: 8px; }
@@ -12441,10 +12578,16 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
   const queryAll = (selector) => [...shadow.querySelectorAll(selector)];
   const setText = (role, value) => {
     const element = query(`[data-role="${role}"]`);
-    if (element) element.textContent = String(value ?? '');
+    const text = String(value ?? '');
+    if (element && element.textContent !== text) element.textContent = text;
   };
   let contextStatus = null;
   let contextStatusTimer = null;
+  function clearContextStatus() {
+    contextStatus = null;
+    clearTimeout(contextStatusTimer);
+    contextStatusTimer = null;
+  }
   const statusTone = (message) => {
     const text = safeText(message).toLocaleLowerCase();
     if (/blocked|could not|disabled|error|expired|failed|rate limit|security check|signed out|unclear|unavailable|wrong thread/.test(text)) return 'blocked';
@@ -12887,7 +13030,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
     panel.hidden = !run;
     if (!run) return;
 
-    const done = (run.completed || 0) + (run.skipped || 0) + (run.failed || 0);
+    const done = (run.completed || 0) + (run.skipped || 0) + (run.failed || 0) + (run.uncertain || 0);
     const total = run.total || 0;
     const title = query('[data-role="run-title"]');
     if (title) {
@@ -12906,6 +13049,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
       const parts = [`${done}/${total} processed`, `${run.completed || 0} done`];
       if (run.skipped) parts.push(`${run.skipped} skipped`);
       if (run.failed) parts.push(`${run.failed} failed`);
+      if (run.uncertain) parts.push(`${run.uncertain} unconfirmed`);
       detail.textContent = parts.join(' · ');
     }
     const fill = query('[data-role="run-fill"]');
@@ -12986,6 +13130,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
   // same exact-target checks the extension gets.
 
   let batchAbort = false;
+  let accountActionController = null;
   let accountRunDraft = null;
   let relationshipController = null;
   let relationshipProgress = null;
@@ -12999,6 +13144,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
   let presencePanel = null;
   let presenceGrowthPanel = null;
   let presenceSession = null;
+  let presenceContextRunId = null;
   let presenceCapture = null;
 
   const engine = globalThis.InstaToolboxInstagramInspector;
@@ -13029,6 +13175,15 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
   const stopPresenceSession = () => {
     presenceSession?.stop();
   };
+
+  function onPresenceUpdate(next) {
+    if (next.runId && next.runId !== presenceContextRunId) {
+      presenceContextRunId = next.runId;
+      clearContextStatus();
+    }
+    presencePanel?.render(next);
+    renderContext();
+  }
   const dmRunner = globalThis.InstaToolboxDmThreadUnsender;
   if (dmRunner) {
     dmRunnerSnapshot = dmRunner.snapshot();
@@ -13063,6 +13218,8 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
   function runCapabilityValid(run = state.run) {
     return Boolean(
       run?.status === 'running'
+      && normalizeUsername(run.accountUsername)
+      && (!run.growthCampaignId || run.growthAccount === run.accountUsername)
       && safeText(run.capabilityId)
       && Number(run.capabilityExpiresAt) > Date.now()
       && Array.isArray(run.approvedTargets)
@@ -13229,7 +13386,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
     return run.queue.every((target) => due.includes(target));
   }
 
-  async function runOneAccount(username, action) {
+  async function runOneAccount(username, action, run = state.run) {
     const observation = engine.inspectProfile(username);
     const stop = sessionStop(observation);
     if (stop) return { status: 'stopped', reason: stop, fatal: true };
@@ -13249,19 +13406,94 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
         fatal: false,
       };
     }
-    const result = await engine.performReviewedProfileAction({
-      action,
-      expectedRelationship: expected,
-      resolutionToken: observation.resolutionToken,
-      username,
-    });
+    const controller = new AbortController();
+    accountActionController = controller;
+    let result;
+    let enteredEngine = false;
+    let checkpointing = false;
+    let laneProblem = null;
+    const locks = globalThis.navigator?.locks;
+    const accountKey = globalThis.InstaToolboxInstagramViewer?.accountKey?.(run?.accountUsername);
+    const lockName = `insta-toolbox:account-activity:${accountKey}`;
+    try {
+      if (typeof locks?.request !== 'function' || !/^[A-Za-z0-9_-]{1,128}$/.test(accountKey || '')) {
+        return { status: 'stopped', fatal: true,
+          reason: 'This browser cannot coordinate account actions safely. No profile action was sent.' };
+      }
+      result = await locks.request(lockName, { mode: 'exclusive', ifAvailable: true }, async (lock) => {
+        if (!lock || lock.name !== lockName || lock.mode !== 'exclusive') {
+          laneProblem = 'Another Presence, Ghost Mode, or account run is active for this account. Stop it before continuing.';
+          return null;
+        }
+        checkpointing = true;
+        await persistAccountRunCheckpoint({ pendingTarget: username });
+        checkpointing = false;
+        enteredEngine = true;
+        return engine.performReviewedProfileAction({
+          action,
+          expectedRelationship: expected,
+          resolutionToken: observation.resolutionToken,
+          username,
+        }, {
+          signal: controller.signal,
+          assertAuthorized: () => !batchAbort && state.run?.capabilityId === run?.capabilityId
+            && runCapabilityValid(state.run),
+          assertContext: () => Boolean(run?.accountUsername)
+            && normalizeUsername(engine.detectAuthenticatedUsername?.()) === run.accountUsername,
+        });
+      });
+    } catch {
+      return enteredEngine
+        ? { status: 'uncertain', fatal: true,
+          reason: 'The profile action ended without a reliable result. Check this profile before trying again.' }
+        : checkpointing ? { status: 'stopped', fatal: true,
+          reason: 'The next profile action could not be checkpointed. No action was sent. Check local storage before trying again.' }
+        : { status: 'stopped', fatal: true,
+          reason: 'This browser could not coordinate account actions. No profile action was sent.' };
+    } finally {
+      if (accountActionController === controller) accountActionController = null;
+    }
+    if (laneProblem) return { status: 'stopped', fatal: true, reason: laneProblem };
+    if (result?.uncertain) {
+      return { status: 'uncertain', fatal: true,
+        reason: 'The action was sent, but its result could not be verified. Check this profile before trying again.' };
+    }
     const resultStop = sessionStop(result);
     if (resultStop) return { status: 'stopped', reason: resultStop, fatal: true };
     if (!result?.result || result.ambiguous || result.unexpectedUi) {
-      return { status: 'failed', reason: result?.reason || 'not confirmed', fatal: false };
+      return { status: result?.needsAttention ? 'stopped' : 'failed',
+        reason: result?.reason || 'not confirmed', fatal: result?.needsAttention === true };
     }
-    recordAction('actions');
-    return { status: 'completed', reason: String(result.result), fatal: false };
+    try { recordAction('actions'); } catch {
+      return { status: 'completed', reason: String(result.result), fatal: true,
+        stopReason: 'Action verified, but its local activity record could not be saved. Check this profile before continuing.' };
+    }
+    return { status: 'completed', reason: String(result.result), fatal: result.needsAttention === true };
+  }
+
+  async function persistAccountRunCheckpoint(patch) {
+    if (!managerTabStorageAvailable || typeof GM_saveTab !== 'function') {
+      throw new Error('account-run-checkpoint-unavailable');
+    }
+    setRun(patch);
+    const resumable = normalizeResumableAccountRun(state.run);
+    managerTab = { ...managerTab };
+    if (resumable) managerTab[TAB_RUN_FIELD] = resumable;
+    else delete managerTab[TAB_RUN_FIELD];
+    // saveState also writes this record, but its general-purpose path tolerates
+    // manager errors. A native dispatch requires an acknowledged checkpoint.
+    await GM_saveTab(managerTab);
+    const stored = await readManagerTab();
+    if (!stored) throw new Error('account-run-checkpoint-unreadable');
+    const savedRun = stored[TAB_RUN_FIELD];
+    if (resumable) {
+      const fields = ['capabilityId', 'accountUsername', 'pendingTarget', 'capabilityDigest',
+        'capabilityExpiresAt', 'queue', 'completed', 'skipped', 'failed', 'uncertain'];
+      if (!savedRun || JSON.stringify(fields.map(field => savedRun[field]))
+        !== JSON.stringify(fields.map(field => resumable[field]))) {
+        throw new Error('account-run-checkpoint-not-confirmed');
+      }
+    } else if (savedRun) throw new Error('account-run-checkpoint-not-cleared');
   }
 
   // An account run has to visit each target's profile, and navigating tears this
@@ -13283,16 +13515,28 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
       stopForExpiredCapability();
       return;
     }
-    if (run.growthCampaignId
-      && normalizeUsername(engine.detectAuthenticatedUsername?.()) !== run.growthAccount) {
+    if (normalizeUsername(engine.detectAuthenticatedUsername?.()) !== run.accountUsername) {
       setRun({ status: 'stopped', stopReason: 'signed-in account changed', current: '', queue: [] });
-      status('Campaign stopped because the signed-in account could not be verified.');
+      status('Run stopped because the signed-in account changed or could not be verified. Review it again for this account.');
       return;
     }
     if (run.growthCampaignId && !growthRunStillApproved(run)) {
       setRun({ status: 'stopped', stopReason: 'campaign targets changed', current: '', queue: [] });
       status('Campaign targets changed. Review them again before any further action.');
       return;
+    }
+    if (run.pendingTarget) {
+      setRun({ status: 'stopped', current: '', queue: [], nextAt: null,
+        stopReason: 'A previous profile action was interrupted before its result was saved. Check that profile and review a new run.' });
+      status(`Check @${run.pendingTarget} before continuing. Its previous action has no saved outcome, so this run will not resume automatically.`);
+      return;
+    }
+    if (Number(run.nextAt) > Date.now()) {
+      await sleep(Number(run.nextAt) - Date.now());
+      if (batchAbort || state.run?.status !== 'running'
+        || state.run.capabilityId !== run.capabilityId) return;
+      setRun({ nextAt: null });
+      return continueAccountRun();
     }
     const username = run.queue[0];
     const onTarget = engine.normalizeUsername(location.pathname) === username;
@@ -13307,9 +13551,10 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
     setRun({ current: `@${username}` });
     let outcome;
     try {
-      outcome = await runOneAccount(username, run.action);
+      outcome = await runOneAccount(username, run.action, run);
     } catch (error) {
-      outcome = { status: 'failed', reason: error.message, fatal: false };
+      outcome = { status: 'uncertain', fatal: true,
+        reason: 'The profile action ended without a reliable result. Check this profile before trying again.' };
     }
 
     if (outcome.status === 'completed' && run.growthCampaignId
@@ -13322,25 +13567,47 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
     }
 
     const current = state.run || {};
+    if (current.capabilityId !== run.capabilityId) return;
     const patch = {
       queue: (current.queue || []).slice(1),
+      pendingTarget: '',
       results: [{ label: `@${username}`, status: outcome.status, reason: outcome.reason },
         ...(current.results || [])].slice(0, 40),
     };
     if (outcome.status === 'completed') patch.completed = (current.completed || 0) + 1;
     else if (outcome.status === 'skipped') patch.skipped = (current.skipped || 0) + 1;
+    else if (outcome.status === 'uncertain') patch.uncertain = (current.uncertain || 0) + 1;
     else patch.failed = (current.failed || 0) + 1;
-    setRun(patch);
+    if (outcome.fatal && !batchAbort && current.status === 'running') {
+      Object.assign(patch, { status: 'stopped', stopReason: outcome.stopReason || outcome.reason,
+        current: '', queue: [], nextAt: null });
+    }
+    try { await persistAccountRunCheckpoint(patch); } catch {
+      batchAbort = true;
+      state.run = { ...current, ...patch, status: 'stopped', current: '', queue: [], nextAt: null,
+        stopReason: 'The action result is retained in this tab, but local storage failed.' };
+      // Shared storage can fail before saveState reaches manager-tab storage.
+      // Invalidate that resume record independently, preserving other tab data.
+      if (managerTabStorageAvailable) {
+        managerTab = { ...managerTab };
+        delete managerTab[TAB_RUN_FIELD];
+        try { GM_saveTab(managerTab); } catch { /* Keep the local run stopped even if both stores fail. */ }
+      }
+      renderAll();
+      status('Run stopped because its result could not be saved. Keep this tab open and check the affected profile before reloading or trying again.');
+      return;
+    }
 
-    if (outcome.fatal) {
-      setRun({ status: 'stopped', stopReason: outcome.reason, current: '', queue: [] });
-      status(`Stopped: ${outcome.reason}. Nothing further was attempted.`);
+    // A click already sent still needs its result recorded. Settling that result
+    // must never turn a stopped run back into a completed or running one.
+    if (batchAbort || state.run?.status !== 'running') {
+      if (patch.status === 'stopped') status(`Stopped: ${patch.stopReason}. Nothing further was attempted.`);
       return;
     }
     if (!(state.run?.queue || []).length) {
       const done = state.run || {};
       setRun({ status: 'completed', current: '', nextAt: null });
-      status(`Run finished: ${done.completed || 0} done, ${done.skipped || 0} skipped, ${done.failed || 0} failed.`);
+      status(`Run finished: ${done.completed || 0} done, ${done.skipped || 0} skipped, ${done.failed || 0} failed, ${done.uncertain || 0} unconfirmed.`);
       return;
     }
 
@@ -13350,18 +13617,26 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
       + Math.floor(Math.random() * (Math.max(bounds.maxDelayMs, bounds.minDelayMs) - bounds.minDelayMs + 1));
     if (processed % REST_EVERY === 0) wait += REST_MS;
     setRun({ nextAt: Date.now() + wait });
-    await sleep(wait);
-    if (batchAbort || state.run?.status !== 'running') return;
     await continueAccountRun();
   }
 
-  async function startAccountRun({ action, usernames, growthCampaignId = '', growthAccount = '' }) {
-    if (growthCampaignId && normalizeUsername(engine.detectAuthenticatedUsername?.()) !== growthAccount) {
-      status('Campaign account changed. No account action started.');
+  async function startAccountRun({ action, usernames, growthCampaignId = '', growthAccount = '', expiresAt = null }) {
+    const accountUsername = normalizeUsername(engine.detectAuthenticatedUsername?.());
+    if (!accountUsername || (growthCampaignId && accountUsername !== growthAccount)) {
+      status('Verify the signed-in account before starting. No account action started.');
+      return;
+    }
+    const approvedExpiry = Number(expiresAt);
+    if (growthCampaignId && (!Number.isFinite(approvedExpiry) || approvedExpiry <= Date.now())) {
+      status('The campaign review expired. Review these accounts again before starting.');
       return;
     }
     if (!managerTabStorageAvailable) {
       status('This userscript manager cannot keep a run active while opening profiles. Account batches are unavailable; scans and no-click checks still work.');
+      return;
+    }
+    if (accountActionController) {
+      status('The last account action is still being checked. Wait for its result before starting another run.');
       return;
     }
     if (state.run?.status === 'running') {
@@ -13381,16 +13656,33 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
       completed: 0,
       skipped: 0,
       failed: 0,
+      uncertain: 0,
       current: '',
       stopReason: null,
       approvedTargets: [...queue],
       capabilityDigest: accountCapabilityDigest(action, queue),
-      capabilityExpiresAt: Date.now() + RUN_CAPABILITY_MS,
+      capabilityExpiresAt: Math.min(Date.now() + RUN_CAPABILITY_MS,
+        approvedExpiry > 0 ? approvedExpiry : Infinity),
       capabilityId,
+      accountUsername,
+      pendingTarget: '',
       growthCampaignId,
       growthAccount,
       results: [],
     });
+    await continueAccountRun();
+  }
+
+  async function resumeApprovedAccountRun() {
+    const run = resumableAccountRun();
+    if (!run) return;
+    // Keep hidden manual queues retired. Only a still-reviewed, account-bound
+    // growth campaign may continue across the profile navigation it requested.
+    if (!run.growthCampaignId) {
+      setRun({ status: 'stopped', stopReason: 'legacy account run retired', current: '', queue: [] });
+      status('An older manual account run was stopped. Presence does not resume past approvals.');
+      return;
+    }
     await continueAccountRun();
   }
 
@@ -13455,13 +13747,16 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
         view: 'account',
       };
     }
-    if (preferences.view === 'account' && inspectPresenceAccount().accountVerified) {
-      return { tone: 'ready', title: 'Presence ready',
-        detail: 'Choose activities and start. Presence can move between Instagram pages.', view: 'account' };
+    if (preferences.view === 'account') {
+      return inspectPresenceAccount().accountVerified
+        ? { tone: 'ready', title: 'Presence ready',
+          detail: 'Choose activities and a run style, then review and start.', view: 'account' }
+        : { tone: 'warning', title: 'Verify your signed-in account',
+          detail: 'Open Home, then try again after Instagram loads.', view: 'account' };
     }
 
     const path = location.pathname.toLowerCase();
-    if (path.startsWith('/direct/t/')) {
+    if (preferences.view === 'messages' && path.startsWith('/direct/t/')) {
       return {
         tone: 'ready',
         title: 'Conversation open',
@@ -13469,8 +13764,12 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
         view: 'messages',
       };
     }
-    if (path.startsWith('/direct')) {
+    if (preferences.view === 'messages' && path.startsWith('/direct')) {
       return { tone: 'ready', title: 'Inbox open', detail: 'Use Ghost Mode for multiple conversations, or open a chat to use Unsend.' };
+    }
+    if (preferences.view === 'messages') {
+      return { tone: 'warning', title: 'Open a conversation for Unsend',
+        detail: 'Open a chat for Unsend. Ghost Mode asks for a separate review.', view: 'messages' };
     }
     const followerList = openFollowerListContext();
     if (followerList) {
@@ -13493,7 +13792,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
     return {
       tone: 'ready',
       title: 'Instagram open',
-      detail: 'Use Presence here, or open your profile to check mutuals.',
+      detail: 'Enter a username to compare Followers and Following. This check does not change the account.',
     };
   }
 
@@ -14447,6 +14746,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
         return;
       }
       batchAbort = true;
+      accountActionController?.abort('Stopped by you');
       // Clearing the queue is what actually stops a resumable account run; the
       // in-memory flag alone would not survive the next page load.
       setRun({
@@ -15042,7 +15342,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
     presenceSession = globalThis.InstaToolboxPresenceSession.create({
       nativeActions,
       locks: globalThis.navigator?.locks || null,
-      onUpdate: next => { presencePanel?.render(next); renderContext(); },
+      onUpdate: onPresenceUpdate,
     });
     presencePanel = globalThis.InstaToolboxPresenceSessionPanel.mount({
       container: query('[data-role="presence-routine"]'), document, window,
@@ -15152,12 +15452,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
   }
   renderAll();
 
-  // Presence replaces the old persisted manual account runner. Never resume a
-  // hidden legacy queue after an update or navigation.
-  if (resumableAccountRun()) {
-    setRun({ status: 'stopped', stopReason: 'legacy account run retired', current: '', queue: [] });
-    status('An older manual account run was stopped. Presence does not resume past approvals.');
-  }
+  await resumeApprovedAccountRun();
 })();
 
 })();

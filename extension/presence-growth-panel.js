@@ -22,7 +22,7 @@ export function mountPresenceGrowthPanel({
   };
   const root = make('details');
   root.className = 'presence-growth';
-  root.open = true;
+  root.open = false;
   const summary = make('summary', 'Grow through mutuals');
   const note = make('p', 'Choose up to three accounts from your Following list.');
   const seedLabel = make('label', 'Accounts you follow');
@@ -102,6 +102,9 @@ export function mountPresenceGrowthPanel({
     const nextDue = savedCampaigns.map((campaign) => ({ campaign,
       targets: dueGrowthUnfollows(campaign, { account: owner, now: now() }) }))
       .find(({ targets }) => targets.length);
+    summary.textContent = nextDue
+      ? 'Grow through mutuals · review unfollows'
+      : 'Grow through mutuals';
     dueList.hidden = savedCampaigns.length === 0;
     due.hidden = !nextDue;
     daysLabel.hidden = candidates.length === 0;
@@ -207,7 +210,7 @@ export function mountPresenceGrowthPanel({
     writeCampaigns([...campaigns(), campaign].slice(-100));
     setProgress(`Following ${targets.length} reviewed accounts. Use Stop in the run bar to end the batch.`);
     await runBatch({ action: 'follow', usernames: targets, growthCampaignId: campaign.id,
-      growthAccount: owner });
+      growthAccount: owner, expiresAt });
     render();
   }
 
@@ -233,7 +236,7 @@ export function mountPresenceGrowthPanel({
       || expiresAt <= now()) return;
     setProgress(`Unfollowing ${targets.length} reviewed campaign accounts.`);
     await runBatch({ action: 'unfollow', usernames: targets,
-      growthCampaignId: entry.campaign.id, growthAccount: owner });
+      growthCampaignId: entry.campaign.id, growthAccount: owner, expiresAt });
     render();
   }
 

@@ -53,12 +53,19 @@ Roles, never raw colours. A component asks for `--insta-toolbox-danger`, not a h
 | Accent | `--insta-toolbox-accent` | Primary action, selected tab |
 | Violet accent | `--insta-toolbox-accent-violet` | Optional violet customization |
 | Blue accent | `--insta-toolbox-accent-blue` | Optional blue customization |
-| On accent | `--insta-toolbox-on-accent` | Text and icons on an accent or danger fill |
+| On accent | `--insta-toolbox-on-accent` | Text and icons on an accent fill |
 | Success | `--insta-toolbox-success` | Completed, proven removal |
 | Warning | `--insta-toolbox-warning` | Running, paused, incomplete scan |
 | Danger | `--insta-toolbox-danger` | Destructive action, failed, blocked |
+| Danger fill | `--insta-toolbox-danger-fill` | Darker red for destructive buttons with normal-size text |
+| On danger | `--insta-toolbox-on-danger` | Text and icons on a danger fill |
 | Uncertain | `--insta-toolbox-uncertain` | Postcondition not proven |
 | Focus ring | `--insta-toolbox-focus` | Keyboard focus |
+
+In Auto theme, muted text mixes Instagram's secondary text with 20% primary text.
+This adapts to the page's light or dark palette while preserving contrast when
+the default translucent panel overlaps dark or light media. Explicit Light and
+Dark themes retain their own muted-text values.
 
 `--insta-toolbox-uncertain` is deliberately distinct from `--insta-toolbox-danger`. An uncertain
 outcome is not a failure: the action may have happened. Colouring the two the

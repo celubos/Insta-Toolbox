@@ -34,6 +34,7 @@ function fixture() {
   let viewer = { accountVerified: true, usable: true, accountId: 'owner' };
   let approval = true;
   const runs = [];
+  const reviews = [];
   const scans = [];
   const document = { createElement: (tag) => new Element(tag), createTextNode: (text) => {
     const node = new Element('#text'); node.textContent = text; return node;
@@ -48,14 +49,19 @@ function fixture() {
     }; },
     readCampaigns: () => campaigns,
     writeCampaigns: (value) => { campaigns = value; },
-    confirmAction: async ({ binding }) => approval ? binding : null,
+    confirmAction: async ({ binding }) => {
+      reviews.push(binding);
+      return approval ? binding : null;
+    },
     runBatch: async (run) => { runs.push(run); },
     now: () => clock,
   });
   const all = () => container.querySelectorAll('*');
   const input = all().find((node) => node.tagName === 'input' && node.type === 'text');
   const select = all().find((node) => node.tagName === 'select');
-  return { panel, runs, scans, campaigns: () => campaigns, input, select,
+  return { panel, runs, reviews, scans, campaigns: () => campaigns, input, select,
+    root: container.children[0],
+    summary: all().find((node) => node.tagName === 'summary'),
     setClock: (value) => { clock = value; },
     setViewer: (value) => { viewer = value; },
     setApproval: (value) => { approval = value; },
@@ -72,6 +78,8 @@ test('growth panel scans selected following and submits only reviewed positive c
   assert.equal(app.runs.length, 1);
   assert.deepEqual(app.runs[0].usernames, ['candidate']);
   assert.equal(app.runs[0].action, 'follow');
+  assert.equal(app.runs[0].expiresAt, app.reviews[0].expiresAt);
+  assert.equal(app.runs[0].expiresAt, 100 * 86_400_000 + 15 * 60_000);
   assert.equal(app.campaigns()[0].delayDays, 9);
 });
 
@@ -111,4 +119,33 @@ test('unfollow review requires a verified Follow and the due date on the same ac
   assert.equal(app.runs.length, 2);
   assert.equal(app.runs[1].action, 'unfollow');
   assert.deepEqual(app.runs[1].usernames, ['candidate']);
+  assert.equal(app.runs[1].expiresAt, app.reviews.at(-1).expiresAt);
+});
+
+test('collapsed growth keeps account-bound due reviews discoverable without dispatching work', async () => {
+  const app = fixture();
+  assert.equal(app.root.open, false, 'the session remains the first task on Presence');
+  assert.equal(app.summary.textContent, 'Grow through mutuals');
+  app.input.value = 'seed';
+  await app.panel.findCandidates();
+  await app.panel.reviewFollow();
+  const campaign = app.campaigns()[0];
+  app.campaigns()[0] = { ...campaign, followed: { candidate: 100 * 86_400_000 } };
+  app.setClock(106 * 86_400_000);
+  app.panel.render();
+  assert.equal(app.summary.textContent, 'Grow through mutuals', 'not due before the chosen wait');
+  app.setClock(107 * 86_400_000);
+  app.panel.render();
+  assert.match(app.summary.textContent, /review unfollows/);
+  assert.equal(app.root.open, false, 'a due review does not force the session out of view');
+  assert.equal(app.runs.length, 1, 'a visible due reminder never authorizes an Unfollow');
+  app.setViewer({ accountVerified: true, usable: true, accountId: 'other' });
+  app.panel.render();
+  assert.equal(app.summary.textContent, 'Grow through mutuals', 'another account has no reminder');
+  app.setViewer({ accountVerified: true, usable: true, accountId: 'owner' });
+  app.panel.render();
+  assert.match(app.summary.textContent, /review unfollows/);
+  app.campaigns()[0].unfollowed.candidate = 107 * 86_400_000;
+  app.panel.render();
+  assert.equal(app.summary.textContent, 'Grow through mutuals', 'finished reviews leave no stale reminder');
 });

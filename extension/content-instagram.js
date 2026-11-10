@@ -2035,7 +2035,7 @@
   function exactProfileListCount(listType, { requireScoped = false } = {}) {
     if (listType !== 'followers' && listType !== 'following') return null;
     const profileUsername = normalizeUsername(location.pathname);
-    const profileHeader = requireScoped ? verifiedProfileHeader(profileUsername).root : null;
+    const profileHeader = verifiedProfileHeader(profileUsername).root;
     const scopedCounts = new Set();
     const fallbackCounts = new Set();
     for (const link of document.querySelectorAll('a[role="link"], a[href="#"]')) {
@@ -2073,11 +2073,12 @@
         }
         try {
           const target = new URL(href, INSTAGRAM_WEB_ORIGIN);
-          if (target.origin !== INSTAGRAM_WEB_ORIGIN) continue;
+          if (target.origin !== INSTAGRAM_WEB_ORIGIN || target.username || target.password) continue;
           const pathname = target.pathname
             .replace(/\/+$/, '')
             .toLowerCase();
-          if (pathname === `/${profileUsername}/${listType}`) scopedCounts.add(count);
+          if (pathname === `/${profileUsername}/${listType}`
+            || (pathname === `/${profileUsername}` && profileHeader?.contains(link))) scopedCounts.add(count);
         } catch {
           // Ignore malformed, non-navigation values such as JavaScript URLs.
         }

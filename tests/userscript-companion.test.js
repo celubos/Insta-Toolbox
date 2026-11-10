@@ -94,7 +94,7 @@ test('each mutation uses one exact transient capability without a global unlock'
   assert.match(shell, /DM_PLAN_CAPABILITY_MS = 15 \* 60 \* 1_000/);
   assert.doesNotMatch(shell, /ENABLE LIVE ACTIONS|LIVE_AUTHORIZATION_PHRASE|setLiveActionsUnlocked|InstaToolboxUserscriptLiveAuthority/);
   assert.match(shell, /function accountCapabilityDigest\(action, usernames\)/);
-  assert.match(shell, /capabilityExpiresAt: Date\.now\(\) \+ RUN_CAPABILITY_MS/);
+  assert.match(shell, /capabilityExpiresAt: Math\.min\(Date\.now\(\) \+ RUN_CAPABILITY_MS,/);
   assert.match(shell, /approvedTargets: \[\.\.\.queue\]/);
   assert.match(shell, /const confirmation = await confirmRun\(\{/);
   assert.match(source, /data-role="action-confirmation"/);
@@ -136,7 +136,7 @@ test('a run stops itself on any Instagram interruption and can be aborted', () =
   assert.match(shell, /observation\?\.challenge/);
   assert.match(shell, /observation\?\.actionBlocked/);
   assert.match(shell, /observation\?\.sessionExpired/);
-  assert.match(shell, /if \(outcome\.fatal\)/);
+  assert.match(shell, /if \(outcome\.fatal && !batchAbort && current\.status === 'running'\)/);
   assert.match(source, /while \(!signal\.aborted && processed < maxMessages/);
   assert.match(source, /activeController\.abort\('Stopped by user'\)/);
   assert.match(source, /data-action="stop-run"/);

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
+import vm from 'node:vm';
 
 import { assertPngDimensions, readPngDimensions } from '../scripts/png-dimensions.mjs';
 
@@ -133,4 +134,26 @@ test('browser QA manifests bind captures to the current product version and rele
     assert.equal(manifest.productVersion, packageJson.version);
     assert.equal(manifest.captureTimestamp, '2026-10-05T00:00:00.000Z');
   }
+});
+
+test('patched candidate runtime and historical Electron capture provenance stay separate', () => {
+  const context = vm.createContext({ assert, Object, String });
+  vm.runInContext(harness.slice(harness.indexOf('function electronEvidence('),
+    harness.indexOf('async function readProductEvidenceMetadata(')), context);
+  const versions = { required: '44.9.1', runtime: '44.9.1', captured: '44.5.1' };
+  const evidence = context.electronEvidence(versions);
+  assert.equal(evidence.runtime, '44.9.1');
+  assert.equal(evidence.captured, '44.5.1');
+  assert.equal(versions.captured, '44.5.1', 'validation must not relabel capture provenance');
+  assert.throws(() => context.electronEvidence({ ...versions, runtime: '44.5.1' }), /candidate Electron runtime/);
+  assert.throws(() => context.electronEvidence({ ...versions, required: '^44.9.1' }), /must be pinned/);
+  assert.throws(() => context.electronEvidence({ ...versions, captured: '' }), /capture identity/);
+  for (const manifest of [pwaBaseline, pwaCiBaseline]) {
+    assert.equal(manifest.electron, '44.5.1');
+    assert.ok(manifest.capturedProductVersion);
+    assert.ok(manifest.originalCaptureTimestamp);
+  }
+  assert.match(harness, /manifestSha256: sha256\(expectedBytes\)/);
+  assert.match(harness, /baseline hash is corrupt/);
+  assert.match(harness, /capture\.sha256, expectedCapture\.sha256/);
 });

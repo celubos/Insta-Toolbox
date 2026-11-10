@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createPresenceNativeActions } from '../extension/presence-native-actions.js';
+import { createPresenceSession } from '../extension/presence-session.js';
 
 function element({ text = '', href = '', ariaLabel = '', role = '', click = () => {}, children = {} } = {}) {
   return {
@@ -661,4 +662,95 @@ test('Presence never masks an Instagram restriction with retained account identi
   assert.equal(restricted.usable, false);
   assert.equal(restricted.challenge, true);
   assert.equal(restricted.routeIdentityRetained, undefined);
+});
+
+function settlingPostFixture(onClick) {
+  let viewer = { accountVerified: true, usable: true, accountId: 'viewer', accountKey: 'iguser-v1-viewer' };
+  const clicks = [];
+  const articles = ['first', 'second'].map(id => {
+    const control = element({ text: 'Like', click() { clicks.push(id); onClick(this, id); } });
+    return connect(element({ children: {
+      'a[href]': [element({ href: `/p/${id}/` })], button: [control],
+    } }), control);
+  });
+  class Observer { observe() {} disconnect() {} }
+  const actions = createPresenceNativeActions({
+    document: { documentElement: {}, querySelectorAll: selector => selector === 'article' ? articles : [] },
+    location: { origin: 'https://www.instagram.com', pathname: '/' },
+    inspectViewer: () => viewer,
+    getStyle: () => ({ opacity: '1' }), MutationObserver: Observer, timeoutMs: 500,
+  });
+  return { actions, clicks, setViewer: value => { viewer = value; } };
+}
+
+test('Stop after a Like click preserves delayed native confirmation through read-only settlement', async () => {
+  const controller = new AbortController();
+  const f = settlingPostFixture(control => {
+    controller.abort('Stopped');
+    setTimeout(() => { control.textContent = 'Unlike'; }, 30);
+  });
+  const candidate = await f.actions.find('likePosts');
+  const outcome = await f.actions.execute('likePosts', candidate,
+    { signal: controller.signal, assertCurrent: () => true });
+  assert.equal(outcome.verified, true);
+  assert.deepEqual(f.clicks, ['first']);
+});
+
+test('Stop after an unconfirmed Like retains an uncertain outcome instead of losing the attempt', async () => {
+  const controller = new AbortController();
+  const f = settlingPostFixture(() => controller.abort('Stopped'));
+  const candidate = await f.actions.find('likePosts');
+  const outcome = await f.actions.execute('likePosts', candidate,
+    { signal: controller.signal, assertCurrent: () => true });
+  assert.equal(outcome.verified, false);
+  assert.equal(outcome.uncertain, true);
+  assert.deepEqual(f.clicks, ['first']);
+});
+
+test('an account change during native settlement cannot prove a Like on the original account', async () => {
+  let f;
+  f = settlingPostFixture(control => {
+    control.textContent = 'Unlike';
+    f.setViewer({ accountVerified: true, usable: true, accountId: 'other', accountKey: 'other' });
+  });
+  const candidate = await f.actions.find('likePosts');
+  const outcome = await f.actions.execute('likePosts', candidate,
+    { signal: new AbortController().signal, assertCurrent: () => true });
+  assert.equal(outcome.verified, false);
+  assert.equal(outcome.uncertain, true);
+  assert.match(outcome.reason, /account|context/i);
+});
+
+test('the Presence session preserves a settled Like after Stop and never starts a second action', async () => {
+  let session;
+  const f = settlingPostFixture(control => {
+    session.stop();
+    setTimeout(() => { control.textContent = 'Unlike'; }, 30);
+  });
+  session = createPresenceSession({ nativeActions: f.actions,
+    locks: { request: async (name, options, callback) => callback({ name, mode: 'exclusive' }) },
+    minDelayMs: 0, maxDelayMs: 0 });
+  const review = session.createReview({ accountId: 'viewer',
+    options: { maxActions: 2, actions: { likePosts: true } } });
+  const result = await session.start(review);
+  assert.equal(result.status, 'stopped');
+  assert.equal(result.completed, 1);
+  assert.equal(result.results[0].status, 'completed');
+  assert.deepEqual(f.clicks, ['first']);
+});
+
+test('the Presence session retains an unresolved dispatched Like after Stop without retrying', async () => {
+  let session;
+  const f = settlingPostFixture(() => session.stop());
+  session = createPresenceSession({ nativeActions: f.actions,
+    locks: { request: async (name, options, callback) => callback({ name, mode: 'exclusive' }) },
+    minDelayMs: 0, maxDelayMs: 0 });
+  const review = session.createReview({ accountId: 'viewer',
+    options: { maxActions: 2, actions: { likePosts: true } } });
+  const result = await session.start(review);
+  assert.equal(result.status, 'needs-attention');
+  assert.equal(result.completed, 0);
+  assert.equal(result.uncertain, 1);
+  assert.equal(result.results[0].status, 'uncertain');
+  assert.deepEqual(f.clicks, ['first']);
 });

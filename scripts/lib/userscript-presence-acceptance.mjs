@@ -152,10 +152,11 @@ export async function acceptUserscriptPresence({
         labels:[...panel.querySelectorAll('.presence-options .presence-option')].map(node=>node.textContent.trim()),
         plans:panel.textContent.includes('Build my plan') || panel.textContent.includes('Plan choices'),
         manual:Boolean(root.querySelector('[data-role="manual-account-disclosure"]')?.textContent.includes('Manual Follow / Unfollow')),
-        liveRegions:root.querySelectorAll('[aria-live]').length};
+        liveRegions:[...root.querySelectorAll('[aria-live]')].filter(node =>
+          node.getClientRects().length && !node.closest('[hidden], [aria-hidden="true"]')).length};
     })()`);
     assert.equal(layout.tab, 'Presence');
-    assert.deepEqual(layout.labels, ['View stories','React to stories','Like posts','Follow on Explore','Accept incoming requests']);
+    assert.deepEqual(layout.labels, ['View stories','Like stories','Like posts','Follow on Explore','Accept incoming requests']);
     assert.equal(layout.plans, false);
     assert.equal(layout.manual, false);
     assert.equal(layout.liveRegions, 1, 'the toolbox keeps one polite live region');
