@@ -72,7 +72,7 @@ test('Instagram loads the inspector before the visible sidecar', () => {
     'overlay/views/workspace.js',
     'instagram-overlay.js',
   ]);
-  assert.equal(manifest.version, '4.3.1');
+  assert.equal(manifest.version, '4.3.10');
 });
 
 test('sidecar migrates the visible capture and manual queue workflow', () => {
@@ -202,7 +202,13 @@ test('sidecar captures focus before hiding its launcher and restores a usable ta
 });
 
 test('dry runs remain no-click while the one live activator is token-bound and one-use', () => {
-  assert.equal((inspector.match(/\.click\s*\(/g) || []).length, 1);
+  const nativeReadStart = inspector.indexOf('  async function collectNativeFollowerComparison(');
+  const nativeReadEnd = inspector.indexOf('  // Enumerates messages', nativeReadStart);
+  assert.ok(nativeReadStart > 0 && nativeReadEnd > nativeReadStart);
+  const nativeRead = inspector.slice(nativeReadStart, nativeReadEnd);
+  const actionDrivers = inspector.slice(0, nativeReadStart) + inspector.slice(nativeReadEnd);
+  assert.equal((actionDrivers.match(/\.click\s*\(/g) || []).length, 1);
+  assert.doesNotMatch(nativeRead, /activateLiveControl\s*\(/);
   assert.match(inspector, /function activateLiveControl\(control\)/);
   assert.match(inspector, /profileResolutions\.delete\(token\)/);
   assert.match(inspector, /current\.control !== resolution\.control/);

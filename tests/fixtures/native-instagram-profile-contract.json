@@ -1,0 +1,16 @@
+{
+  "observedOn": "2026-11-09",
+  "provenance": "Sanitized structural contract from authenticated read-only observation; synthetic names, IDs and counts.",
+  "username": "target_name",
+  "pathname": "/target_name/",
+  "mainCount": 1,
+  "headerCount": 1,
+  "counterLinks": [
+    { "href": "/target_name/", "role": "link", "text": "3 followers" },
+    { "href": "/target_name/", "role": "link", "text": "2 following" }
+  ],
+  "gridLinks": [
+    { "href": "/target_name/p/native_fixture_one/", "imageCount": 1 },
+    { "href": "/target_name/p/native_fixture_two/", "imageCount": 1 }
+  ]
+}

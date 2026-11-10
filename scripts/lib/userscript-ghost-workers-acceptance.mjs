@@ -40,6 +40,16 @@ export async function acceptUserscriptGhostWorkers({ fixtureAssets, resultsRoot,
     event.returnValue = null;
   };
   ipcMain.on('fixture-ghost:get', get); ipcMain.on('fixture-ghost:set', set);
+  const list = event => { assertSender(event); event.returnValue = [...store.keys()]; };
+  const remove = (event, key) => {
+    assertSender(event);
+    const previous = store.get(key); store.delete(key);
+    for (const window of windows.values()) if (!window.isDestroyed()) {
+      window.webContents.send('fixture-ghost:changed', key, previous, undefined);
+    }
+    event.returnValue = null;
+  };
+  ipcMain.on('fixture-ghost:list', list); ipcMain.on('fixture-ghost:delete', remove);
   const getTab = event => { assertSender(event); event.returnValue = tabStorage.get(event.sender.id) || {}; };
   const saveTab = (event, value) => { assertSender(event); tabStorage.set(event.sender.id, structuredClone(value)); event.returnValue = null; };
   ipcMain.on('fixture-ghost:get-tab', getTab); ipcMain.on('fixture-ghost:save-tab', saveTab);
@@ -89,6 +99,14 @@ export async function acceptUserscriptGhostWorkers({ fixtureAssets, resultsRoot,
         let listenerId=0; const listeners=new Map();
         GM_getValue=(key,fallback)=>fixtureGhostTransport.get(key,Object.hasOwn(fixtureGmStore,key)?fixtureGmStore[key]:fallback);
         GM_setValue=(key,value)=>fixtureGhostTransport.set(key,value);
+        // The Promise API uses this same shared fixture Map. IPC completion is
+        // only this simulation's acknowledgment, with no CAS/freshness claim.
+        globalThis.GM=Object.freeze({
+          getValue:async(key,fallback)=>GM_getValue(key,fallback),
+          setValue:async(key,value)=>{GM_setValue(key,value);},
+          listValues:async()=>[...new Set([...Object.keys(fixtureGmStore),...fixtureGhostTransport.list()])],
+          deleteValue:async key=>{delete fixtureGmStore[key];fixtureGhostTransport.delete(key);},
+        });
         const fixtureThread=new URL(fixtureLaunchHref).pathname.match(/^\\/direct\\/t\\/(\\d+)\\/$/)?.[1];
         let fixtureRedirected=false;
         GM_getTab=callback=>callback(fixtureGhostTransport.getTab());
@@ -105,7 +123,7 @@ export async function acceptUserscriptGhostWorkers({ fixtureAssets, resultsRoot,
         };
         globalThis.GM_addValueChangeListener=(key,callback)=>{const id=++listenerId;listeners.set(id,{key,callback});return id;};
         globalThis.GM_removeValueChangeListener=id=>listeners.delete(id);
-        fixtureGhostTransport.listen((key,previous,next)=>{for(const item of listeners.values())if(item.key===key)item.callback(key,previous,next,true);});
+        fixtureGhostTransport.listen((key,previous,next)=>{if(next===undefined)delete fixtureGmStore[key];for(const item of listeners.values())if(item.key===key)item.callback(key,previous,next,true);});
         globalThis.GM_openInTab=async(url,options)=>{const id=await fixtureGhostTransport.open(url,options);return {close:()=>fixtureGhostTransport.close(id)};};
         if(fixtureThread){
           history.replaceState({},'',fixtureLaunchHref);
@@ -140,6 +158,44 @@ export async function acceptUserscriptGhostWorkers({ fixtureAssets, resultsRoot,
       throw new Error(`${error.message} ${JSON.stringify(state)}`);
     }
     assert.equal(opened.length, 0, 'review must not open execution tabs');
+    const savedDiscovery = structuredClone(tabStorage.get(web.id)?.instaToolboxInboxDiscoveryV1);
+    assert.equal(savedDiscovery?.conversations.length, 12, 'native observations were saved before the next navigation');
+    assert.equal(store.has('instaToolboxGhostJobV1'), false, 'an open review is not execution authority');
+    // Replace the document through an actual renderer navigation, retaining only
+    // the manager's tab storage. The old review and native DOM are destroyed.
+    await withTimeout(web.loadURL(web.getURL()), 'Ghost coordinator document replacement');
+    await waitForPageValue(web, `Boolean(${PANEL}) && !${button('Restore found conversations')}.hidden && !${button('Restore found conversations')}.disabled`, 'saved Ghost observations available after reload');
+    const replacement = await evaluate(`({
+      selected:[...(${PANEL}).querySelectorAll('[aria-label="Conversations to clean up"] input:checked')].length,
+      reviewOpen:${ROOT}.querySelector('[data-role="action-confirmation"]').open,
+      rows:(${PANEL}).querySelector('[aria-label="Conversations to clean up"]').children.length
+    })`);
+    assert.deepEqual(replacement, { selected: 0, reviewOpen: false, rows: 0 });
+    assert.equal(opened.length, 0, 'reloading cannot resume cleanup');
+    await evaluate(`(() => {
+      const root=${ROOT}, panel=${PANEL};
+      if(root.querySelector('.panel').hidden)root.querySelector('.launcher').click();
+      root.querySelector('[data-view="messages"]').click();
+      ${button('Restore found conversations')}.click();
+    })()`);
+    await waitForPageValue(web, `(${PANEL}).querySelector('[aria-label="Conversations to clean up"]').children.length===12 && !${button('Select all found')}.disabled`, 'Ghost read-only inventory restored');
+    const recovered = await evaluate(`({
+      selected:[...(${PANEL}).querySelectorAll('[aria-label="Conversations to clean up"] input:checked')].length,
+      text:(${PANEL}).textContent
+    })`);
+    assert.equal(recovered.selected, 0, 'the previous selection is discarded');
+    assert.match(recovered.text, /Partial inventory; names may have changed/);
+    await evaluate(`(() => {
+      const panel=${PANEL};
+      const workers=panel.querySelector('[aria-label="Managed worker tabs"]');workers.value='10';workers.dispatchEvent(new Event('change',{bubbles:true}));
+      const mode=panel.querySelector('[aria-label="Worker tab opening"]');mode.value='background';mode.dispatchEvent(new Event('change',{bubbles:true}));
+      ${button('Select all found')}.click();
+      ${button('Review 12 conversations')}.click();
+    })()`);
+    await waitForPageValue(web, `${ROOT}.querySelector('[data-role="action-confirmation"]').open`, 'fresh recovered Ghost review');
+    const recoveredReviewText = await evaluate(`${ROOT}.querySelector('[data-role="action-confirmation"]').textContent`);
+    assert.match(recoveredReviewText, /interrupted partial discovery/);
+    assert.equal(opened.length, 0, 'restoration and a fresh review do not open workers');
     const point = await evaluate(`(() => {const node=${ROOT}.querySelector('[data-action="confirm-accept"]');node.scrollIntoView({block:'center'});const r=node.getBoundingClientRect();return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};})()`);
     web.focus();
     for (const type of ['mouseDown', 'mouseUp']) web.sendInputEvent({ type, ...point, button: 'left', clickCount: 1 });
@@ -176,12 +232,14 @@ export async function acceptUserscriptGhostWorkers({ fixtureAssets, resultsRoot,
     assert.deepEqual(problems, []);
     const directory = path.join(resultsRoot, 'userscript-ghost-workers'); await mkdir(directory, { recursive: true });
     await writeFile(path.join(directory, 'result.json'), JSON.stringify({ version: releaseVersion, fixtureOnly: true,
-      transport: 'fixture GM API shim; real renderer windows and Web Locks', peakWorkers, opened, tabEvents, outcomes,
+      transport: 'fixture GM API shim; real renderer windows and Web Locks',
+      documentReplacement: { restoredObservations: savedDiscovery.conversations.length, selectionRestored: false, approvalRestored: false, partial: true }, peakWorkers, opened, tabEvents, outcomes,
       tasks: job.tasks.map(({ threadId, status, messageRemovals }) => ({ threadId, status, messageRemovals })) }, null, 2));
     console.log('Accepted generated userscript Ghost: redirected inbox workers recover exact threads through native rows, 12 conversations in ten-then-two batches, verified removals and received messages preserved.');
   } finally {
     for (const window of windows.values()) if (!window.isDestroyed()) window.destroy();
     ipcMain.removeListener('fixture-ghost:get', get); ipcMain.removeListener('fixture-ghost:set', set);
+    ipcMain.removeListener('fixture-ghost:list', list); ipcMain.removeListener('fixture-ghost:delete', remove);
     ipcMain.removeListener('fixture-ghost:get-tab', getTab); ipcMain.removeListener('fixture-ghost:save-tab', saveTab);
     ipcMain.removeHandler('fixture-ghost:open'); ipcMain.removeHandler('fixture-ghost:close');
     isolated.protocol.unhandle('http'); isolated.protocol.unhandle('https');

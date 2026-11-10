@@ -30,7 +30,7 @@ test('installation keeps userscript updates current and held packages pinned to 
 
 test('release promotion matches the source version and retains exact-artifact validation', async () => {
   const workflow = await read('.github/workflows/release.yml');
-  assert.ok(workflow.includes(`test "$version" = "${metadata.version}"`));
+  assert.ok(workflow.includes('node scripts/prepare-release-promotion.mjs'));
   assert.ok(workflow.includes('sha256sum --check --strict SHA256SUMS.txt'));
   assert.ok(workflow.includes('CI run is not for the current main commit'));
   const source = await read('userscripts/src/toolbox-shell.js');

@@ -165,3 +165,26 @@ test('a delayed close event cannot cancel a newly opened review', async () => {
   dialog.dispatch('close');
   assert.equal(await third, null, 'closing the current review still cancels it');
 });
+
+test('an explicit bounded target limit renders every Ghost target without changing default limits or authority', async () => {
+  const { api, roles, root } = fixture();
+  const controller = api.createController({ attribute: 'data-role', root });
+  const items = Array.from({ length: 1_001 }, (_, index) => `Thread ${10n ** 29n + BigInt(index)} — <img> Verified title`);
+  const expected = items.slice(0, 1_000);
+  const pending = controller.confirm({ items: expected, itemLimit: 1_000,
+    binding: { action: 'inbox-unsend-workers', reviewKey: 'exact-reviewed-targets' } });
+  const shown = roles.get('confirm-items').children.map(node => node.textContent);
+  assert.equal(shown.length, 1_000);
+  assert.deepEqual(shown, expected);
+  assert.equal(shown.at(-1), expected.at(-1), 'the final exact thread ID remains rendered');
+  assert.ok(roles.get('confirm-items').children.every(node => node.children.length === 0), 'labels remain text');
+  controller.cancel();
+  assert.equal(await pending, null, 'rendering the inventory grants no authority');
+
+  for (const [itemLimit, count] of [[undefined, 250], [Infinity, 250], [-1, 250], [1.5, 250],
+    ['1000', 250], [{ valueOf() { throw new Error('must-not-coerce'); } }, 250], [1_000_000, 1_000]]) {
+    const review = controller.confirm({ items, itemLimit });
+    assert.equal(roles.get('confirm-items').children.length, count);
+    controller.cancel(); assert.equal(await review, null);
+  }
+});

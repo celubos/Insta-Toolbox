@@ -223,8 +223,11 @@ export async function acceptUserscriptInboxReview({
 
     await evaluate(`${button('Review 2 conversations')}.click()`);
     await waitForPageValue(webContents, `(${rootExpression}).querySelector('[data-role="action-confirmation"]').open`, 'Ghost exact review confirmation');
-    const confirmation = await evaluate(`(${rootExpression}).querySelector('[data-role="action-confirmation"]').textContent`);
-    assert.match(confirmation, /101, 303/); assert.doesNotMatch(confirmation, /202/);
+    const confirmationTargets = await evaluate(`[...(${rootExpression}).querySelectorAll('[data-role="confirm-items"] li')].map(node => node.textContent)`);
+    assert.deepEqual(confirmationTargets, [
+      'Thread 101 — Alex Example · @alex.example',
+      'Thread 303 — Weekend makers and exceptionally long conversation names',
+    ], 'review names exactly both selected threads and excludes the duplicate-name unselected thread');
     await evaluate(`Array.from((${rootExpression}).querySelector('[data-role="action-confirmation"]').querySelectorAll('button')).find(node => node.textContent.trim() === 'Cancel').click()`);
     await waitForPageValue(webContents, `!(${rootExpression}).querySelector('[data-role="action-confirmation"]').open && !${button('Find conversations')}.disabled`, 'Ghost review cancelled');
     assert.deepEqual((await state()).rows.map(row => row.selected), [true, false, true]);
@@ -291,7 +294,8 @@ export async function acceptUserscriptInboxReview({
         return {controls,overlap,width:innerWidth,height:innerHeight,
           panel:{left:bounds.left,right:bounds.right,top:bounds.top,bottom:bounds.bottom},
           overflow:inbox.scrollWidth-inbox.clientWidth,scrollOverflow:scroll.scrollWidth-scroll.clientWidth,
-          liveRegions:root.querySelectorAll('[aria-live]').length};
+          liveRegions:[...root.querySelectorAll('[aria-live]')].filter(node =>
+            node.getClientRects().length && !node.closest('[hidden], [aria-hidden="true"]')).length};
       })()`);
       assert.equal(metrics.controls.length, 13, `${viewport.label}: populated review controls`);
       assert.ok(metrics.controls.some(control => control.name === 'Managed worker tabs'),
@@ -337,7 +341,8 @@ export async function acceptUserscriptInboxReview({
       ${button('Review 2 conversations')}.click();
     })()`);
     await waitForPageValue(webContents, `(${rootExpression}).querySelector('[data-role="action-confirmation"]').open`, 'Ghost execution confirmation');
-    assert.match(await evaluate(`(${rootExpression}).querySelector('[data-role="action-confirmation"]').textContent`), /101, 303/);
+    assert.deepEqual(await evaluate(`[...(${rootExpression}).querySelectorAll('[data-role="confirm-items"] li')].map(node => node.textContent)`),
+      confirmationTargets, 'execution requires the same exact reviewed targets');
     const point = await evaluate(`(() => {
       const button = (${rootExpression}).querySelector('[data-action="confirm-accept"]');
       button.scrollIntoView({block:'center',inline:'center'});

@@ -218,7 +218,7 @@ test('desktop CI builds and exercises confined packaged lifecycles without relea
   assert.match(macVerifier, /await rm\(installedApp/);
   assert.match(macVerifier, /insta-toolbox-macos-package-/);
   assert.match(workflow, /package-macos:/);
-  assert.match(workflow, /runs-on: macos-14/);
+  assert.match(workflow, /runs-on: macos-15-intel/);
   assert.match(workflow, /CSC_IDENTITY_AUTO_DISCOVERY: "false"/);
   assert.match(workflow, /CSC_FOR_PULL_REQUEST: "true"/);
   assert.match(workflow, /ExtractAssociatedIcon\(\$installedExecutable\)/);
@@ -268,7 +268,8 @@ test('release promotion checksums the SBOM and promotes no updater blockmap', ()
   assert.match(releaseWorkflow, /"\$event" = "push" \|\| "\$event" = "workflow_dispatch"/);
   assert.match(releaseWorkflow, /Generate SBOM for promoted files/);
   assert.match(releaseWorkflow, /sha256sum "Insta-Toolbox-\$\{\{ steps\.assets\.outputs\.version \}\}\.spdx\.json" >> SHA256SUMS\.txt/);
-  assert.match(releaseWorkflow, /test "\$\(wc -l < SHA256SUMS\.txt\)" -eq 7/);
+  assert.ok(releaseWorkflow.includes('test "$(wc -l < SHA256SUMS.txt)" -eq "$(( ${{ steps.assets.outputs.artifact_count }} + 1 ))"'));
+  assert.ok(releaseWorkflow.includes('test "$(find . -maxdepth 1 -type f | wc -l)" -eq "$(( ${{ steps.assets.outputs.artifact_count }} + 2 ))"'));
   assert.match(releaseWorkflow, /subject-checksums: release\/SHA256SUMS\.txt/);
   assert.doesNotMatch(releaseWorkflow, /\.blockmap/);
 });

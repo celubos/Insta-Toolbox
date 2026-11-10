@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createPresenceNativeActions } from '../extension/presence-native-actions.js';
+import { createPresenceSession } from '../extension/presence-session.js';
 
 function element({ text = '', href = '', ariaLabel = '', role = '', click = () => {}, children = {} } = {}) {
   return {
@@ -32,6 +33,47 @@ function connect(parent, ...children) {
   for (const child of children) child.parentElement = parent;
   return parent;
 }
+
+function feedContentFixture(hrefs, { duplicateLike = false } = {}) {
+  let clicks = 0;
+  const controls = Array.from({ length: duplicateLike ? 2 : 1 }, () => element({ role: 'button',
+    children: { '[aria-label]': [element({ ariaLabel: 'Like' })] }, click: () => { clicks += 1; } }));
+  const article = element({ children: { 'a[href]': hrefs.map(href => element({ href })), '[role="button"]': controls } });
+  const document = { documentElement: {}, querySelectorAll: selector => selector === 'article' ? [article] : [] };
+  class Observer { observe() {} disconnect() {} }
+  const actions = createPresenceNativeActions({ document,
+    location: { origin: 'https://www.instagram.com', pathname: '/' },
+    inspectViewer: () => ({ accountVerified: true, usable: true, accountId: 'fixture_viewer' }),
+    getStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }), MutationObserver: Observer, timeoutMs: 500 });
+  return { actions, article, controls, get clicks() { return clicks; } };
+}
+
+test('post Like discovery ignores descendant music links while retaining one canonical post/reel identity', async () => {
+  for (const reel of ['/reel/fixture_Clip-1/', '/reels/fixture_Clip-1?source=fixture#caption']) {
+    const f = feedContentFixture(['/p/fixture_Clip-1/?source=fixture#caption', reel, '/reels/audio/123456789/']);
+    const candidate = await f.actions.find('likePosts', { seen: new Set(), assertCurrent: () => true });
+    assert.equal(candidate?.id, 'post:fixture_Clip-1');
+    assert.equal(candidate?.target.contentId, 'fixture_Clip-1');
+    assert.equal(candidate?.root, f.article); assert.equal(candidate?.control, f.controls[0]);
+    assert.equal(f.actions.inspectAvailable().likePosts, 1); assert.equal(f.clicks, 0);
+  }
+});
+
+test('audio-only and noncanonical descendant links cannot establish a post Like target', async () => {
+  for (const hrefs of [['/reels/audio/123456789/'], ['/p/fixture_post/liked_by/', '/reels/fixture_post/comments/']]) {
+    const f = feedContentFixture(hrefs);
+    assert.equal(await f.actions.find('likePosts', { assertCurrent: () => true }), null);
+    assert.equal(f.actions.inspectAvailable().likePosts, 0); assert.equal(f.clicks, 0);
+  }
+});
+
+test('music-link filtering cannot authorize ambiguous real content or duplicate Like controls', async () => {
+  for (const f of [feedContentFixture(['/p/fixture_one/', '/reels/fixture_two/', '/reels/audio/123456789/']),
+    feedContentFixture(['/p/fixture_one/', '/reel/fixture_one/', '/reels/audio/123456789/'], { duplicateLike: true })]) {
+    assert.equal(await f.actions.find('likePosts', { assertCurrent: () => true }), null);
+    assert.equal(f.actions.inspectAvailable().likePosts, 0); assert.equal(f.clicks, 0);
+  }
+});
 
 test('stories without URL slide IDs advance by active media and keep reactions bound to that slide', async () => {
   const location = { origin: 'https://www.instagram.com', pathname: '/stories/person/' };
@@ -661,4 +703,95 @@ test('Presence never masks an Instagram restriction with retained account identi
   assert.equal(restricted.usable, false);
   assert.equal(restricted.challenge, true);
   assert.equal(restricted.routeIdentityRetained, undefined);
+});
+
+function settlingPostFixture(onClick) {
+  let viewer = { accountVerified: true, usable: true, accountId: 'viewer', accountKey: 'iguser-v1-viewer' };
+  const clicks = [];
+  const articles = ['first', 'second'].map(id => {
+    const control = element({ text: 'Like', click() { clicks.push(id); onClick(this, id); } });
+    return connect(element({ children: {
+      'a[href]': [element({ href: `/p/${id}/` })], button: [control],
+    } }), control);
+  });
+  class Observer { observe() {} disconnect() {} }
+  const actions = createPresenceNativeActions({
+    document: { documentElement: {}, querySelectorAll: selector => selector === 'article' ? articles : [] },
+    location: { origin: 'https://www.instagram.com', pathname: '/' },
+    inspectViewer: () => viewer,
+    getStyle: () => ({ opacity: '1' }), MutationObserver: Observer, timeoutMs: 500,
+  });
+  return { actions, clicks, setViewer: value => { viewer = value; } };
+}
+
+test('Stop after a Like click preserves delayed native confirmation through read-only settlement', async () => {
+  const controller = new AbortController();
+  const f = settlingPostFixture(control => {
+    controller.abort('Stopped');
+    setTimeout(() => { control.textContent = 'Unlike'; }, 30);
+  });
+  const candidate = await f.actions.find('likePosts');
+  const outcome = await f.actions.execute('likePosts', candidate,
+    { signal: controller.signal, assertCurrent: () => true });
+  assert.equal(outcome.verified, true);
+  assert.deepEqual(f.clicks, ['first']);
+});
+
+test('Stop after an unconfirmed Like retains an uncertain outcome instead of losing the attempt', async () => {
+  const controller = new AbortController();
+  const f = settlingPostFixture(() => controller.abort('Stopped'));
+  const candidate = await f.actions.find('likePosts');
+  const outcome = await f.actions.execute('likePosts', candidate,
+    { signal: controller.signal, assertCurrent: () => true });
+  assert.equal(outcome.verified, false);
+  assert.equal(outcome.uncertain, true);
+  assert.deepEqual(f.clicks, ['first']);
+});
+
+test('an account change during native settlement cannot prove a Like on the original account', async () => {
+  let f;
+  f = settlingPostFixture(control => {
+    control.textContent = 'Unlike';
+    f.setViewer({ accountVerified: true, usable: true, accountId: 'other', accountKey: 'other' });
+  });
+  const candidate = await f.actions.find('likePosts');
+  const outcome = await f.actions.execute('likePosts', candidate,
+    { signal: new AbortController().signal, assertCurrent: () => true });
+  assert.equal(outcome.verified, false);
+  assert.equal(outcome.uncertain, true);
+  assert.match(outcome.reason, /account|context/i);
+});
+
+test('the Presence session preserves a settled Like after Stop and never starts a second action', async () => {
+  let session;
+  const f = settlingPostFixture(control => {
+    session.stop();
+    setTimeout(() => { control.textContent = 'Unlike'; }, 30);
+  });
+  session = createPresenceSession({ nativeActions: f.actions,
+    locks: { request: async (name, options, callback) => callback({ name, mode: 'exclusive' }) },
+    minDelayMs: 0, maxDelayMs: 0 });
+  const review = session.createReview({ accountId: 'viewer',
+    options: { maxActions: 2, actions: { likePosts: true } } });
+  const result = await session.start(review);
+  assert.equal(result.status, 'stopped');
+  assert.equal(result.completed, 1);
+  assert.equal(result.results[0].status, 'completed');
+  assert.deepEqual(f.clicks, ['first']);
+});
+
+test('the Presence session retains an unresolved dispatched Like after Stop without retrying', async () => {
+  let session;
+  const f = settlingPostFixture(() => session.stop());
+  session = createPresenceSession({ nativeActions: f.actions,
+    locks: { request: async (name, options, callback) => callback({ name, mode: 'exclusive' }) },
+    minDelayMs: 0, maxDelayMs: 0 });
+  const review = session.createReview({ accountId: 'viewer',
+    options: { maxActions: 2, actions: { likePosts: true } } });
+  const result = await session.start(review);
+  assert.equal(result.status, 'needs-attention');
+  assert.equal(result.completed, 0);
+  assert.equal(result.uncertain, 1);
+  assert.equal(result.results[0].status, 'uncertain');
+  assert.deepEqual(f.clicks, ['first']);
 });

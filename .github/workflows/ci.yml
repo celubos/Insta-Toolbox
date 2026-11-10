@@ -244,7 +244,7 @@ jobs:
           retention-days: 7
 
   package-macos:
-    runs-on: macos-14
+    runs-on: macos-15-intel
     timeout-minutes: 45
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: "false"

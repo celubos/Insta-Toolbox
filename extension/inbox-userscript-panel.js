@@ -3,12 +3,22 @@ import { inboxReviewKey } from './inbox-coordinator.js';
 import { createSingleTabInboxController, createSingleTabInboxReview } from './inbox-single-tab.js';
 import { createUserscriptGhostBridge, userscriptGhostReviewKey } from './inbox-userscript-workers.js';
 
+function inboxReviewTargets(threadIds, labels) {
+  const byThread = new Map(labels.map(label => [label.threadId, label]));
+  return threadIds.map(threadId => {
+    const label = byThread.get(threadId);
+    const title = String(label?.title || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+    const description = [title, label?.username ? `@${label.username}` : ''].filter(Boolean).join(' · ');
+    return `Thread ${threadId}${description ? ` — ${description}` : ''}`;
+  });
+}
+
 export function mountUserscriptInboxPanel({
   container, document = globalThis.document, window = globalThis.window,
   viewer = globalThis.InstaToolboxInstagramViewer,
   runner = globalThis.InstaToolboxDmThreadUnsender,
   confirmAction, cancelConfirmation = () => {}, save, load = async () => null,
-  workerTransport = null,
+  workerTransport = null, discoveryCheckpointStorage = null,
   defaultWorkerCount = 10,
   openWorkersInBackground = true,
   discoveryTiming = {},
@@ -21,6 +31,7 @@ export function mountUserscriptInboxPanel({
   const rows = new Map();
   let inventory = null, controller = null, active = false, checkpoint = null, operationEpoch = 0;
   let loading = true, loadFailed = false, needsReconciliation = false, unsubscribe = null;
+  let savedDiscoveryAvailable = false;
   const create = (tag, text, className) => {
     const node = document.createElement(tag);
     if (text) node.textContent = text;
@@ -33,6 +44,8 @@ export function mountUserscriptInboxPanel({
   startGhost.setAttribute('data-ghost-start', '');
   const find = create('button', 'Find conversations', 'button quiet');
   find.type = 'button';
+  const restoreDiscovery = create('button', 'Restore found conversations', 'button quiet');
+  restoreDiscovery.type = 'button'; restoreDiscovery.hidden = true;
   const section = create('select');
   section.setAttribute('aria-label', 'Inbox section');
   for (const [value, label] of [['all', 'All available'], ['primary', 'Primary'], ['general', 'General'], ['requests', 'Requests']]) {
@@ -95,7 +108,7 @@ export function mountUserscriptInboxPanel({
   const actions = create('div', null, 'toolbar'); actions.append(selectAll, review, resume, pause, skip, stop);
   advanced.append(section, acknowledgment, controls, filterLabel, filterStatus,
     list, workersLabel, workerModeLabel, workerNote);
-  container.append(startGhost, note, inventoryStatus, advanced, supportNote, recovery, actions, storageNote, results);
+  container.append(startGhost, restoreDiscovery, note, inventoryStatus, advanced, supportNote, recovery, actions, storageNote, results);
 
   function context() {
     const value = viewer.inspect({ document, location: window.location });
@@ -141,6 +154,9 @@ export function mountUserscriptInboxPanel({
   }
   function updateControls() {
     inventoryStatus.hidden = !inventoryStatus.textContent;
+    restoreDiscovery.hidden = !savedDiscoveryAvailable;
+    startGhost.hidden = savedDiscoveryAvailable;
+    restoreDiscovery.disabled = active || loading || loadFailed || busy();
     list.hidden = !rows.size;
     filterLabel.hidden = !rows.size; filter.disabled = active;
     const query = filter.value.trim().toLowerCase();
@@ -153,7 +169,8 @@ export function mountUserscriptInboxPanel({
       if (matches) shown += 1; else if (selected.has(id)) hiddenSelected += 1;
     }
     filterStatus.textContent = query
-      ? `${shown} shown${hiddenSelected ? ` · ${hiddenSelected} selected outside this filter` : ''}${query.startsWith('@') ? '. Only verified profile links match @usernames.' : ''}` : '';
+      ? `${shown} shown${hiddenSelected ? ` · ${hiddenSelected} selected outside this filter` : ''}${query.startsWith('@')
+        ? discovery.snapshot().recovered ? '. Names came from earlier observations and may have changed.' : '. Only verified profile links match @usernames.' : ''}` : '';
     filterStatus.hidden = !filterStatus.textContent;
     results.hidden = !checkpoint?.tasks?.length;
     storageNote.hidden = !storageNote.textContent;
@@ -167,7 +184,8 @@ export function mountUserscriptInboxPanel({
     selectAll.textContent = query ? 'Select visible matches' : 'Select all found';
     review.hidden = !inventory?.conversations.length;
     review.disabled = active || loading || loadFailed || !selected.size || !window.navigator?.locks?.request
-      || (needsReconciliation && !reconciled.checked);
+      || (needsReconciliation && !reconciled.checked)
+      || (discovery.snapshot().recovered && !ghostBridge);
     review.textContent = `Review ${selected.size} conversation${selected.size === 1 ? '' : 's'}`;
     const remaining = remainingThreads();
     resume.hidden = Boolean(ghostBridge) || active || !remaining.length;
@@ -211,12 +229,15 @@ export function mountUserscriptInboxPanel({
     }
     if (!inventory) { selected.clear(); rows.clear(); list.replaceChildren(); }
     const finding = value.status === 'discovering';
-    inventoryStatus.textContent = finding ? `Found ${threads.length} conversations…`
-      : `${threads.length} conversations found.${inventory?.complete ? '' : ' This may not include your whole inbox.'}`;
+    inventoryStatus.textContent = value.recovered
+      ? `${threads.length} conversations restored from this tab. Partial inventory; names may have changed. Select exact threads and review them again.${ghostBridge ? '' : ' Managed worker tabs are required for recovered results.'}`
+      : finding ? `Found ${threads.length} conversations…`
+        : `${threads.length} conversations found.${inventory?.complete ? '' : ' This may not include your whole inbox.'}`;
     if (value.reason) inventoryStatus.textContent += ` ${friendlyReason(value.reason)}`;
     updateControls();
   }
   const discovery = createUserscriptInboxDiscovery({ document, window, viewer, onProgress: showInventory,
+    checkpointStorage: discoveryCheckpointStorage, now: discoveryTiming.now ?? Date.now,
     routeTimeoutMs: discoveryTiming.routeTimeoutMs ?? 8_000, settleMs: discoveryTiming.settleMs ?? 400 });
   function friendlyReason(reason) {
     const labels = {
@@ -235,6 +256,11 @@ export function mountUserscriptInboxPanel({
       'conversation-load-timeout': 'The assigned conversation did not finish loading.',
       'removal-not-proven': 'Instagram did not confirm the last removal. Review the conversation before continuing.',
       'approval-expired': 'This cleanup approval expired. Review the conversations again.',
+      'inbox-discovery-save-failed': 'Found conversations could not be saved. Discovery stopped before opening another chat.',
+      'inbox-discovery-checkpoint-invalid': 'Saved discovery is invalid. Find conversations again.',
+      'inbox-discovery-checkpoint-unavailable': 'No saved discovery is available for this tab. Find conversations again.',
+      'inbox-discovery-recovery-expired': 'Saved discovery expired. Find conversations again.',
+      'inbox-recovered-workers-required': 'Recovered conversations require managed worker tabs. Find conversations again for a fresh single-tab review.',
       cancelled: 'Stopped.', 'end-unverified': '', 'repeated-window-unverified': '',
     };
     return labels[reason] ?? String(reason || '').replaceAll('-', ' ');
@@ -286,10 +312,27 @@ export function mountUserscriptInboxPanel({
       ? 'Previous cleanup was interrupted. Check its last conversation; nothing resumes automatically.'
       : 'Previous cleanup. Find conversations to start a new review.';
   }
-  const ready = Promise.resolve().then(loadCheckpoint).catch(() => {
+  const ready = Promise.resolve().then(async () => {
+    await loadCheckpoint();
+    savedDiscoveryAvailable = await discovery.hasReadOnlyCheckpoint();
+    if (savedDiscoveryAvailable) inventoryStatus.textContent = 'Previously found conversations are saved in this tab. Restore them to select and review again. Nothing resumes automatically.';
+  }).catch(() => {
     loadFailed = true;
     storageNote.textContent = 'Saved cleanup progress could not be read. Reload before starting another cleanup.';
   }).finally(() => { loading = false; updateControls(); });
+  restoreDiscovery.addEventListener('click', async () => {
+    if (active || loading || loadFailed || busy()) return;
+    const epoch = ++operationEpoch;
+    active = true; inventory = null; selected.clear(); rows.clear(); filter.value = ''; list.replaceChildren();
+    unsubscribe?.(); unsubscribe = null; controller = null; updateControls();
+    try {
+      await discovery.restoreReadOnly();
+      if (epoch !== operationEpoch) return;
+      savedDiscoveryAvailable = false; advanced.open = true;
+      announce('Restored partial discovery. Names may have changed; select exact threads for a new review.');
+    } catch (error) { if (epoch === operationEpoch) announce(friendlyReason(error.message)); }
+    finally { active = false; updateControls(); }
+  });
   async function findConversations({ all = false } = {}) {
     if (active || loading || loadFailed || busy()) return;
     if (!all && !acknowledged.checked) { announce('Confirm that opening conversations may mark them read.'); acknowledged.focus(); return; }
@@ -336,6 +379,8 @@ export function mountUserscriptInboxPanel({
     try {
       const options = messageOptions();
       const captured = discovery.review({ threadIds, scope: options.scope, limit: options.limit });
+      const recovered = discovery.snapshot().recovered === true;
+      if (recovered && !ghostBridge) throw new Error('inbox-recovered-workers-required');
       if (ghostBridge) {
         const account = context();
         const plan = ghostBridge.createReview({
@@ -352,7 +397,7 @@ export function mountUserscriptInboxPanel({
           title: `Clean up ${plan.threadIds.length} conversation${plan.threadIds.length === 1 ? '' : 's'}?`,
           message: plan.scope === 'all' ? 'Permanently unsend your messages in the selected conversations.'
             : `Permanently unsend the ${plan.scope} ${plan.limit} message${plan.limit === 1 ? '' : 's'} you sent in each selected conversation?`,
-          detail: `Keep the inbox tab open. Up to ${plan.workerCount} conversation tabs open together, finish, and close before the next batch. Unsend clicks share the account pacing.`,
+          detail: `${recovered ? 'These thread IDs were recovered from an interrupted partial discovery. Names may have changed. ' : ''}Keep the inbox tab open. Up to ${plan.workerCount} conversation tabs open together, finish, and close before the next batch. Unsend clicks share the account pacing.`,
           confirmLabel: 'Start Ghost mode',
           facts: [{ label: 'Account', value: account.accountLabel ? `@${account.accountLabel}` : 'Current signed-in account' },
             { label: 'Conversations', value: String(plan.threadIds.length) },
@@ -360,12 +405,14 @@ export function mountUserscriptInboxPanel({
             { label: 'Open tabs', value: plan.openInBackground ? 'In the background' : 'In front' },
             { label: 'Messages', value: plan.scope === 'all' ? 'All messages you sent'
               : `${plan.scope === 'newest' ? 'Newest' : 'Oldest'} ${plan.limit} in each conversation` }],
+          items: inboxReviewTargets(plan.threadIds, discovery.reviewLabels()), itemLimit: 1_000,
           binding: { action: 'inbox-unsend-workers', reviewKey: key },
         });
         if (!confirmed || epoch !== operationEpoch) { announce('Canceled. Nothing was removed.'); return; }
         if (confirmed.action !== 'inbox-unsend-workers' || confirmed.reviewKey !== key || busy()) {
           throw new Error('inbox-review-changed');
         }
+        discovery.validateReview(captured);
         controller = ghostBridge.createManager(plan);
         needsReconciliation = false; recovery.hidden = true; reconciled.checked = false;
         unsubscribe = controller.subscribe(value => {
@@ -387,8 +434,9 @@ export function mountUserscriptInboxPanel({
         detail: 'Messages you send while cleanup is running may also be removed. Keep this Instagram tab loaded and do not send messages in these conversations until it finishes.',
         confirmLabel: 'Start cleanup',
         facts: [{ label: 'Account', value: `@${account.accountId}` },
-          { label: 'Conversations', value: plan.threadIds.join(', ') },
+          { label: 'Conversations', value: String(plan.threadIds.length) },
           { label: 'Messages', value: 'All messages you sent; one conversation at a time' }],
+        items: inboxReviewTargets(plan.threadIds, discovery.reviewLabels()), itemLimit: 1_000,
         binding: { action: 'inbox-unsend', reviewKey: key },
       });
       if (!confirmed || epoch !== operationEpoch) { announce('Canceled. Nothing was removed.'); return; }

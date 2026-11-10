@@ -9,6 +9,7 @@
   const LEGACY_QUEUE_KEY = 'instaToolboxManualQueueV1';
   const TAB_RUN_FIELD = 'instaToolboxAccountRunV1';
   const TAB_CHECKER_FIELD = 'instaToolboxCheckerDraftV1';
+  const TAB_INBOX_DISCOVERY_FIELD = 'instaToolboxInboxDiscoveryV1';
   const ACTIONABLE_STATUSES = new Set(['pending', 'ready', 'failed', 'paused']);
   const RESERVED = new Set([
     'accounts', 'about', 'api', 'developer', 'direct', 'emails', 'explore',
@@ -188,10 +189,15 @@
       .map(normalizeUsername)
       .filter(Boolean))].slice(0, 250);
     const capabilityId = safeText(value.capabilityId);
+    const accountUsername = normalizeUsername(value.accountUsername);
     if (!capabilityId
+      || !accountUsername
+      || (safeText(value.growthCampaignId) && normalizeUsername(value.growthAccount) !== accountUsername)
       || !approvedTargets.length
       || queue.some((username) => !approvedTargets.includes(username))
       || safeText(value.capabilityDigest) !== accountCapabilityDigest(action, approvedTargets)) return null;
+    const pendingTarget = normalizeUsername(value.pendingTarget);
+    if (value.pendingTarget && (!pendingTarget || !approvedTargets.includes(pendingTarget))) return null;
     const boundedCount = (candidate) => Math.max(0, Math.min(250, Math.round(Number(candidate) || 0)));
     return {
       status: 'running',
@@ -202,12 +208,15 @@
       completed: boundedCount(value.completed),
       skipped: boundedCount(value.skipped),
       failed: boundedCount(value.failed),
+      uncertain: boundedCount(value.uncertain),
       current: safeText(value.current),
       stopReason: null,
       approvedTargets,
       capabilityDigest: accountCapabilityDigest(action, approvedTargets),
       capabilityExpiresAt,
       capabilityId,
+      accountUsername,
+      pendingTarget,
       growthCampaignId: safeText(value.growthCampaignId),
       growthAccount: normalizeUsername(value.growthAccount),
       nextAt: Number(value.nextAt) > Date.now() ? Number(value.nextAt) : null,
@@ -398,6 +407,10 @@
     GM_setValue(PREFERENCES_KEY, preferences);
     applyLayout();
     renderShellState();
+    if (Object.prototype.hasOwnProperty.call(patch, 'view')) {
+      clearContextStatus();
+      renderContext();
+    }
   }
 
   function currentQueueItem() {
@@ -833,7 +846,7 @@
       .run-bar { overflow: hidden; height: 5px; margin: 8px 0 6px; border-radius: 999px; background: var(--insta-toolbox-line, #d8ddd4); }
       .run-bar span { display: block; width: 0%; height: 100%; border-radius: 999px; background: var(--insta-toolbox-accent, #b83d67); transition: width var(--insta-toolbox-motion-base, 180ms) var(--insta-toolbox-ease, ease); }
       .run-panel .list { max-height: 118px; overflow-y: auto; }
-      .button.danger { background: var(--insta-toolbox-danger, #b42318); color: var(--insta-toolbox-on-danger, #fff); }
+      .button.danger { background: var(--insta-toolbox-danger-fill, #b42331); color: var(--insta-toolbox-on-danger, #fff); }
       .button.primary { background: var(--insta-toolbox-accent, #b83d67); color: var(--insta-toolbox-on-accent, #fff); border: 0; font-weight: 600; }
       .button.primary:hover { filter: brightness(1.08); }
       .button.big { width: 100%; padding: 10px 12px; font-size: var(--system-14-font-size, 14px); line-height: var(--system-14-line-height, 18px); border-radius: 8px; }
@@ -908,7 +921,7 @@
       </nav>
       <div class="scroll">
         <section id="insta-toolbox-panel-checker" class="view" role="tabpanel" aria-labelledby="insta-toolbox-tab-checker" data-panel="checker" hidden><section class="card" aria-labelledby="insta-toolbox-checker-account-title"><h2 id="insta-toolbox-checker-account-title">Check mutuals</h2><p>Read-only. Uses the Instagram session in this tab.</p><div class="field"><label for="insta-toolbox-checker-username">Instagram username</label><input id="insta-toolbox-checker-username" type="text" inputmode="text" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="your_username" data-role="checker-username"></div><div class="toolbar"><button class="button primary" type="button" data-action="check-account-relationships" data-role="checker-run">Check mutuals</button></div></section>
-          <div class="scan-progress" data-role="scan-progress" hidden><div class="run-bar" data-role="scan-bar" role="progressbar" aria-label="Mutual check progress" aria-describedby="insta-toolbox-scan-detail" aria-valuemin="0" aria-valuemax="100"><span data-role="scan-fill"></span></div><p id="insta-toolbox-scan-detail" class="lead" data-role="scan-detail"></p></div>
+          <div class="scan-progress" data-role="scan-progress" hidden><div class="run-bar" data-role="scan-bar" role="progressbar" aria-label="Mutual check progress" aria-describedby="insta-toolbox-scan-detail" aria-valuemin="0" aria-valuemax="100"><span data-role="scan-fill"></span></div><p id="insta-toolbox-scan-detail" class="lead" data-role="scan-detail"></p><button class="button danger" type="button" data-action="stop-list-scan" data-role="list-scan-stop" hidden>Stop scan</button><a class="button quiet" data-role="checker-open-profile" hidden>Open profile</a><button class="button quiet" type="button" data-action="download-partial-scan" data-role="partial-scan-download" hidden>Download partial scan</button></div>
           <div class="card" data-role="comparison"></div>
           <div data-role="loaded-insights"></div>
           <section class="card comparison-browser" data-role="comparison-browser" aria-labelledby="insta-toolbox-comparison-browser-title" hidden><h2 id="insta-toolbox-comparison-browser-title">Comparison list</h2><div class="comparison-controls"><div class="field"><label for="insta-toolbox-comparison-category">Show accounts</label><select id="insta-toolbox-comparison-category" data-role="comparison-category" aria-controls="insta-toolbox-comparison-list"><option value="not-following-me-back">Don't follow you back</option><option value="i-do-not-follow-back">You don't follow back</option><option value="mutuals">Mutuals</option></select></div><div class="field"><label for="insta-toolbox-filter">Find a username</label><input id="insta-toolbox-filter" type="search" inputmode="search" autocomplete="off" spellcheck="false" placeholder="Search usernames" data-role="result-filter" aria-controls="insta-toolbox-comparison-list"></div></div><p id="insta-toolbox-comparison-count" class="comparison-count" data-role="comparison-count" tabindex="-1"></p><ul id="insta-toolbox-comparison-list" class="list comparison-list" data-role="comparison-list" aria-describedby="insta-toolbox-comparison-count"></ul><button class="button quiet comparison-more" type="button" data-action="show-more-comparison" data-role="comparison-more" hidden>Show more</button></section>
@@ -970,10 +983,16 @@
   const queryAll = (selector) => [...shadow.querySelectorAll(selector)];
   const setText = (role, value) => {
     const element = query(`[data-role="${role}"]`);
-    if (element) element.textContent = String(value ?? '');
+    const text = String(value ?? '');
+    if (element && element.textContent !== text) element.textContent = text;
   };
   let contextStatus = null;
   let contextStatusTimer = null;
+  function clearContextStatus() {
+    contextStatus = null;
+    clearTimeout(contextStatusTimer);
+    contextStatusTimer = null;
+  }
   const statusTone = (message) => {
     const text = safeText(message).toLocaleLowerCase();
     if (/blocked|could not|disabled|error|expired|failed|rate limit|security check|signed out|unclear|unavailable|wrong thread/.test(text)) return 'blocked';
@@ -1393,7 +1412,9 @@
     renderMessages();
     syncTabs(preferences.view);
     renderCheckerSteps();
+    renderListScanControls();
     renderDmSummary();
+    presencePanel?.refreshLog();
     renderContext();
     renderRun();
     renderLimits();
@@ -1416,7 +1437,7 @@
     panel.hidden = !run;
     if (!run) return;
 
-    const done = (run.completed || 0) + (run.skipped || 0) + (run.failed || 0);
+    const done = (run.completed || 0) + (run.skipped || 0) + (run.failed || 0) + (run.uncertain || 0);
     const total = run.total || 0;
     const title = query('[data-role="run-title"]');
     if (title) {
@@ -1435,6 +1456,7 @@
       const parts = [`${done}/${total} processed`, `${run.completed || 0} done`];
       if (run.skipped) parts.push(`${run.skipped} skipped`);
       if (run.failed) parts.push(`${run.failed} failed`);
+      if (run.uncertain) parts.push(`${run.uncertain} unconfirmed`);
       detail.textContent = parts.join(' · ');
     }
     const fill = query('[data-role="run-fill"]');
@@ -1515,8 +1537,11 @@
   // same exact-target checks the extension gets.
 
   let batchAbort = false;
+  let accountActionController = null;
   let accountRunDraft = null;
   let relationshipController = null;
+  let relationshipPartialResult = null;
+  let manualScanController = null;
   let relationshipProgress = null;
   let dmThreadPreview = null;
   let dmRunnerSnapshot = null;
@@ -1528,11 +1553,12 @@
   let presencePanel = null;
   let presenceGrowthPanel = null;
   let presenceSession = null;
+  let presenceContextRunId = null;
   let presenceCapture = null;
 
   const engine = globalThis.InstaToolboxInstagramInspector;
   const presenceInputs = globalThis.InstaToolboxPresenceInputs?.create({
-    fetchFollowerComparison: options => engine.fetchFollowerComparison(options),
+    fetchFollowerComparison: options => engine.fetchFollowerComparison({ ...options, allowNativeListFallback: true }),
     inspectViewer: () => globalThis.InstaToolboxInstagramViewer.inspect({ document, location }),
   });
   const invalidatePresence = () => {
@@ -1558,6 +1584,15 @@
   const stopPresenceSession = () => {
     presenceSession?.stop();
   };
+
+  function onPresenceUpdate(next) {
+    if (next.runId && next.runId !== presenceContextRunId) {
+      presenceContextRunId = next.runId;
+      clearContextStatus();
+    }
+    presencePanel?.render(next);
+    renderContext();
+  }
   const dmRunner = globalThis.InstaToolboxDmThreadUnsender;
   if (dmRunner) {
     dmRunnerSnapshot = dmRunner.snapshot();
@@ -1592,6 +1627,8 @@
   function runCapabilityValid(run = state.run) {
     return Boolean(
       run?.status === 'running'
+      && normalizeUsername(run.accountUsername)
+      && (!run.growthCampaignId || run.growthAccount === run.accountUsername)
       && safeText(run.capabilityId)
       && Number(run.capabilityExpiresAt) > Date.now()
       && Array.isArray(run.approvedTargets)
@@ -1758,7 +1795,7 @@
     return run.queue.every((target) => due.includes(target));
   }
 
-  async function runOneAccount(username, action) {
+  async function runOneAccount(username, action, run = state.run) {
     const observation = engine.inspectProfile(username);
     const stop = sessionStop(observation);
     if (stop) return { status: 'stopped', reason: stop, fatal: true };
@@ -1778,19 +1815,94 @@
         fatal: false,
       };
     }
-    const result = await engine.performReviewedProfileAction({
-      action,
-      expectedRelationship: expected,
-      resolutionToken: observation.resolutionToken,
-      username,
-    });
+    const controller = new AbortController();
+    accountActionController = controller;
+    let result;
+    let enteredEngine = false;
+    let checkpointing = false;
+    let laneProblem = null;
+    const locks = globalThis.navigator?.locks;
+    const accountKey = globalThis.InstaToolboxInstagramViewer?.accountKey?.(run?.accountUsername);
+    const lockName = `insta-toolbox:account-activity:${accountKey}`;
+    try {
+      if (typeof locks?.request !== 'function' || !/^[A-Za-z0-9_-]{1,128}$/.test(accountKey || '')) {
+        return { status: 'stopped', fatal: true,
+          reason: 'This browser cannot coordinate account actions safely. No profile action was sent.' };
+      }
+      result = await locks.request(lockName, { mode: 'exclusive', ifAvailable: true }, async (lock) => {
+        if (!lock || lock.name !== lockName || lock.mode !== 'exclusive') {
+          laneProblem = 'Another Presence, Ghost Mode, or account run is active for this account. Stop it before continuing.';
+          return null;
+        }
+        checkpointing = true;
+        await persistAccountRunCheckpoint({ pendingTarget: username });
+        checkpointing = false;
+        enteredEngine = true;
+        return engine.performReviewedProfileAction({
+          action,
+          expectedRelationship: expected,
+          resolutionToken: observation.resolutionToken,
+          username,
+        }, {
+          signal: controller.signal,
+          assertAuthorized: () => !batchAbort && state.run?.capabilityId === run?.capabilityId
+            && runCapabilityValid(state.run),
+          assertContext: () => Boolean(run?.accountUsername)
+            && normalizeUsername(engine.detectAuthenticatedUsername?.()) === run.accountUsername,
+        });
+      });
+    } catch {
+      return enteredEngine
+        ? { status: 'uncertain', fatal: true,
+          reason: 'The profile action ended without a reliable result. Check this profile before trying again.' }
+        : checkpointing ? { status: 'stopped', fatal: true,
+          reason: 'The next profile action could not be checkpointed. No action was sent. Check local storage before trying again.' }
+        : { status: 'stopped', fatal: true,
+          reason: 'This browser could not coordinate account actions. No profile action was sent.' };
+    } finally {
+      if (accountActionController === controller) accountActionController = null;
+    }
+    if (laneProblem) return { status: 'stopped', fatal: true, reason: laneProblem };
+    if (result?.uncertain) {
+      return { status: 'uncertain', fatal: true,
+        reason: 'The action was sent, but its result could not be verified. Check this profile before trying again.' };
+    }
     const resultStop = sessionStop(result);
     if (resultStop) return { status: 'stopped', reason: resultStop, fatal: true };
     if (!result?.result || result.ambiguous || result.unexpectedUi) {
-      return { status: 'failed', reason: result?.reason || 'not confirmed', fatal: false };
+      return { status: result?.needsAttention ? 'stopped' : 'failed',
+        reason: result?.reason || 'not confirmed', fatal: result?.needsAttention === true };
     }
-    recordAction('actions');
-    return { status: 'completed', reason: String(result.result), fatal: false };
+    try { recordAction('actions'); } catch {
+      return { status: 'completed', reason: String(result.result), fatal: true,
+        stopReason: 'Action verified, but its local activity record could not be saved. Check this profile before continuing.' };
+    }
+    return { status: 'completed', reason: String(result.result), fatal: result.needsAttention === true };
+  }
+
+  async function persistAccountRunCheckpoint(patch) {
+    if (!managerTabStorageAvailable || typeof GM_saveTab !== 'function') {
+      throw new Error('account-run-checkpoint-unavailable');
+    }
+    setRun(patch);
+    const resumable = normalizeResumableAccountRun(state.run);
+    managerTab = { ...managerTab };
+    if (resumable) managerTab[TAB_RUN_FIELD] = resumable;
+    else delete managerTab[TAB_RUN_FIELD];
+    // saveState also writes this record, but its general-purpose path tolerates
+    // manager errors. A native dispatch requires an acknowledged checkpoint.
+    await GM_saveTab(managerTab);
+    const stored = await readManagerTab();
+    if (!stored) throw new Error('account-run-checkpoint-unreadable');
+    const savedRun = stored[TAB_RUN_FIELD];
+    if (resumable) {
+      const fields = ['capabilityId', 'accountUsername', 'pendingTarget', 'capabilityDigest',
+        'capabilityExpiresAt', 'queue', 'completed', 'skipped', 'failed', 'uncertain'];
+      if (!savedRun || JSON.stringify(fields.map(field => savedRun[field]))
+        !== JSON.stringify(fields.map(field => resumable[field]))) {
+        throw new Error('account-run-checkpoint-not-confirmed');
+      }
+    } else if (savedRun) throw new Error('account-run-checkpoint-not-cleared');
   }
 
   // An account run has to visit each target's profile, and navigating tears this
@@ -1812,16 +1924,28 @@
       stopForExpiredCapability();
       return;
     }
-    if (run.growthCampaignId
-      && normalizeUsername(engine.detectAuthenticatedUsername?.()) !== run.growthAccount) {
+    if (normalizeUsername(engine.detectAuthenticatedUsername?.()) !== run.accountUsername) {
       setRun({ status: 'stopped', stopReason: 'signed-in account changed', current: '', queue: [] });
-      status('Campaign stopped because the signed-in account could not be verified.');
+      status('Run stopped because the signed-in account changed or could not be verified. Review it again for this account.');
       return;
     }
     if (run.growthCampaignId && !growthRunStillApproved(run)) {
       setRun({ status: 'stopped', stopReason: 'campaign targets changed', current: '', queue: [] });
       status('Campaign targets changed. Review them again before any further action.');
       return;
+    }
+    if (run.pendingTarget) {
+      setRun({ status: 'stopped', current: '', queue: [], nextAt: null,
+        stopReason: 'A previous profile action was interrupted before its result was saved. Check that profile and review a new run.' });
+      status(`Check @${run.pendingTarget} before continuing. Its previous action has no saved outcome, so this run will not resume automatically.`);
+      return;
+    }
+    if (Number(run.nextAt) > Date.now()) {
+      await sleep(Number(run.nextAt) - Date.now());
+      if (batchAbort || state.run?.status !== 'running'
+        || state.run.capabilityId !== run.capabilityId) return;
+      setRun({ nextAt: null });
+      return continueAccountRun();
     }
     const username = run.queue[0];
     const onTarget = engine.normalizeUsername(location.pathname) === username;
@@ -1836,9 +1960,10 @@
     setRun({ current: `@${username}` });
     let outcome;
     try {
-      outcome = await runOneAccount(username, run.action);
+      outcome = await runOneAccount(username, run.action, run);
     } catch (error) {
-      outcome = { status: 'failed', reason: error.message, fatal: false };
+      outcome = { status: 'uncertain', fatal: true,
+        reason: 'The profile action ended without a reliable result. Check this profile before trying again.' };
     }
 
     if (outcome.status === 'completed' && run.growthCampaignId
@@ -1851,25 +1976,47 @@
     }
 
     const current = state.run || {};
+    if (current.capabilityId !== run.capabilityId) return;
     const patch = {
       queue: (current.queue || []).slice(1),
+      pendingTarget: '',
       results: [{ label: `@${username}`, status: outcome.status, reason: outcome.reason },
         ...(current.results || [])].slice(0, 40),
     };
     if (outcome.status === 'completed') patch.completed = (current.completed || 0) + 1;
     else if (outcome.status === 'skipped') patch.skipped = (current.skipped || 0) + 1;
+    else if (outcome.status === 'uncertain') patch.uncertain = (current.uncertain || 0) + 1;
     else patch.failed = (current.failed || 0) + 1;
-    setRun(patch);
+    if (outcome.fatal && !batchAbort && current.status === 'running') {
+      Object.assign(patch, { status: 'stopped', stopReason: outcome.stopReason || outcome.reason,
+        current: '', queue: [], nextAt: null });
+    }
+    try { await persistAccountRunCheckpoint(patch); } catch {
+      batchAbort = true;
+      state.run = { ...current, ...patch, status: 'stopped', current: '', queue: [], nextAt: null,
+        stopReason: 'The action result is retained in this tab, but local storage failed.' };
+      // Shared storage can fail before saveState reaches manager-tab storage.
+      // Invalidate that resume record independently, preserving other tab data.
+      if (managerTabStorageAvailable) {
+        managerTab = { ...managerTab };
+        delete managerTab[TAB_RUN_FIELD];
+        try { GM_saveTab(managerTab); } catch { /* Keep the local run stopped even if both stores fail. */ }
+      }
+      renderAll();
+      status('Run stopped because its result could not be saved. Keep this tab open and check the affected profile before reloading or trying again.');
+      return;
+    }
 
-    if (outcome.fatal) {
-      setRun({ status: 'stopped', stopReason: outcome.reason, current: '', queue: [] });
-      status(`Stopped: ${outcome.reason}. Nothing further was attempted.`);
+    // A click already sent still needs its result recorded. Settling that result
+    // must never turn a stopped run back into a completed or running one.
+    if (batchAbort || state.run?.status !== 'running') {
+      if (patch.status === 'stopped') status(`Stopped: ${patch.stopReason}. Nothing further was attempted.`);
       return;
     }
     if (!(state.run?.queue || []).length) {
       const done = state.run || {};
       setRun({ status: 'completed', current: '', nextAt: null });
-      status(`Run finished: ${done.completed || 0} done, ${done.skipped || 0} skipped, ${done.failed || 0} failed.`);
+      status(`Run finished: ${done.completed || 0} done, ${done.skipped || 0} skipped, ${done.failed || 0} failed, ${done.uncertain || 0} unconfirmed.`);
       return;
     }
 
@@ -1879,18 +2026,27 @@
       + Math.floor(Math.random() * (Math.max(bounds.maxDelayMs, bounds.minDelayMs) - bounds.minDelayMs + 1));
     if (processed % REST_EVERY === 0) wait += REST_MS;
     setRun({ nextAt: Date.now() + wait });
-    await sleep(wait);
-    if (batchAbort || state.run?.status !== 'running') return;
     await continueAccountRun();
   }
 
-  async function startAccountRun({ action, usernames, growthCampaignId = '', growthAccount = '' }) {
-    if (growthCampaignId && normalizeUsername(engine.detectAuthenticatedUsername?.()) !== growthAccount) {
-      status('Campaign account changed. No account action started.');
+  async function startAccountRun({ action, usernames, growthCampaignId = '', growthAccount = '', expiresAt = null }) {
+    if (manualScanController) { status('Stop the list scan before starting account actions.'); return; }
+    const accountUsername = normalizeUsername(engine.detectAuthenticatedUsername?.());
+    if (!accountUsername || (growthCampaignId && accountUsername !== growthAccount)) {
+      status('Verify the signed-in account before starting. No account action started.');
+      return;
+    }
+    const approvedExpiry = Number(expiresAt);
+    if (growthCampaignId && (!Number.isFinite(approvedExpiry) || approvedExpiry <= Date.now())) {
+      status('The campaign review expired. Review these accounts again before starting.');
       return;
     }
     if (!managerTabStorageAvailable) {
       status('This userscript manager cannot keep a run active while opening profiles. Account batches are unavailable; scans and no-click checks still work.');
+      return;
+    }
+    if (accountActionController) {
+      status('The last account action is still being checked. Wait for its result before starting another run.');
       return;
     }
     if (state.run?.status === 'running') {
@@ -1910,16 +2066,33 @@
       completed: 0,
       skipped: 0,
       failed: 0,
+      uncertain: 0,
       current: '',
       stopReason: null,
       approvedTargets: [...queue],
       capabilityDigest: accountCapabilityDigest(action, queue),
-      capabilityExpiresAt: Date.now() + RUN_CAPABILITY_MS,
+      capabilityExpiresAt: Math.min(Date.now() + RUN_CAPABILITY_MS,
+        approvedExpiry > 0 ? approvedExpiry : Infinity),
       capabilityId,
+      accountUsername,
+      pendingTarget: '',
       growthCampaignId,
       growthAccount,
       results: [],
     });
+    await continueAccountRun();
+  }
+
+  async function resumeApprovedAccountRun() {
+    const run = resumableAccountRun();
+    if (!run) return;
+    // Keep hidden manual queues retired. Only a still-reviewed, account-bound
+    // growth campaign may continue across the profile navigation it requested.
+    if (!run.growthCampaignId) {
+      setRun({ status: 'stopped', stopReason: 'legacy account run retired', current: '', queue: [] });
+      status('An older manual account run was stopped. Presence does not resume past approvals.');
+      return;
+    }
     await continueAccountRun();
   }
 
@@ -1984,13 +2157,16 @@
         view: 'account',
       };
     }
-    if (preferences.view === 'account' && inspectPresenceAccount().accountVerified) {
-      return { tone: 'ready', title: 'Presence ready',
-        detail: 'Choose activities and start. Presence can move between Instagram pages.', view: 'account' };
+    if (preferences.view === 'account') {
+      return inspectPresenceAccount().accountVerified
+        ? { tone: 'ready', title: 'Presence ready',
+          detail: 'Choose activities and a run style, then review and start.', view: 'account' }
+        : { tone: 'warning', title: 'Verify your signed-in account',
+          detail: 'Open Home, then try again after Instagram loads.', view: 'account' };
     }
 
     const path = location.pathname.toLowerCase();
-    if (path.startsWith('/direct/t/')) {
+    if (preferences.view === 'messages' && path.startsWith('/direct/t/')) {
       return {
         tone: 'ready',
         title: 'Conversation open',
@@ -1998,8 +2174,12 @@
         view: 'messages',
       };
     }
-    if (path.startsWith('/direct')) {
+    if (preferences.view === 'messages' && path.startsWith('/direct')) {
       return { tone: 'ready', title: 'Inbox open', detail: 'Use Ghost Mode for multiple conversations, or open a chat to use Unsend.' };
+    }
+    if (preferences.view === 'messages') {
+      return { tone: 'warning', title: 'Open a conversation for Unsend',
+        detail: 'Open a chat for Unsend. Ghost Mode asks for a separate review.', view: 'messages' };
     }
     const followerList = openFollowerListContext();
     if (followerList) {
@@ -2022,7 +2202,7 @@
     return {
       tone: 'ready',
       title: 'Instagram open',
-      detail: 'Use Presence here, or open your profile to check mutuals.',
+      detail: 'Enter a username to compare Followers and Following. This check does not change the account.',
     };
   }
 
@@ -2092,6 +2272,37 @@
     };
   }
 
+  function renderListScanControls() {
+    const partialDownload = query('[data-role="partial-scan-download"]');
+    if (partialDownload) partialDownload.hidden = !relationshipPartialResult;
+    const stop = query('[data-role="list-scan-stop"]');
+    if (stop) {
+      stop.hidden = !manualScanController;
+      stop.disabled = manualScanController?.signal.aborted === true;
+      stop.textContent = stop.disabled ? 'Stopping scan…' : 'Stop scan';
+    }
+    const readBusy = Boolean(manualScanController || relationshipController);
+    for (const action of ['scan-following', 'scan-followers', 'scan-list', 'capture', 'clear-capture']) {
+      for (const control of shadow.querySelectorAll(`[data-action="${action}"]`)) control.disabled = readBusy;
+    }
+    const listType = query('[data-role="list-type"]');
+    if (listType) listType.disabled = readBusy;
+    const check = query('[data-role="checker-run"]');
+    if (check) check.disabled = Boolean(manualScanController);
+  }
+
+  function assertManualScanAvailable() {
+    if (inboxPanel?.busy()) throw new Error('Stop inbox cleanup before scanning a list.');
+    if (manualScanController) throw new Error('A list scan is already running. Use Stop scan first.');
+    if (relationshipController) throw new Error('Stop the mutual check before scanning a list.');
+    if (presencePanel?.busy() || presenceGrowthPanel?.busy()) throw new Error('Stop Presence before scanning a list.');
+    const dm = dmRunner?.snapshot();
+    if (accountActionController || dmCleanupController || dm?.canStop
+      || ['preparing', 'running', 'waiting', 'stopping'].includes(dm?.status) || state.run?.status === 'running') {
+      throw new Error('Stop the current run before scanning a list.');
+    }
+  }
+
   function scanProgressPercent(found, expectedCounts, complete = false) {
     const types = ['followers', 'following'];
     const knownTypes = types.filter((type) => Number.isSafeInteger(expectedCounts?.[type]));
@@ -2113,6 +2324,7 @@
     settled = false,
     expectedCount = null,
     expectedCounts = null,
+    { kind = 'mutual', stopped = false } = {},
   ) {
     const panel = query('[data-role="scan-progress"]');
     if (!panel) return;
@@ -2143,13 +2355,16 @@
     );
     if (fill) fill.style.width = percent === null ? '100%' : `${percent}%`;
     if (bar) {
+      const task = kind === 'list' ? 'List scan' : 'Mutual check';
+      bar.setAttribute('aria-label', `${task} progress`);
       bar.dataset.indeterminate = String(percent === null);
       if (percent === null) bar.removeAttribute('aria-valuenow');
       else bar.setAttribute('aria-valuenow', String(percent));
       bar.setAttribute(
         'aria-valuetext',
         settled
-          ? complete ? 'Mutual check complete' : 'Mutual check finished with a partial result'
+          ? stopped ? `${task} stopped with a partial result`
+            : complete ? `${task} complete` : `${task} finished with a partial result`
           : percent === null
             ? `Scanning ${listType || 'accounts'}; total unknown`
             : `${percent}% of the expected accounts read`,
@@ -2168,12 +2383,15 @@
   }
 
   function failedRelationshipScanDetail(error) {
-    if (error?.code === 'stopped') return 'Mutual check stopped. Saved comparison unchanged.';
+    const partial = error?.partialResult;
+    const retained = partial
+      ? ` ${formatCount(partial.followers?.length)} followers and ${formatCount(partial.following?.length)} following retained as a partial scan; download it before starting again or reloading.` : '';
+    if (error?.code === 'stopped') return `Mutual check stopped. Saved comparison unchanged.${retained}`;
     const message = safeText(error?.message, 'Instagram did not return readable relationship data.');
-    return `Mutual check failed: ${message} Saved comparison unchanged.`;
+    return `Mutual check failed: ${message} Saved comparison unchanged.${retained}`;
   }
 
-  function settleFailedRelationshipProgress(error) {
+  function settleFailedRelationshipProgress(error, { kind = 'mutual' } = {}) {
     const bar = query('[data-role="scan-bar"]');
     const fill = query('[data-role="scan-fill"]');
     if (fill) fill.style.width = '0%';
@@ -2182,17 +2400,23 @@
     bar.removeAttribute('aria-valuenow');
     bar.setAttribute(
       'aria-valuetext',
-      error?.code === 'stopped' ? 'Mutual check stopped' : 'Mutual check failed',
+      `${kind === 'list' ? 'List scan' : 'Mutual check'} ${error?.code === 'stopped' ? 'stopped' : 'failed'}`,
     );
   }
 
   async function scanInto(listType) {
     if (inboxPanel?.busy()) throw new Error('Stop inbox cleanup before scanning a list.');
+    assertManualScanAvailable();
     const select = query('[data-role="list-type"]');
     if (select) select.value = listType;
-    resetRelationshipProgress();
-    showScanProgress(listType, 0, false);
-    const outcome = await actions['scan-list']();
+    let outcome;
+    try { outcome = await actions['scan-list'](); }
+    catch (error) {
+      if (error?.code === 'stale-list-scan') return;
+      settleFailedRelationshipProgress(error, { kind: 'list' });
+      setText('scan-detail', `List scan failed: ${safeText(error?.message, 'Instagram did not return readable rows.')}`);
+      throw error;
+    }
     if (!outcome?.applied) {
       const detail = safeText(outcome?.detail, `The ${listType} scan did not start.`);
       const bar = query('[data-role="scan-bar"]');
@@ -2213,26 +2437,35 @@
       outcome.complete,
       true,
       outcome.expectedCount,
+      null,
+      { kind: 'list', stopped: outcome.stopped === true },
     );
+    if (outcome.detail) setText('scan-detail', outcome.detail);
     renderAll();
   }
 
   async function checkAccountRelationships() {
-    if (inboxPanel?.busy()) { status('Stop inbox cleanup before checking mutuals.'); return; }
-    if (presencePanel?.busy()) { status('Pause or stop Presence before checking mutuals.'); return; }
     if (relationshipController) {
       relationshipController.abort();
       status('Stopping the mutual check. Saved comparison data was not changed.');
       return;
+    }
+    if (manualScanController) { status('Stop the list scan before checking mutuals.'); return; }
+    if (inboxPanel?.busy()) { status('Stop inbox cleanup before checking mutuals.'); return; }
+    if (presencePanel?.busy() || presenceGrowthPanel?.busy()) { status('Stop Presence before checking mutuals.'); return; }
+    const dm = dmRunner?.snapshot();
+    if (accountActionController || dmCleanupController || dm?.canStop
+      || ['preparing', 'running', 'waiting', 'stopping'].includes(dm?.status) || state.run?.status === 'running') {
+      status('Stop the current run before checking mutuals.'); return;
     }
     if (typeof engine?.fetchFollowerComparison !== 'function') {
       status('Reload Instagram to activate Mutual Checker.');
       return;
     }
     const input = query('[data-role="checker-username"]');
-    const username = engine.normalizeUsername(input?.value)
-      || engine.detectAuthenticatedUsername?.()
-      || '';
+    const suppliedUsername = String(input?.value || '').trim();
+    const username = suppliedUsername ? engine.normalizeUsername(suppliedUsername)
+      : engine.detectAuthenticatedUsername?.() || '';
     if (!username) {
       status('Enter the Instagram username whose Followers and Following should be checked.');
       input?.focus();
@@ -2240,7 +2473,11 @@
     }
     if (input) input.value = username;
     const controller = new AbortController();
+    const originalCapture = state.capture;
     relationshipController = controller;
+    relationshipPartialResult = null;
+    const openProfile = query('[data-role="checker-open-profile"]');
+    if (openProfile) openProfile.hidden = true;
     invalidatePresence();
     resetRelationshipProgress();
     renderAll();
@@ -2249,12 +2486,17 @@
     try {
       const result = await (presenceInputs
         ? options => presenceInputs.captureComparison(options)
-        : options => engine.fetchFollowerComparison(options))({
+        : options => engine.fetchFollowerComparison({ ...options, allowNativeListFallback: true }))({
         username,
         retryRateLimits: true,
         signal: controller.signal,
         onProgress(progress) {
           if (relationshipController !== controller) return;
+          if (progress.phase === 'native-lists') {
+            showScanProgress(null, 0, false, false, null, progress.expectedCounts);
+            setText('scan-detail', `Reading @${username}'s native Followers and Following lists. Stop mutual check cancels this read.`);
+            return;
+          }
           if (progress.phase === 'cooldown') {
             const seconds = Math.ceil(progress.remainingMs / 1000);
             const clock = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
@@ -2309,6 +2551,9 @@
           }
         },
       });
+      if (relationshipController !== controller || state.capture !== originalCapture) return;
+      if (controller.signal.aborted) throw Object.assign(new Error('Mutual check stopped.'), { code: 'stopped' });
+      const nativeLists = result.source === 'list-dialog';
       const previousCapture = state.capture;
       const nextCapture = {
         ...stateDefaults().capture,
@@ -2319,8 +2564,9 @@
         following: normalizeAccounts(result.following),
         capturedAt: { followers: result.capturedAt, following: result.capturedAt },
         complete: { ...result.complete },
-        verified: { followers: true, following: true },
-        source: { followers: 'authenticated-web', following: 'authenticated-web' },
+        verified: { followers: !nativeLists || result.verified?.followers === true,
+          following: !nativeLists || result.verified?.following === true },
+        source: { followers: nativeLists ? 'list-dialog' : 'authenticated-web', following: nativeLists ? 'list-dialog' : 'authenticated-web' },
         ...engine.normalizeFollowerDiagnostics(result),
       };
       state.capture = nextCapture;
@@ -2330,7 +2576,7 @@
         state.capture = previousCapture;
         throw error;
       }
-      if (!controller.signal.aborted) presenceCapture = result;
+      if (!nativeLists && !controller.signal.aborted) presenceCapture = result;
       const partialDetails = [];
       for (const [listType, accounts] of [
         ['followers', result.followers],
@@ -2347,11 +2593,15 @@
           const difference = expected - accounts.length;
           partialDetails.push(difference > 0
             ? `${label}: Instagram returned ${accounts.length.toLocaleString('en-US')} of ${expected.toLocaleString('en-US')}; ${difference.toLocaleString('en-US')} were not returned.`
-            : `${label}: the API returned ${accounts.length.toLocaleString('en-US')} unique accounts while the profile shows ${expected.toLocaleString('en-US')}.`);
+            : `${label}: the ${nativeLists ? 'native list' : 'API'} returned ${accounts.length.toLocaleString('en-US')} unique accounts while the profile shows ${expected.toLocaleString('en-US')}.`);
         } else if (reason === 'count-changed') {
           partialDetails.push(`${label}: the profile total changed during the check.`);
         } else if (reason === 'profile-count-disagreement') {
           partialDetails.push(`${label}: Instagram's profile counters disagreed.`);
+        } else if (reason === 'count-unverified') {
+          partialDetails.push(`${label}: a fresh exact profile total could not be verified.`);
+        } else if (reason === 'native-list-truncated') {
+          partialDetails.push(`${label}: the native list could not be read completely.`);
         }
       }
       const mismatch = ` ${partialDetails.join(' ') || 'A bounded read limit was reached.'}`;
@@ -2370,6 +2620,16 @@
       );
       setText('scan-detail', completedRelationshipScanDetail(result));
     } catch (error) {
+      if (relationshipController !== controller || state.capture !== originalCapture) return;
+      if (error?.partialResult?.source === 'list-dialog'
+        && (error.partialResult.followers?.length || error.partialResult.following?.length)) {
+        relationshipPartialResult = error.partialResult;
+      }
+      if (error?.code === 'native-profile-required' && openProfile) {
+        openProfile.href = `https://www.instagram.com/${username}/`;
+        openProfile.textContent = `Open @${username} profile`;
+        openProfile.hidden = false;
+      }
       const detail = failedRelationshipScanDetail(error);
       settleFailedRelationshipProgress(error);
       setText('scan-detail', detail);
@@ -2656,6 +2916,7 @@
 
   async function scanSentConversation() {
     if (inboxPanel?.busy()) throw new Error('Stop inbox cleanup before checking the conversation.');
+    if (manualScanController) throw new Error('Stop the list scan before checking the conversation.');
     if (dmCleanupController) throw new Error('Stop cleanup before checking the conversation.');
     if (!dmRunner) throw new Error('Reload Instagram to load the DM Unsend runner.');
     status('Checking this conversation for messages you sent. Nothing will be removed.');
@@ -2696,6 +2957,7 @@
   }
 
   async function runReactionsOnly() {
+    if (manualScanController) { status('Stop the list scan before removing reactions.'); return; }
     if (inboxPanel?.busy() || (typeof presencePanel !== 'undefined' && presencePanel?.busy())) {
       status('Stop the current run before removing reactions.'); return;
     }
@@ -2745,6 +3007,7 @@
   }
 
   async function runDmUnsend() {
+    if (manualScanController) { status('Stop the list scan before using DM Unsend.'); return; }
     if (inboxPanel?.busy()) { inboxPanel.stop(); return; }
     if (typeof presencePanel !== 'undefined' && presencePanel?.busy()) {
       status('Pause or stop Presence before using DM Unsend.');
@@ -2951,6 +3214,19 @@
     'check-account-relationships': () => checkAccountRelationships(),
     'scan-following': () => scanInto('following'),
     'scan-followers': () => scanInto('followers'),
+    'stop-list-scan': () => {
+      if (!manualScanController || manualScanController.signal.aborted) return;
+      const restoreFocus = shadow.activeElement === query('[data-role="list-scan-stop"]');
+      manualScanController.abort();
+      renderListScanControls();
+      const detail = query('[data-role="scan-detail"]');
+      if (restoreFocus && preferences.view === 'checker' && preferences.open
+        && detail?.getClientRects?.().length && !detail.closest?.('[hidden]')) {
+        detail.tabIndex = -1;
+        detail.focus({ preventScroll: true });
+      }
+      status('Stopping the list scan. Read rows will be kept as a partial capture.');
+    },
     'context-cta': () => {
       const cta = query('[data-role="context-cta"]');
       const target = cta?.dataset.ctaAction;
@@ -2976,6 +3252,7 @@
         return;
       }
       batchAbort = true;
+      accountActionController?.abort('Stopped by you');
       // Clearing the queue is what actually stops a resumable account run; the
       // in-memory flag alone would not survive the next page load.
       setRun({
@@ -2984,58 +3261,94 @@
       status('Run stopped. It will not resume.');
     },
     'scan-list': async () => {
-      if (inboxPanel?.busy()) throw new Error('Stop inbox cleanup before scanning a list.');
+      assertManualScanAvailable();
       const listType = query('[data-role="list-type"]').value === 'followers' ? 'followers' : 'following';
-      status(`Scanning the open ${listType} list. Keep the dialog open.`);
-      const outcome = await engine.collectAccountList({ listType });
-      const stopReason = sessionStop(outcome);
-      if (stopReason) {
-        const detail = `Stopped: ${stopReason}.`;
-        status(detail);
-        return { applied: false, detail };
-      }
-      const accounts = outcome?.accounts || [];
-      if (outcome?.listType !== listType) {
-        const detail = `No verified ${listType} dialog was open. Open that exact list and scan again.`;
-        status(detail);
-        return { applied: false, detail };
-      }
-      if (!accounts.length) {
-        const detail = `No rows were readable. Open your ${listType} list first.`;
-        status(detail);
-        return { applied: false, detail };
-      }
       const subjectUsername = currentProfileCaptureSubject();
-      prepareCaptureWorkspace(subjectUsername);
-      state.capture[listType] = reconciledRelationshipAccounts(
-        verifiedCapture(listType),
-        accounts,
-        outcome.complete === true,
-      );
-      state.capture.capturedAt[listType] = nowIso();
-      state.capture.complete = { ...(state.capture.complete || {}), [listType]: outcome.complete === true };
-      state.capture.verified = { ...(state.capture.verified || {}), [listType]: true };
-      state.capture.source = { ...(state.capture.source || {}), [listType]: 'list-dialog' };
-      state.capture.subjectUsername = subjectUsername;
-      saveState();
-      renderAll();
-      const mismatch = outcome?.reason === 'list-count-mismatch'
-        && Number.isSafeInteger(outcome.expectedCount);
-      status(
-        `Scanned ${accounts.length} ${listType} rows.${outcome.complete
-          ? ''
-          : mismatch
-            ? ` Instagram reports ${outcome.expectedCount}, so this capture stays incomplete.`
-            : outcome?.reason === 'list-count-changed'
-              ? ' The profile count changed during the scan, so this capture stays incomplete.'
-              : ' The list did not reach its end, so some may be missing.'}`,
-      );
-      return {
-        applied: true,
-        complete: outcome.complete === true,
-        expectedCount: outcome.expectedCount,
-        found: state.capture[listType].length,
-      };
+      if (!subjectUsername) throw new Error('Open the profile whose list you want to scan first.');
+      const profilePath = location.pathname;
+      const workspaceAtStart = state.capture;
+      const controller = new AbortController();
+      manualScanController = controller;
+      try {
+        invalidatePresence();
+        resetRelationshipProgress();
+        showScanProgress(listType, 0, false, false, null, null, { kind: 'list' });
+        renderAll();
+        status(`Scanning the open ${listType} list. Keep the dialog open.`);
+        const outcome = await engine.collectAccountList({
+          listType, signal: controller.signal,
+          onProgress(progress) {
+            if (manualScanController !== controller || controller.signal.aborted
+              || state.capture !== workspaceAtStart || location.pathname !== profilePath) return;
+            showScanProgress(listType, progress.found, false, false, progress.expectedCount,
+              null, { kind: 'list' });
+          },
+        });
+        if (manualScanController !== controller) {
+          const error = new Error('A newer list scan owns this context.');
+          error.code = 'stale-list-scan';
+          throw error;
+        }
+        if (state.capture !== workspaceAtStart) {
+          throw new Error('The saved capture changed during the scan. Its result was not overwritten.');
+        }
+        const accounts = outcome?.accounts || [];
+        const stopReason = sessionStop(outcome);
+        if (stopReason && !accounts.length) {
+          const detail = `Stopped: ${stopReason}.`;
+          status(detail);
+          return { applied: false, detail };
+        }
+        if (outcome?.listType !== listType || (outcome.profilePath && outcome.profilePath !== profilePath)) {
+          const detail = `No verified ${listType} dialog was open. Open that exact list and scan again.`;
+          status(detail);
+          return { applied: false, detail };
+        }
+        const stopped = controller.signal.aborted || outcome.reason === 'stopped';
+        const profileChanged = location.pathname !== profilePath || outcome.reason === 'profile-changed';
+        const listChanged = ['list-closed', 'list-changed'].includes(outcome.reason);
+        const complete = outcome.complete === true && !stopped && !profileChanged && !listChanged && !stopReason;
+        const existing = state.capture.subjectUsername === subjectUsername ? verifiedCapture(listType) : [];
+        if (!accounts.length && !(complete && outcome.expectedCount === 0)
+          && !((stopped || profileChanged) && existing.length
+            && state.capture.source?.[listType] === 'list-dialog')) {
+          const detail = stopped ? 'List scan stopped before any rows were read. Saved capture unchanged.'
+            : `No rows were readable. Open your ${listType} list first.`;
+          status(detail);
+          return { applied: false, detail };
+        }
+        prepareCaptureWorkspace(subjectUsername);
+        state.capture[listType] = reconciledRelationshipAccounts(
+          verifiedCapture(listType), accounts, complete,
+        );
+        state.capture.capturedAt[listType] = nowIso();
+        state.capture.complete = { ...(state.capture.complete || {}), [listType]: complete };
+        state.capture.verified = { ...(state.capture.verified || {}), [listType]: true };
+        state.capture.source = { ...(state.capture.source || {}), [listType]: 'list-dialog' };
+        state.capture.subjectUsername = subjectUsername;
+        saveState();
+        const mismatch = outcome?.reason === 'list-count-mismatch' && Number.isSafeInteger(outcome.expectedCount);
+        const interruption = stopped ? 'List scan stopped.'
+          : profileChanged ? 'The profile changed; list scan stopped.'
+            : outcome.reason === 'list-closed' ? 'The list closed before the scan finished.'
+              : outcome.reason === 'list-changed' ? 'The open list changed; scan stopped.'
+                : stopReason ? `Stopped: ${stopReason}.` : '';
+        const detail = interruption
+          ? `${interruption} ${accounts.length} ${listType} read; ${state.capture[listType].length} stored for @${subjectUsername} as a partial capture.`
+          : `Scanned ${accounts.length} ${listType} rows.${complete
+            ? ''
+            : mismatch
+              ? ` Instagram reports ${outcome.expectedCount}, so this capture stays incomplete.`
+              : outcome.reason === 'list-count-changed'
+                ? ' The profile count changed during the scan, so this capture stays incomplete.'
+                : ' The list did not reach its end, so some may be missing.'}`;
+        status(detail);
+        return { applied: true, complete, expectedCount: outcome.expectedCount,
+          found: accounts.length, stored: state.capture[listType].length, stopped, detail };
+      } finally {
+        if (manualScanController === controller) manualScanController = null;
+        renderAll();
+      }
     },
     'scan-sent': () => scanSentConversation(),
     'run-accounts': async () => {
@@ -3128,6 +3441,8 @@
       capabilities: cleanupSettings.capabilities('userscript'),
     }),
     capture: () => {
+      if (manualScanController) { status('Stop the list scan before capturing visible rows.'); return; }
+      if (relationshipController) { status('Stop the mutual check before capturing visible rows.'); return; }
       const listType = query('[data-role="list-type"]').value === 'followers' ? 'followers' : 'following';
       const visible = captureVisibleAccounts(listType);
       if (!visible.length) {
@@ -3151,6 +3466,9 @@
       status(`Captured ${visible.length} rendered ${listType} rows; ${state.capture[listType].length - before} were new.`);
     },
     'clear-capture': () => {
+      if (manualScanController) { status('Stop the list scan before clearing the checker.'); return; }
+      if (relationshipController) { status('Stop the mutual check before clearing the checker.'); return; }
+      relationshipPartialResult = null;
       invalidatePresence();
       state.capture = stateDefaults().capture;
       checkerResultKey = '';
@@ -3197,6 +3515,14 @@
         note: method === 'authenticated-web'
           ? 'Read from bounded authenticated Instagram pagination. No follow, unfollow, message, or click action was performed.'
           : 'Only rows rendered in Instagram were captured. Scroll manually and capture again to merge more rows.',
+      });
+    },
+    'download-partial-scan': () => {
+      if (!relationshipPartialResult) return;
+      downloadJson(`insta-toolbox-partial-native-scan-${Date.now()}.json`, {
+        kind: 'insta-toolbox-partial-native-scan', schemaVersion: 1, partial: true,
+        note: 'Interrupted native read. This is separate from the saved comparison; missing accounts are unknown.',
+        ...relationshipPartialResult,
       });
     },
     'download-comparison-json': () => {
@@ -3571,7 +3897,7 @@
     presenceSession = globalThis.InstaToolboxPresenceSession.create({
       nativeActions,
       locks: globalThis.navigator?.locks || null,
-      onUpdate: next => { presencePanel?.render(next); renderContext(); },
+      onUpdate: onPresenceUpdate,
     });
     presencePanel = globalThis.InstaToolboxPresenceSessionPanel.mount({
       container: query('[data-role="presence-routine"]'), document, window,
@@ -3580,34 +3906,100 @@
       confirmAction: confirmRun,
       readPreferences: () => GM_getValue('instaToolboxPresenceSessionV1', null),
       writePreferences: value => GM_setValue('instaToolboxPresenceSessionV1', value),
-      readLog: () => {
-        const account = nativeActions.inspectContext();
-        return account.accountKey
-          ? GM_getValue(`instaToolboxPresenceActivityLogV1:${account.accountKey}`, null)
-          : null;
+      createHistoryStore: accountKey => {
+        if (typeof accountKey !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(accountKey)) throw new Error('presence-log-account-unverified');
+        const manager = typeof GM === 'undefined' ? null : GM;
+        if (!manager || ['getValue', 'setValue', 'listValues', 'deleteValue'].some(name => typeof manager[name] !== 'function')
+          || typeof GM_addValueChangeListener !== 'function' || typeof GM_removeValueChangeListener !== 'function'
+          || typeof globalThis.InstaToolboxPresenceHistoryJournal?.create !== 'function') {
+          throw new Error('presence-history-private-storage-unavailable');
+        }
+        return globalThis.InstaToolboxPresenceHistoryJournal.create({ accountKey,
+          readLegacy: () => manager.getValue(`instaToolboxPresenceActivityLogV1:${accountKey}`, null),
+          storage: {
+            getValue: (key, fallback) => manager.getValue(key, fallback),
+            setValue: (key, value) => manager.setValue(key, value),
+            listValues: () => manager.listValues(),
+            deleteValue: key => manager.deleteValue(key),
+            listen: (key, callback) => GM_addValueChangeListener(key, (_key, _old, value) => callback(value)),
+            unlisten: id => GM_removeValueChangeListener(id),
+          },
+        });
       },
-      writeLog: value => {
-        const account = nativeActions.inspectContext();
-        if (!account.accountKey) throw new Error('presence-log-account-unverified');
-        return GM_setValue(`instaToolboxPresenceActivityLogV1:${account.accountKey}`, value);
+      onAccountReady: () => {
+        const dm = dmRunner?.snapshot();
+        if (preferences.view !== 'account'
+          || query('[data-role="context-title"]')?.textContent !== 'Verify your signed-in account'
+          || presencePanel?.busy() || presenceGrowthPanel?.busy() || inboxPanel?.busy()
+          || relationshipController || manualScanController || dmCleanupController || accountActionController
+          || dm?.canStop || ['preparing', 'running', 'waiting', 'stopping'].includes(dm?.status)
+          || state.run?.status === 'running') return;
+        renderContext();
       },
       busy: () => Boolean(dmCleanupController || dmRunner?.snapshot().canStop
-        || relationshipController || state.run?.status === 'running' || inboxPanel?.busy()
+        || relationshipController || manualScanController || state.run?.status === 'running' || inboxPanel?.busy()
         || presenceGrowthPanel?.busy()),
       onStatus: status,
     });
     if (globalThis.InstaToolboxPresenceGrowthPanel && globalThis.InstaToolboxPresenceGrowth) {
       try {
+        const inspectGrowthReadAccount = ({ actor = '', seed = '' } = {}) => {
+          const ordinary = inspectPresenceAccount();
+          if (ordinary.accountVerified || ordinary.restriction || !actor || !seed) return ordinary;
+          // Native lists hide the app backdrop from accessibility while keeping
+          // its account controls mounted. Re-prove that exact context each time.
+          const proven = [];
+          for (const dialog of document.querySelectorAll('[role="dialog"]')) {
+            for (const profileHeader of document.querySelectorAll('main header')) {
+              for (const listType of ['followers', 'following']) {
+                const value = globalThis.InstaToolboxInstagramViewer?.inspect?.({ document, location,
+                  session: engine.inspectSession?.() || {},
+                  nativeListDialog: { dialog, profileHeader, username: seed, listType } });
+                if (value?.accountVerified === true && value.accountId === actor && !value.restriction) proven.push(value);
+              }
+            }
+          }
+          return proven.length === 1 ? { ...proven[0], usable: location.origin === 'https://www.instagram.com' } : ordinary;
+        };
         presenceGrowthPanel = globalThis.InstaToolboxPresenceGrowthPanel.mount({
         container: query('[data-role="presence-routine"]'), document,
         inspectAccount: inspectPresenceAccount,
+        inspectReadAccount: inspectGrowthReadAccount,
         readFollowing: () => state.capture.subjectUsername === inspectPresenceAccount().accountId
           && state.capture.verified?.following === true ? state.capture.following : [],
         readFollowers: () => state.capture.subjectUsername === inspectPresenceAccount().accountId
           && state.capture.verified?.followers === true ? state.capture.followers : [],
+        readFollowingSnapshot: () => ({
+          subjectUsername: state.capture.subjectUsername,
+          listType: 'following', verified: state.capture.verified?.following === true,
+          source: state.capture.source?.following,
+          capturedAt: state.capture.capturedAt?.following,
+          complete: state.capture.complete?.following === true,
+          accounts: state.capture.following,
+        }),
+        readReadDraft: (actor, seed) => {
+          const value = inspectGrowthReadAccount({ actor, seed });
+          const owner = value.accountVerified && value.usable && (!actor || value.accountId === actor) ? value.accountId : '';
+          return owner ? GM_getValue(`instaToolboxGrowthReadDraftV1:${owner}`, null) : null;
+        },
+        writeReadDraft: (value, owner, seed) => {
+          const actor = inspectGrowthReadAccount({ actor: owner, seed });
+          if (!actor.accountVerified || !actor.usable || !actor.accountId || actor.accountId !== owner
+            || (value !== null && value?.actor !== actor.accountId)) throw new Error('The signed-in account changed. Start a new search.');
+          GM_setValue(`instaToolboxGrowthReadDraftV1:${actor.accountId}`, value);
+        },
+        readCurrentProfile: () => {
+          const match = String(location.pathname).match(/^\/([A-Za-z0-9._]{1,30})\/?$/);
+          return match ? engine.normalizeUsername(match[1]) : '';
+        },
         scanSeed: (username, signal, onProgress) => engine.fetchFollowerComparison({
           username, signal, onProgress, maxAccounts: 2_000,
           maxDurationMs: 4 * 60_000, retryRateLimits: false,
+        }),
+        readSeedNative: (username, signal, onProgress, onNativeReadContext) => engine.fetchFollowerComparison({
+          username, signal, onProgress, maxAccounts: 2_000,
+          maxDurationMs: 4 * 60_000, retryRateLimits: false, allowNativeListFallback: true,
+          onNativeReadContext,
         }),
         readCampaigns: () => readGrowthCampaigns(inspectPresenceAccount().accountId),
         writeCampaigns: (campaigns) => writeGrowthCampaigns(inspectPresenceAccount().accountId, campaigns),
@@ -3615,7 +4007,7 @@
         runBatch: startAccountRun,
         canRunBatch: () => managerTabStorageAvailable,
         busy: () => Boolean(presencePanel?.busy() || inboxPanel?.busy()
-          || relationshipController || dmCleanupController || state.run?.status === 'running'),
+          || relationshipController || manualScanController || dmCleanupController || state.run?.status === 'running'),
         onStatus: status,
         });
       } catch {
@@ -3652,6 +4044,19 @@
       cancelConfirmation: () => confirmationController?.cancel(),
       load: () => inspectInboxAccount().accountVerified ? inboxCheckpoints.load() : null,
       save: checkpoint => inboxCheckpoints.save(checkpoint),
+      discoveryCheckpointStorage: managerTabStorageAvailable ? {
+        read: () => managerTab?.[TAB_INBOX_DISCOVERY_FIELD] || null,
+        write: async value => {
+          managerTab = { ...managerTab };
+          if (value === null) delete managerTab[TAB_INBOX_DISCOVERY_FIELD];
+          else managerTab[TAB_INBOX_DISCOVERY_FIELD] = value;
+          await GM_saveTab(managerTab);
+          const saved = await readManagerTab();
+          if (!saved || JSON.stringify(saved[TAB_INBOX_DISCOVERY_FIELD] ?? null) !== JSON.stringify(value)) {
+            throw new Error('inbox-discovery-save-failed');
+          }
+        },
+      } : null,
       workerTransport: typeof GM_openInTab === 'function'
         && typeof GM_addValueChangeListener === 'function'
         && typeof GM_removeValueChangeListener === 'function' ? {
@@ -3675,16 +4080,11 @@
       },
       openWorkersInBackground: cleanupSettings.effective(cleanupPreferences, 'userscript').execution === 'background',
       busy: () => Boolean(dmCleanupController || dmRunner?.snapshot().canStop
-        || relationshipController || state.run?.status === 'running' || presencePanel?.busy()),
+        || relationshipController || manualScanController || state.run?.status === 'running' || presencePanel?.busy()),
       onStatus: status,
     });
   }
   renderAll();
 
-  // Presence replaces the old persisted manual account runner. Never resume a
-  // hidden legacy queue after an update or navigation.
-  if (resumableAccountRun()) {
-    setRun({ status: 'stopped', stopReason: 'legacy account run retired', current: '', queue: [] });
-    status('An older manual account run was stopped. Presence does not resume past approvals.');
-  }
+  await resumeApprovedAccountRun();
 })();

@@ -87,12 +87,22 @@ function createHarness(list, {
   main = null,
   profileCount = null,
   profileListType = 'followers',
+  profileCounterHref = '#',
+  profileHeaderOwner = 'demo_creator',
+  includeProfileHeader = true,
   settle = () => {},
+  pageLocation = null,
 } = {}) {
   const profileCountLink = {
     textContent: `${profileCount} ${profileListType}`,
-    getAttribute: (name) => (name === 'href' ? '#' : null),
+    getAttribute: (name) => (name === 'href' ? profileCounterHref : null),
   };
+  const profileOwner = { textContent: profileHeaderOwner, isConnected: true,
+    getAttribute: () => null, getClientRects: () => [{}] };
+  const profileHeader = { textContent: profileHeaderOwner, isConnected: true,
+    getAttribute: () => null, getClientRects: () => [{}],
+    contains: node => node === profileOwner || node === profileCountLink,
+    querySelectorAll: () => [profileOwner, profileCountLink] };
   const body = {};
   Object.defineProperty(body, 'innerText', {
     get: () => (typeof bodyText === 'function' ? bodyText() : bodyText),
@@ -101,7 +111,8 @@ function createHarness(list, {
     body,
     querySelector: (selector) => (selector === 'main' ? main : null),
     querySelectorAll(selector) {
-      if (selector === '[role="dialog"]') return includeDialog ? [list.dialog] : [];
+      if (selector === '[role="dialog"]') return (typeof includeDialog === 'function' ? includeDialog() : includeDialog) ? [list.dialog] : [];
+      if (selector === 'main header') return includeProfileHeader && Number.isSafeInteger(profileCount) ? [profileHeader] : [];
       if (selector === 'a[role="link"], a[href="#"]') {
         return Number.isSafeInteger(profileCount) ? [profileCountLink] : [];
       }
@@ -120,10 +131,11 @@ function createHarness(list, {
       overflowY: element === list.scroller ? 'auto' : 'visible',
       justifyContent: 'flex-start',
     }),
-    location: {
+    location: pageLocation || {
       href: 'https://www.instagram.com/demo_creator/followers/',
       pathname: '/demo_creator/',
     },
+    clearTimeout,
     setTimeout(callback, ms) { return setTimeout(() => { settle(); callback(); }, ms); },
   });
   vm.runInContext(actionLabelsSource, context);
@@ -338,4 +350,134 @@ test('virtualized partial data cannot pass even when the scroll height stops cha
   assert.equal(result.accounts.length, 27);
   assert.equal(result.complete, false);
   assert.equal(result.reason, 'list-count-mismatch');
+});
+
+test('manual list progress reports the first window immediately and only unique-count changes', async () => {
+  const list = createRecycledList();
+  let settles = 0;
+  const events = [];
+  const inspector = createHarness(list, { profileCount: 63, settle: () => { settles += 1; } });
+  const scan = inspector.collectAccountList({ settleMs: 0, listType: 'followers', onProgress(progress) {
+    events.push({ ...progress, settles });
+  } });
+  assert.equal(events[0].found, 7);
+  assert.equal(events[0].settles, 0, 'the visible first window is reported before waiting or scrolling');
+  const result = await scan;
+  assert.equal(result.complete, true);
+  assert.equal(result.accounts.length, 63);
+  assert.equal(events.at(-1).found, 63);
+  assert.ok(events.length > 2);
+  assert.ok(events.every((entry, index) => entry.listType === 'followers' && entry.expectedCount === 63
+    && (index === 0 || entry.found > events[index - 1].found)));
+});
+
+test('Stop interrupts a long native settle immediately and preserves the harvested window as partial', async () => {
+  const list = createLazyList({ total: 200 });
+  const controller = new AbortController();
+  const events = [];
+  const inspector = createHarness(list, { profileCount: 200 });
+  const pending = inspector.collectAccountList({ settleMs: 10_000, listType: 'followers',
+    signal: controller.signal, onProgress: progress => events.push(progress.found) });
+  assert.deepEqual(events, [25]);
+  const stoppedAt = performance.now();
+  controller.abort();
+  const result = await pending;
+  assert.ok(performance.now() - stoppedAt < 500, 'Stop does not wait for the ten-second settle');
+  assert.equal(result.reason, 'stopped');
+  assert.equal(result.complete, false);
+  assert.equal(result.listType, 'followers');
+  assert.equal(result.expectedCount, 200);
+  assert.equal(result.observedCount, 25);
+  assert.equal(result.accounts.length, 25);
+  assert.deepEqual(events, [25]);
+  assert.equal(list.scroller.scrollTop, 0, 'no scroll follows cancellation');
+});
+
+test('Stop remains partial even if the first readable window equals the exact profile total', async () => {
+  const list = createLazyList({ total: 25 });
+  const controller = new AbortController();
+  const inspector = createHarness(list, { profileCount: 25 });
+  const result = await inspector.collectAccountList({ settleMs: 0, listType: 'followers', signal: controller.signal,
+    onProgress() { controller.abort(); } });
+  assert.equal(result.reason, 'stopped');
+  assert.equal(result.complete, false);
+  assert.equal(result.accounts.length, 25);
+  assert.equal(result.expectedCount, 25);
+});
+
+test('Stop interrupts loading-spinner waits without another harvest or scroll', async () => {
+  const list = createLazyList({ total: 200 });
+  const controller = new AbortController();
+  let spinnerReads = 0;
+  list.dialog.querySelector = () => { spinnerReads += 1; queueMicrotask(() => controller.abort()); return {}; };
+  const inspector = createHarness(list, { profileCount: 200 });
+  const result = await inspector.collectAccountList({ settleMs: 0, listType: 'followers', signal: controller.signal });
+  assert.equal(result.reason, 'stopped');
+  assert.equal(result.complete, false);
+  assert.equal(result.accounts.length, 25);
+  assert.equal(spinnerReads, 1);
+  assert.equal(list.scroller.scrollTop, 300);
+});
+
+test('an in-place Followers-to-Following change cannot mix rows after a settle', async () => {
+  const list = createLazyList({ total: 200 });
+  const original = list.dialog.querySelectorAll;
+  let changed = false;
+  list.dialog.querySelectorAll = selector => changed && selector === 'a[href^="/"]'
+    ? [{ textContent: 'wrong_list_person', getAttribute: () => '/wrong_list_person/' }] : original(selector);
+  const inspector = createHarness(list, { profileCount: 200, settle() {
+    changed = true; list.dialog.textContent = 'Following';
+  } });
+  const result = await inspector.collectAccountList({ settleMs: 0, listType: 'followers' });
+  assert.equal(result.reason, 'list-changed');
+  assert.equal(result.complete, false);
+  assert.equal(result.listType, 'followers');
+  assert.equal(result.accounts.length, 25);
+  assert.equal(result.accounts.some(row => row.username === 'wrong_list_person'), false);
+});
+
+test('closing a list or changing the profile keeps only the original partial inventory', async () => {
+  for (const kind of ['closed', 'profile']) {
+    const list = createLazyList({ total: 200 });
+    let open = true;
+    const pageLocation = { pathname: '/original.owner/', href: 'https://www.instagram.com/original.owner/' };
+    const inspector = createHarness(list, { profileCount: 200, profileHeaderOwner: 'original.owner', pageLocation, includeDialog: () => open,
+      settle() { if (kind === 'closed') open = false; else pageLocation.pathname = '/different.owner/'; } });
+    const result = await inspector.collectAccountList({ settleMs: 0, listType: 'followers' });
+    assert.equal(result.reason, kind === 'closed' ? 'list-closed' : 'profile-changed');
+    assert.equal(result.complete, false);
+    assert.equal(result.accounts.length, 25);
+    assert.equal(result.profilePath, '/original.owner/');
+    assert.equal(result.expectedCount, 200);
+  }
+});
+
+test('a pre-cancelled list scan performs no harvest, progress callback or scroll', async () => {
+  const list = createLazyList({ total: 200 });
+  list.scroller.scrollTop = 100;
+  const controller = new AbortController(); controller.abort();
+  let reports = 0;
+  const result = await createHarness(list, { profileCount: 200 }).collectAccountList({ signal: controller.signal,
+    listType: 'followers', onProgress() { reports += 1; } });
+  assert.equal(result.reason, 'stopped');
+  assert.equal(result.complete, false);
+  assert.equal(result.accounts.length, 0);
+  assert.equal(reports, 0);
+  assert.equal(list.scroller.scrollTop, 100);
+});
+
+test('an unscoped or foreign-profile counter cannot prove a readable list complete', async () => {
+  for (const options of [
+    { includeProfileHeader: false },
+    { profileCounterHref: '/foreign.owner/following/' },
+    { profileHeaderOwner: 'foreign.owner' },
+  ]) {
+    const list = createLazyList({ total: 2, pageSize: 2 }); list.dialog.textContent = 'Following';
+    const inspector = createHarness(list, { profileCount: 2, profileListType: 'following', ...options });
+    const result = await inspector.collectAccountList({ listType: 'following', settleMs: 0 });
+    assert.equal(result.accounts.length, 2);
+    assert.equal(result.expectedCount, null, JSON.stringify(options));
+    assert.equal(result.complete, false, JSON.stringify(options));
+    assert.equal(result.reason, 'list-count-unverified');
+  }
 });

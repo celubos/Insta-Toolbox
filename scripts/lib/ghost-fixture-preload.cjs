@@ -3,6 +3,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('fixtureGhostTransport', {
   get: (key, fallback) => ipcRenderer.sendSync('fixture-ghost:get', key, fallback),
   set: (key, value) => ipcRenderer.sendSync('fixture-ghost:set', key, value),
+  list: () => ipcRenderer.sendSync('fixture-ghost:list'),
+  delete: key => ipcRenderer.sendSync('fixture-ghost:delete', key),
   getTab: () => ipcRenderer.sendSync('fixture-ghost:get-tab'),
   saveTab: value => ipcRenderer.sendSync('fixture-ghost:save-tab', value),
   open: (url, options) => ipcRenderer.invoke('fixture-ghost:open', url, options),

@@ -72,6 +72,17 @@
   }
 
   function detectAuthenticatedUsername() {
+    const viewer = globalThis.InstaToolboxInstagramViewer;
+    if ('InstaToolboxInstagramViewer' in globalThis) {
+      // Feed and story avatars identify their authors, not the signed-in
+      // account. Use the same current navigation proof as the action runners.
+      // An unavailable verifier must never fall back to those unrelated rows.
+      if (typeof viewer?.inspect !== 'function') return '';
+      try {
+        const account = viewer.inspect({ document, location, session: inspectSession() });
+        return account.accountVerified === true ? normalizeUsername(account.accountId) : '';
+      } catch { return ''; }
+    }
     const candidates = new Set();
     const anchors = [
       ...document.querySelectorAll('a[href]'),
@@ -298,7 +309,9 @@
             if (attemptSignal.aborted) throw error;
             if (error?.code === 'request-timeout' || error?.code === 'stopped') throw error;
             if (!response.ok) {
-              throw relationshipError('request-failed', `Instagram could not load this account request (HTTP ${response.status || 'error'}).`);
+              throw Object.assign(relationshipError('request-failed', `Instagram could not load this account request (HTTP ${response.status || 'error'}).`), {
+                httpStatus: response.status,
+              });
             }
             throw relationshipError('invalid-response', 'Instagram returned an invalid account response. Reload your profile before trying again.');
           }
@@ -316,7 +329,9 @@
             throw relationshipError('action-blocked', 'Instagram restricted activity.');
           }
           if (!response.ok || data?.status === 'fail') {
-            throw relationshipError('request-failed', `Instagram could not load this follower page (HTTP ${response.status || 'error'}).`);
+            throw Object.assign(relationshipError('request-failed', `Instagram could not load this follower page (HTTP ${response.status || 'error'}).`), {
+              httpStatus: response.status,
+            });
           }
           return data;
         }, { clearTimer, setTimer, signal, timeoutMs: requestTimeoutMs });
@@ -384,39 +399,63 @@
     return /^[1-9]\d{0,29}$/.test(id) ? id : '';
   }
 
-  async function resolveRelationshipUserId(username, options) {
-    const url = new URL('/api/v1/web/search/topsearch/', INSTAGRAM_WEB_ORIGIN);
-    url.searchParams.set('context', 'blended');
-    url.searchParams.set('query', username);
-    url.searchParams.set('include_reel', 'false');
-    const data = await fetchInstagramRelationshipJson(url, options);
-    const exact = (Array.isArray(data?.users) ? data.users : [])
-      .map((entry) => entry?.user)
-      .find((user) => normalizeUsername(user?.username) === username);
-    const userId = String(exact?.pk || '').trim();
-    if (!/^\d+$/.test(userId)) {
-      throw relationshipError('username-not-found', `Instagram could not resolve @${username}.`);
-    }
-    return {
-      userId,
-      ...(normalizeObservedInstagramId(exact?.pk)
-        ? { subjectInstagramId: normalizeObservedInstagramId(exact.pk) } : {}),
-    };
-  }
-
-  async function resolveRelationshipProfileCounts(username, userId, options) {
-    const url = new URL('/api/v1/users/web_profile_info/', INSTAGRAM_WEB_ORIGIN);
-    url.searchParams.set('username', username);
-    const data = await fetchInstagramRelationshipJson(url, options);
-    const profile = data?.data?.user;
-    const resolvedUsername = normalizeUsername(profile?.username);
-    const resolvedUserId = String(profile?.id || profile?.pk || '').trim();
-    if (resolvedUsername !== username || resolvedUserId !== userId) {
+  function boundRelationshipProfileId(profile, username, expectedUserId = '') {
+    const profileUsername = typeof profile?.username === 'string' ? profile.username.trim().toLowerCase() : '';
+    const suppliedIds = [profile?.id, profile?.pk].filter((value) => value !== undefined && value !== null);
+    const ids = suppliedIds.map(normalizeObservedInstagramId);
+    if (profileUsername !== username || !ids.length || ids.some((id) => !id)
+      || new Set(ids).size !== 1 || (expectedUserId && ids[0] !== expectedUserId)) {
       throw relationshipError(
         'profile-mismatch',
         `Instagram did not return the exact profile counters for @${username}. The previous comparison is unchanged.`,
       );
     }
+    return ids[0];
+  }
+
+  async function fetchRelationshipProfile(username, options) {
+    const url = new URL('/api/v1/users/web_profile_info/', INSTAGRAM_WEB_ORIGIN);
+    url.searchParams.set('username', username);
+    const data = await fetchInstagramRelationshipJson(url, options);
+    return data?.data?.user;
+  }
+
+  async function resolveRelationshipUserId(username, options) {
+    const url = new URL('/api/v1/web/search/topsearch/', INSTAGRAM_WEB_ORIGIN);
+    url.searchParams.set('context', 'blended');
+    url.searchParams.set('query', username);
+    url.searchParams.set('include_reel', 'false');
+    let data;
+    try {
+      data = await fetchInstagramRelationshipJson(url, options);
+    } catch (error) {
+      // A retired lookup route is not an authentication or transport failure.
+      // Use only the already allowlisted profile GET, never another search path.
+      if (error?.code !== 'request-failed' || ![404, 410].includes(error.httpStatus)) throw error;
+      let profile;
+      try { profile = await fetchRelationshipProfile(username, options); }
+      catch (profileError) {
+        if (profileError?.code === 'request-failed' && [404, 410].includes(profileError.httpStatus)) {
+          profileError.lookupRoutesRetired = true;
+        }
+        throw profileError;
+      }
+      const userId = boundRelationshipProfileId(profile, username);
+      return { userId, subjectInstagramId: userId, profile };
+    }
+    const exact = (Array.isArray(data?.users) ? data.users : [])
+      .map((entry) => entry?.user)
+      .find((user) => normalizeUsername(user?.username) === username);
+    const userId = normalizeObservedInstagramId(exact?.pk);
+    if (!userId) {
+      throw relationshipError('username-not-found', `Instagram could not resolve @${username}.`);
+    }
+    return { userId, subjectInstagramId: userId };
+  }
+
+  async function resolveRelationshipProfileCounts(username, userId, options, resolvedProfile = null) {
+    const profile = resolvedProfile || await fetchRelationshipProfile(username, options);
+    boundRelationshipProfileId(profile, username, userId);
     const followers = relationshipCount(
       profile?.edge_followed_by?.count,
       profile?.follower_count,
@@ -641,12 +680,14 @@
   }
 
   async function fetchFollowerComparison({
+    allowNativeListFallback = false,
     clearTimer = clearTimeout,
     fetchImpl = globalThis.fetch?.bind(globalThis),
     maxAccounts = RELATIONSHIP_MAX_ACCOUNTS,
     maxDurationMs = RELATIONSHIP_MAX_DURATION_MS,
     maxPages = RELATIONSHIP_MAX_PAGES,
     now = Date.now,
+    onNativeReadContext = null,
     onProgress = null,
     random = Math.random,
     requestAttempts = RELATIONSHIP_REQUEST_ATTEMPTS,
@@ -697,6 +738,7 @@
         maxDurationMs: boundedDuration,
         maxPages: boundedPages,
         now,
+        onNativeReadContext,
         onProgress,
         random,
         requestAttempts: boundedAttempts,
@@ -709,13 +751,15 @@
         startedAt,
       };
       const openProfileCounts = openProfileRelationshipCounts(username);
-      const resolution = await resolveRelationshipUserId(username, {
-        ...common,
-        found: 0,
-        listType: null,
-        pages: 0,
-        username,
-      });
+      let resolution;
+      try {
+        resolution = await resolveRelationshipUserId(username, {
+          ...common, found: 0, listType: null, pages: 0, username,
+        });
+      } catch (error) {
+        if (allowNativeListFallback !== true || error?.lookupRoutesRetired !== true) throw error;
+        return await collectNativeFollowerComparison({ ...common, username });
+      }
       const { userId } = resolution;
       onProgress?.(Object.freeze({ found: 0, listType: null, pages: 0, phase: 'verifying-profile', username }));
       const profileCountsAtStart = openProfileCounts || await resolveRelationshipProfileCounts(username, userId, {
@@ -724,7 +768,7 @@
         listType: null,
         pages: 0,
         username,
-      });
+      }, resolution.profile);
       onProgress?.(Object.freeze({
         expectedCounts: profileCountsAtStart,
         found: 0,
@@ -801,7 +845,8 @@
       return result;
     } catch (error) {
       if (deadline.timedOut() && error?.code === 'stopped') {
-        throw relationshipError('time-limit', 'The follower check reached its 20-minute read limit.');
+        throw Object.assign(relationshipError('time-limit', 'The follower check reached its 20-minute read limit.'),
+          error.partialResult ? { partialResult: error.partialResult } : {});
       }
       throw error;
     } finally {
@@ -811,7 +856,8 @@
 
   function normalizeFollowerDiagnostics(value) {
     const reasons = new Set(['pagination-complete', 'instagram-limited-list', 'cursor-missing',
-      'count-mismatch', 'count-unverified', 'count-changed', 'profile-count-disagreement', 'account-limit', 'page-limit']);
+      'count-mismatch', 'count-unverified', 'count-changed', 'profile-count-disagreement', 'account-limit', 'page-limit',
+      'native-list-complete', 'native-list-truncated', 'stopped', 'native-context-changed', 'native-list-loading-timeout']);
     const count = (number) => Number.isSafeInteger(number) && number >= 0 ? number : null;
     return {
       expectedCounts: Object.fromEntries(['followers', 'following'].map((type) => [type, count(value?.expectedCounts?.[type])])),
@@ -839,6 +885,11 @@
         'profile-count-disagreement': 'Instagram profile counters disagreed.',
         'account-limit': 'The bounded account read limit was reached.',
         'page-limit': 'The bounded page read limit was reached.',
+        'native-list-complete': 'The native list finished and fresh profile totals matched.',
+        'native-list-truncated': 'The native list ended before all accounts could be verified.',
+        stopped: 'The native read was stopped; this is a partial capture.',
+        'native-context-changed': 'The native profile or list changed during the read.',
+        'native-list-loading-timeout': 'The native list did not finish its initial loading before the read deadline.',
       };
       return [`${label}: ${count}. ${explanations[reason]}`];
     });
@@ -2035,11 +2086,41 @@
   function exactProfileListCount(listType, { requireScoped = false } = {}) {
     if (listType !== 'followers' && listType !== 'following') return null;
     const profileUsername = normalizeUsername(location.pathname);
-    const profileHeader = requireScoped ? verifiedProfileHeader(profileUsername).root : null;
+    const profileHeader = verifiedProfileHeader(profileUsername).root;
+    const backdrop = profileHeader?.closest?.('[aria-hidden="true"]');
+    const rendered = (element, allowedBackdrop = null) => {
+      if (element?.isConnected !== true || !element.getClientRects?.().length) return false;
+      for (let current = element; current; current = current.parentElement) {
+        if (current.hidden || (current.getAttribute?.('aria-hidden') === 'true'
+          && current !== allowedBackdrop)) return false;
+        const style = getComputedStyle(current);
+        if (style.display === 'none' || ['hidden', 'collapse'].includes(style.visibility)
+          || (style.opacity !== undefined && style.opacity !== '' && Number(style.opacity) === 0)) return false;
+      }
+      return true;
+    };
+    // A native list modal can aria-hide its still-rendered profile backdrop.
+    // Re-read only that current owner's header; hidden or cached totals are
+    // not evidence of completeness, and an unrelated modal grants no exception.
+    const exactProfileRoute = location.origin === INSTAGRAM_WEB_ORIGIN
+      && /^\/[a-z0-9._]+\/?$/i.test(location.pathname);
+    const dialogs = backdrop && exactProfileRoute && backdrop !== profileHeader
+      ? visibleDialogs().filter(dialog => rendered(dialog)) : [];
+    const modal = dialogs.length === 1
+      && accountListDialog(listType)?.dialog === dialogs[0] ? dialogs[0] : null;
+    const verifiedBackdrop = Boolean(modal && !backdrop.contains(modal)
+      && rendered(profileHeader, backdrop)
+      && [...profileHeader.querySelectorAll('a[href], h1, h2, [role="heading"]')]
+        .some(element => normalizeUsername(visibleText(element)) === profileUsername
+          && rendered(element, backdrop)));
     const scopedCounts = new Set();
     const fallbackCounts = new Set();
     for (const link of document.querySelectorAll('a[role="link"], a[href="#"]')) {
-      if (!visibleText(link) || link.closest?.('[hidden], [aria-hidden="true"], [role="dialog"]')) continue;
+      const backdropCount = verifiedBackdrop && profileHeader.contains(link)
+        && link.closest?.('[aria-hidden="true"]') === backdrop
+        && rendered(link, backdrop);
+      if (!visibleText(link) || (link.closest?.('[hidden], [aria-hidden="true"], [role="dialog"]')
+        && !backdropCount)) continue;
       const values = [
         link.getAttribute('title'),
         visibleText(link),
@@ -2062,7 +2143,7 @@
         if (!digits) continue;
         const count = Number(digits);
         if (!Number.isSafeInteger(count)) continue;
-        fallbackCounts.add(count);
+        if (!backdropCount) fallbackCounts.add(count);
         const href = link.getAttribute?.('href');
         if (!href || !profileUsername) continue;
         // Instagram also renders profile counters as non-navigation links.
@@ -2073,11 +2154,13 @@
         }
         try {
           const target = new URL(href, INSTAGRAM_WEB_ORIGIN);
-          if (target.origin !== INSTAGRAM_WEB_ORIGIN) continue;
+          if (target.origin !== INSTAGRAM_WEB_ORIGIN || target.username || target.password) continue;
+          if (backdropCount && (target.search || target.hash)) continue;
           const pathname = target.pathname
             .replace(/\/+$/, '')
             .toLowerCase();
-          if (pathname === `/${profileUsername}/${listType}`) scopedCounts.add(count);
+          if (pathname === `/${profileUsername}/${listType}`
+            || (pathname === `/${profileUsername}` && profileHeader?.contains(link))) scopedCounts.add(count);
         } catch {
           // Ignore malformed, non-navigation values such as JavaScript URLs.
         }
@@ -2088,13 +2171,26 @@
     return null;
   }
 
-  function sleep(ms) {
-    return new Promise((resolve) => { setTimeout(resolve, ms); });
+  function sleep(ms, signal) {
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) { reject(relationshipError('stopped', 'List scan stopped.')); return; }
+      const stop = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener?.('abort', stop);
+        reject(relationshipError('stopped', 'List scan stopped.'));
+      };
+      const timer = setTimeout(() => {
+        signal?.removeEventListener?.('abort', stop);
+        resolve();
+      }, ms);
+      signal?.addEventListener?.('abort', stop, { once: true });
+    });
   }
 
   // Scrolls the open followers/following dialog to enumerate the full list.
   // Read-only: it only scrolls an already-open list and reads rendered rows.
-  async function collectAccountList({ maxScrolls = 1_200, settleMs = 500, listType = '' } = {}) {
+  async function collectAccountList({ maxScrolls = 1_200, settleMs = 500, listType = '', signal, onProgress,
+    validateContext = null, initialReadinessMs = 0, initialReadinessDeadline = null } = {}) {
     const session = inspectSession();
     if (session.sessionExpired || session.challenge || session.actionBlocked || session.rateLimited) {
       return { ...session, accounts: [], complete: false, reason: 'session-stop' };
@@ -2109,10 +2205,38 @@
     const observedListType = listContext?.listType || expectedListType;
     expectedListType = observedListType;
     const profilePath = location.pathname;
-    const expectedCountAtStart = exactProfileListCount(observedListType);
-
+    const profileUsername = normalizeUsername(profilePath);
+    const ownerHeaderPresent = () => {
+      const header = verifiedProfileHeader(profileUsername).root;
+      return Boolean(header?.isConnected && header.getClientRects?.().length
+        && [...header.querySelectorAll('a[href], h1, h2, [role="heading"]')]
+          .some(element => normalizeUsername(visibleText(element)) === profileUsername
+            && element.isConnected && element.getClientRects?.().length));
+    };
+    const ownerHeaderAtStart = ownerHeaderPresent();
+    const expectedCountAtStart = exactProfileListCount(observedListType, { requireScoped: true });
     const accounts = new Map();
+    let stopReason = '';
+    let stoppedSession = null;
+    let reportedCount = -1;
+    const currentContext = () => {
+      if (signal?.aborted) { stopReason = 'stopped'; return null; }
+      if (validateContext !== null && (typeof validateContext !== 'function' || validateContext() !== true)) {
+        stopReason = 'profile-changed'; return null;
+      }
+      if (location.pathname !== profilePath) { stopReason = 'profile-changed'; return null; }
+      if (ownerHeaderAtStart && !ownerHeaderPresent()) { stopReason = 'profile-changed'; return null; }
+      const check = inspectSession();
+      if (check.sessionExpired || check.challenge || check.actionBlocked || check.rateLimited) {
+        stopReason = 'session-stop'; stoppedSession = check; return null;
+      }
+      const context = accountListDialog(expectedListType);
+      if (!context) stopReason = accountListDialog() ? 'list-changed' : 'list-closed';
+      return context;
+    };
     const harvest = () => {
+      const context = currentContext();
+      if (!context || context.dialog !== root) return false;
       for (const anchor of root.querySelectorAll('a[href^="/"]')) {
         const username = normalizeUsername(anchor.getAttribute('href'));
         if (!username || accounts.has(username)) continue;
@@ -2124,131 +2248,405 @@
           source: 'extension-scrolled-dom',
         });
       }
+      if (accounts.size !== reportedCount && !signal?.aborted) {
+        reportedCount = accounts.size;
+        onProgress?.({ listType: observedListType, found: accounts.size, expectedCount: expectedCountAtStart });
+      }
+      return true;
     };
-
-    harvest();
-    // Recycled rows cannot all exist in the DOM at once. Start at the top and
-    // retain each window before advancing by less than one viewport.
-    if (scroller) {
-      scroller.scrollTop = 0;
-      await sleep(settleMs);
-    }
-    let complete = !scroller
-      && Number.isSafeInteger(expectedCountAtStart)
-      && accounts.size === expectedCountAtStart;
-    let stagnantRounds = 0;
-    for (let round = 0; round < maxScrolls; round += 1) {
-      const currentContext = accountListDialog(expectedListType);
-      if (!currentContext || location.pathname !== profilePath) {
-        complete = false;
-        break;
-      }
-      const currentRoot = currentContext.dialog;
-      const currentScroller = scrollableWithin(currentRoot);
-      if (currentRoot !== root || currentScroller !== scroller) {
-        listContext = currentContext;
-        root = currentRoot;
-        scroller = currentScroller;
-        stagnantRounds = 0;
-        if (scroller) {
-          scroller.scrollTop = 0;
-          await sleep(settleMs);
+    const settle = (ms) => sleep(ms, signal);
+    const readinessMs = Math.max(0, Math.min(RELATIONSHIP_REQUEST_TIMEOUT_MS, Math.trunc(Number(initialReadinessMs) || 0)));
+    const visibleLoading = () => {
+      const indicators = [...root.querySelectorAll('[role="progressbar"], svg[aria-label*="Loading" i], [aria-busy="true"]')];
+      if (root.getAttribute('aria-busy') === 'true') indicators.push(root);
+      return indicators.some(node => {
+        if (node.isConnected !== true || !node.getClientRects?.().length) return false;
+        for (let current = node; current; current = current.parentElement) {
+          const style = getComputedStyle(current);
+          if (current.hidden || current.getAttribute?.('aria-hidden') === 'true' || style.display === 'none'
+            || ['hidden', 'collapse'].includes(style.visibility)
+            || (style.opacity !== undefined && style.opacity !== '' && Number(style.opacity) === 0)) return false;
         }
-        harvest();
-      }
-      harvest();
-      if (!scroller) {
-        complete = Number.isSafeInteger(expectedCountAtStart)
-          && accounts.size === expectedCountAtStart;
-        break;
-      }
-      const beforeCount = accounts.size;
-      const beforeHeight = scroller.scrollHeight;
-      const beforeTop = scroller.scrollTop;
-      // Nudge only at the end to trigger a stalled lazy-loading sentinel.
-      if (scroller.scrollTop >= scroller.scrollHeight - scroller.clientHeight - 8) {
-        scroller.scrollTop = Math.max(
-          0,
-          scroller.scrollTop - Math.max(80, Math.floor(scroller.clientHeight / 2)),
-        );
-        await sleep(settleMs);
-        harvest();
-      }
-      scroller.scrollTop = Math.min(
-        Math.max(0, scroller.scrollHeight - scroller.clientHeight),
-        beforeTop + Math.max(1, Math.floor(scroller.clientHeight * 0.75)),
-      );
-      await sleep(settleMs);
-      // A long Followers list keeps a spinner up well past the settle delay.
-      // Waiting for it to clear is what stops a big list being declared
-      // complete while thousands of rows are still unfetched.
-      let loading = false;
-      for (let wait = 0; wait < 24; wait += 1) {
-        loading = Boolean(root.querySelector('[role="progressbar"], svg[aria-label*="Loading" i]'));
-        if (!loading) break;
-        await sleep(250);
-      }
-      const settledContext = accountListDialog(expectedListType);
-      if (location.pathname !== profilePath || !settledContext) {
-        complete = false;
-        break;
-      }
-      if (settledContext.dialog !== root || scrollableWithin(root) !== scroller) continue;
-      harvest();
-
-      const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 8;
-      const grew = accounts.size > beforeCount || scroller.scrollHeight > beforeHeight;
-      stagnantRounds = grew || loading ? 0 : stagnantRounds + 1;
-      const check = inspectSession();
-      if (check.sessionExpired || check.challenge || check.actionBlocked || check.rateLimited) {
-        return {
-          ...check,
-          accounts: [...accounts.values()],
-          complete: false,
-          reason: 'session-stop',
+        const rect = element => {
+          const box = element?.getBoundingClientRect?.();
+          return box && ['top', 'bottom', 'left', 'right'].every(key => Number.isFinite(box[key])) ? box : null;
         };
+        const box = rect(node);
+        if (box) {
+          let top = box.top, bottom = box.bottom, left = box.left, right = box.right;
+          const clip = (bounds, vertical = true, horizontal = true) => {
+            if (!bounds) return;
+            if (vertical) { top = Math.max(top, bounds.top); bottom = Math.min(bottom, bounds.bottom); }
+            if (horizontal) { left = Math.max(left, bounds.left); right = Math.min(right, bounds.right); }
+          };
+          clip(rect(root));
+          for (let parent = node.parentElement; parent && parent !== root; parent = parent.parentElement) {
+            const style = getComputedStyle(parent);
+            clip(rect(parent), /^(auto|scroll|hidden|clip)$/.test(style.overflowY || style.overflow || ''),
+              /^(auto|scroll|hidden|clip)$/.test(style.overflowX || style.overflow || ''));
+          }
+          if (Number.isFinite(globalThis.innerHeight) && globalThis.innerHeight > 0) {
+            top = Math.max(0, top); bottom = Math.min(globalThis.innerHeight, bottom);
+          }
+          if (Number.isFinite(globalThis.innerWidth) && globalThis.innerWidth > 0) {
+            left = Math.max(0, left); right = Math.min(globalThis.innerWidth, right);
+          }
+          if (bottom <= top || right <= left) return false;
+        }
+        return true;
+      });
+    };
+    const awaitInitialReadiness = async () => {
+      const deadline = Math.min(Date.now() + readinessMs,
+        Number.isFinite(initialReadinessDeadline) ? initialReadinessDeadline : Infinity);
+      let emptySince = null;
+      while (true) {
+        const context = currentContext();
+        if (!context) return false;
+        if (context.dialog !== root) { stopReason = 'list-changed'; return false; }
+        scroller = scrollableWithin(root);
+        if (!harvest() || !currentContext()) return false;
+        // Real rows and a scroll owner can be read while a trailing lazy-load
+        // sentinel is mounted. This starts collection; it does not prove an end.
+        if (accounts.size > 0 && scroller) return true;
+        const loading = visibleLoading();
+        const empty = !loading && expectedCountAtStart === 0 && accounts.size === 0;
+        if (!empty) emptySince = null;
+        else emptySince ??= Date.now();
+        // A mounted dialog can precede both rows and its scrolling owner.
+        // Exact small lists need no scroller; an exact zero must survive a
+        // rendering turn without a visible loader. Neither changes end proof.
+        if (!loading && (accounts.size > 0 && accounts.size === expectedCountAtStart
+          || emptySince !== null && Date.now() - emptySince >= 100)) return true;
+        if (Date.now() >= deadline) { stopReason = 'list-loading-timeout'; return false; }
+        await settle(Math.min(100, deadline - Date.now()));
       }
-      if (atBottom && !loading
-        && Number.isSafeInteger(expectedCountAtStart)
-        && accounts.size === expectedCountAtStart) {
-        complete = true;
-        break;
+    };
+    let complete = false;
+    let stagnantRounds = 0;
+    const scan = async () => {
+      if (!harvest() || !currentContext()) return;
+      if (readinessMs && !await awaitInitialReadiness()) return;
+      // Recycled rows cannot all exist in the DOM at once. Start at the top and
+      // retain each window before advancing by less than one viewport.
+      if (scroller) {
+        scroller.scrollTop = 0;
+        await settle(settleMs);
       }
-      // Instagram lazy-loads in bursts and can pause between pages, so a couple
-      // of quiet rounds does not mean the end. Be patient before concluding.
-      if (atBottom && !loading && stagnantRounds >= 10) {
-        break;
-      }
-    }
+      for (let round = 0; round < maxScrolls; round += 1) {
+        const context = currentContext();
+        if (!context) return;
+        const currentRoot = context.dialog;
+        const currentScroller = scrollableWithin(currentRoot);
+        if (currentRoot !== root || currentScroller !== scroller) {
+          listContext = context;
+          root = currentRoot;
+          scroller = currentScroller;
+          stagnantRounds = 0;
+          if (scroller) {
+            scroller.scrollTop = 0;
+            await settle(settleMs);
+          }
+        }
+        if (!harvest()) { if (stopReason) return; continue; }
+        if (!currentContext()) return;
+        if (!scroller) {
+          complete = Number.isSafeInteger(expectedCountAtStart)
+            && accounts.size === expectedCountAtStart;
+          return;
+        }
+        const beforeCount = accounts.size;
+        const beforeHeight = scroller.scrollHeight;
+        const beforeTop = scroller.scrollTop;
+        // Nudge only at the end to trigger a stalled lazy-loading sentinel.
+        if (scroller.scrollTop >= scroller.scrollHeight - scroller.clientHeight - 8) {
+          scroller.scrollTop = Math.max(
+            0,
+            scroller.scrollTop - Math.max(80, Math.floor(scroller.clientHeight / 2)),
+          );
+          await settle(settleMs);
+          if (!harvest()) { if (stopReason) return; continue; }
+        }
+        if (!currentContext()) return;
+        scroller.scrollTop = Math.min(
+          Math.max(0, scroller.scrollHeight - scroller.clientHeight),
+          beforeTop + Math.max(1, Math.floor(scroller.clientHeight * 0.75)),
+        );
+        await settle(settleMs);
+        // A long Followers list keeps a spinner up well past the settle delay.
+        // Waiting for it to clear stops a big list being declared complete while
+        // thousands of rows are still unfetched. Stop also interrupts this wait.
+        let loading = false;
+        for (let wait = 0; wait < 24; wait += 1) {
+          const context = currentContext();
+          if (!context) return;
+          if (context.dialog !== root || scrollableWithin(root) !== scroller) break;
+          loading = readinessMs ? visibleLoading()
+            : Boolean(root.querySelector('[role="progressbar"], svg[aria-label*="Loading" i]'));
+          if (!loading) break;
+          await settle(250);
+        }
+        const settledContext = currentContext();
+        if (!settledContext) return;
+        if (settledContext.dialog !== root || scrollableWithin(root) !== scroller) continue;
+        if (!harvest() || !currentContext()) return;
 
-    const expectedCountAtEnd = exactProfileListCount(observedListType);
+        const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 8;
+        const grew = accounts.size > beforeCount || scroller.scrollHeight > beforeHeight;
+        stagnantRounds = grew || loading ? 0 : stagnantRounds + 1;
+        if (atBottom && !loading
+          && Number.isSafeInteger(expectedCountAtStart)
+          && accounts.size === expectedCountAtStart) {
+          complete = true;
+          return;
+        }
+        // Instagram lazy-loads in bursts and can pause between pages, so a couple
+        // of quiet rounds does not mean the end. Be patient before concluding.
+        if (atBottom && !loading && stagnantRounds >= 10) return;
+      }
+    };
+    try { await scan(); }
+    catch (error) {
+      if (signal?.aborted || error?.code === 'stopped') stopReason = 'stopped';
+      else throw error;
+    }
+    currentContext();
+    const expectedCountAtEnd = stopReason ? null : exactProfileListCount(observedListType, { requireScoped: true });
     const expectedCount = expectedCountAtEnd ?? expectedCountAtStart;
     const countChanged = Number.isSafeInteger(expectedCountAtStart)
       && Number.isSafeInteger(expectedCountAtEnd)
       && expectedCountAtStart !== expectedCountAtEnd;
     const countMismatch = Number.isSafeInteger(expectedCount)
       && accounts.size !== expectedCount;
-    if (countChanged || countMismatch || !Number.isSafeInteger(expectedCount)) complete = false;
+    const latestCountUnverified = !Number.isSafeInteger(expectedCountAtEnd);
+    if (stopReason || countChanged || countMismatch || latestCountUnverified) complete = false;
 
     return {
-      ...session,
+      ...(stoppedSession || session),
       accounts: [...accounts.values()]
         .sort((left, right) => left.username.localeCompare(right.username)),
       complete,
       listType: listContext?.listType || null,
       expectedCount,
       observedCount: accounts.size,
+      profilePath,
       capturedAt: new Date().toISOString(),
-      reason: countChanged
+      reason: stopReason || (countChanged
         ? 'list-count-changed'
-        : countMismatch
-          ? 'list-count-mismatch'
-          : !Number.isSafeInteger(expectedCount)
-            ? 'list-count-unverified'
+        : latestCountUnverified
+          ? 'list-count-unverified'
+          : countMismatch
+            ? 'list-count-mismatch'
             : complete
               ? 'list-complete'
-              : 'list-truncated',
+              : 'list-truncated'),
     };
+  }
+
+  // Used by explicit userscript native reads after both existing lookup GETs
+  // explicitly retire. These are native reads, never authenticated API evidence.
+  async function collectNativeFollowerComparison({ username, signal, onProgress, onNativeReadContext,
+    now, startedAt, maxDurationMs, maxAccounts }) {
+    const types = ['followers', 'following'];
+    const lists = {};
+    const initialPath = location.pathname;
+    const viewer = detectAuthenticatedUsername();
+    let ownerHeader = null;
+    let initialCounts = null;
+    let activeListType = '';
+    const readViewer = (modal = null) => {
+      const ordinary = detectAuthenticatedUsername();
+      if (ordinary || !modal) return ordinary;
+      try {
+        const account = globalThis.InstaToolboxInstagramViewer?.inspect?.({ document, location, session: inspectSession(),
+          nativeListDialog: { dialog: modal, profileHeader: ownerHeader, username, listType: activeListType } });
+        return account?.accountVerified === true ? normalizeUsername(account.accountId) : '';
+      } catch { return ''; }
+    };
+    const fail = (code, message) => { throw relationshipError(code, message); };
+    const rendered = (element) => {
+      if (element?.isConnected !== true || !element.getClientRects?.().length) return false;
+      for (let node = element; node; node = node.parentElement) {
+        const style = getComputedStyle(node);
+        if (node.hidden || node.getAttribute?.('aria-hidden') === 'true' || style.display === 'none'
+          || ['hidden', 'collapse'].includes(style.visibility)
+          || (style.opacity !== undefined && style.opacity !== '' && Number(style.opacity) === 0)) return false;
+      }
+      return true;
+    };
+    const dialogs = () => visibleDialogs().filter(rendered);
+    const assertContext = (modal = null) => {
+      assertRelationshipRunActive(signal, startedAt, now, maxDurationMs);
+      if (!viewer || readViewer(modal) !== viewer) fail('profile-mismatch', 'The signed-in account changed or could not be verified. Native check stopped.');
+      if (location.origin !== INSTAGRAM_WEB_ORIGIN || location.pathname !== initialPath
+        || !new RegExp(`^/${username.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/?$`, 'i').test(location.pathname)) {
+        fail('native-profile-required', `Open @${username}'s profile in this tab, then run Check mutuals again.`);
+      }
+      const header = verifiedProfileHeader(username).root;
+      if (!header || (ownerHeader && header !== ownerHeader) || !header.isConnected || !header.getClientRects?.().length) {
+        fail('profile-mismatch', 'Keep the exact profile header open until the native check finishes.');
+      }
+      const open = dialogs();
+      if (modal ? open.length !== 1 || open[0] !== modal : open.length !== 0) {
+        fail('native-dialog-changed', 'Close the open Instagram dialog, then run Check mutuals again from the profile.');
+      }
+      if (!modal && !rendered(header)) fail('profile-mismatch', 'The profile header is hidden. Open the profile before checking.');
+      return header;
+    };
+    const result = (interrupted = '') => {
+      const bound = location.origin === INSTAGRAM_WEB_ORIGIN && location.pathname === initialPath
+        && detectAuthenticatedUsername() === viewer && verifiedProfileHeader(username).root === ownerHeader;
+      const ending = initialCounts && bound ? Object.fromEntries(types.map(type => [type,
+        exactProfileListCount(type, { requireScoped: true })])) : {};
+      return Object.freeze({
+        username, source: 'list-dialog', capturedAt: new Date(now()).toISOString(),
+        followers: Object.freeze(lists.followers?.accounts || []), following: Object.freeze(lists.following?.accounts || []),
+        verified: Object.freeze(Object.fromEntries(types.map(type => [type, Boolean(lists[type])]))),
+        complete: Object.freeze(Object.fromEntries(types.map(type => [type, !interrupted && lists[type]?.complete === true
+          && Number.isSafeInteger(ending[type]) && ending[type] === initialCounts[type]
+          && lists[type].accounts.length === ending[type]]))),
+        expectedCounts: Object.freeze(Object.fromEntries(types.map(type => [type,
+          Number.isSafeInteger(ending[type]) ? ending[type] : initialCounts?.[type] ?? null]))),
+        pages: Object.freeze({ followers: null, following: null }),
+        reasons: Object.freeze(Object.fromEntries(types.map(type => {
+          const list = lists[type];
+          const reason = interrupted || (!list ? 'native-list-truncated'
+            : !Number.isSafeInteger(ending[type]) ? 'count-unverified'
+              : ending[type] !== initialCounts[type] || list.reason === 'list-count-changed' ? 'count-changed'
+                : list.reason === 'list-count-unverified' ? 'count-unverified'
+                : list.reason === 'account-limit' ? 'account-limit'
+                  : list.accounts.length !== ending[type] ? 'count-mismatch'
+                    : list.complete ? 'native-list-complete' : 'native-list-truncated');
+          return [type, reason];
+        }))),
+      });
+    };
+    try {
+      ownerHeader = assertContext();
+      initialCounts = openProfileRelationshipCounts(username);
+      if (!initialCounts) fail('profile-count-unavailable', 'Keep the exact Followers and Following totals visible on the open profile, then try again.');
+      onProgress?.({ phase: 'native-lists', username, expectedCounts: initialCounts, found: 0, listType: null });
+      for (const type of types) {
+        activeListType = type;
+        const header = assertContext();
+        const controls = [...header.querySelectorAll('a[role="link"], a[href="#"]')].filter(control => {
+          if (!rendered(control) || !new RegExp(`^[0-9][0-9., \\u00a0\\u202f]*[kmb]?\\s+${type}$`, 'i').test(visibleText(control).trim())) return false;
+          const href = control.getAttribute('href');
+          if (href === '#') return true;
+          try {
+            const target = new URL(href, INSTAGRAM_WEB_ORIGIN);
+            return target.origin === INSTAGRAM_WEB_ORIGIN && !target.username && !target.password && !target.search && !target.hash
+              && [`/${username}`, `/${username}/${type}`].includes(target.pathname.replace(/\/+$/, '').toLowerCase());
+          } catch { return false; }
+        });
+        if (controls.length !== 1 || !Number.isSafeInteger(exactProfileListCount(type, { requireScoped: true }))) {
+          fail('native-list-control-unavailable', `Open the exact @${username} profile with a single visible ${type} control, then try again.`);
+        }
+        const readinessDeadline = Date.now() + RELATIONSHIP_REQUEST_TIMEOUT_MS;
+        const captureGuard = globalThis.InstaToolboxInstagramViewer?.captureNativeListReadGuard;
+        const openingGuard = typeof captureGuard === 'function' ? captureGuard({ document, location,
+          profileHeader: header, username, listType: type, actor: viewer, readSession: inspectSession,
+          deadline: readinessDeadline,
+          isActive() {
+            assertRelationshipRunActive(signal, startedAt, now, maxDurationMs);
+            return true;
+          } }) : null;
+        if (typeof captureGuard === 'function' && !openingGuard) {
+          fail('profile-mismatch', 'The native read could not retain its exact account and profile context.');
+        }
+        if (openingGuard) onNativeReadContext?.({ phase: 'opening',
+          validate: () => openingGuard.check().phase !== 'invalid' });
+        assertContext();
+        controls[0].click();
+        const modal = await waitFor(() => {
+          assertRelationshipRunActive(signal, startedAt, now, maxDurationMs);
+          if (openingGuard) {
+            const opening = openingGuard.check();
+            if (opening.phase === 'invalid') fail('native-dialog-changed', 'The account, profile, or native opening dialog changed. Read stopped.');
+            if (opening.phase === 'timeout') fail('native-list-loading-timeout', `Instagram's ${type} list is still loading. Let it finish loading, close it, then retry from this profile.`);
+            if (opening.phase !== 'ready') return null;
+            assertContext(opening.dialog);
+            return opening.dialog;
+          }
+          const open = dialogs();
+          if (!open.length) return null;
+          if (open.length !== 1 || accountListDialog(type)?.dialog !== open[0]) {
+            fail('native-dialog-changed', `Instagram did not open the exact ${type} list. No other list was opened.`);
+          }
+          assertContext(open[0]);
+          return open[0];
+        }, Math.max(1, readinessDeadline - Date.now()), signal);
+        if (!modal) {
+          assertRelationshipRunActive(signal, startedAt, now, maxDurationMs);
+          fail('native-list-loading-timeout', `Instagram's ${type} list is still loading. Let it finish loading, close it, then retry from this profile.`);
+        }
+        assertContext(modal);
+        // The caller must recheck normal actor-scoped storage continuity before
+        // this fully qualified list can yield any observed rows.
+        onNativeReadContext?.({ phase: 'ready' });
+        const listController = new AbortController();
+        const stopList = () => listController.abort();
+        signal?.addEventListener?.('abort', stopList, { once: true });
+        let limited = false;
+        let contextError = null;
+        let scanned;
+        try {
+          scanned = await collectAccountList({ listType: type, signal: listController.signal,
+            initialReadinessMs: RELATIONSHIP_REQUEST_TIMEOUT_MS,
+            initialReadinessDeadline: readinessDeadline,
+            validateContext() {
+              try { assertContext(modal); }
+              catch (error) { contextError = error; return false; }
+              return true;
+            },
+            onProgress(progress) {
+              onProgress?.({ ...progress, found: Math.min(progress.found, maxAccounts), phase: 'native-reading', username });
+              if (progress.found >= maxAccounts) { limited = true; listController.abort(); }
+            } });
+        } finally { signal?.removeEventListener?.('abort', stopList); }
+        if (scanned.profilePath === initialPath && scanned.listType === type) {
+          lists[type] = { ...scanned, accounts: scanned.accounts.slice(0, maxAccounts),
+            complete: scanned.complete === true && !limited,
+            reason: limited ? 'account-limit' : scanned.reason };
+        }
+        if (contextError) throw contextError;
+        assertContext(modal);
+        if (scanned.reason === 'list-loading-timeout') {
+          fail('native-list-loading-timeout', `Instagram's ${type} list is still loading. Let this list finish loading, close it, then retry the read from the same profile.`);
+        }
+        if (!lists[type] || ['profile-changed', 'list-changed', 'list-closed', 'session-stop', 'stopped'].includes(scanned.reason) && !limited) {
+          fail('native-dialog-changed', 'The native list changed before the check finished.');
+        }
+        const closeControls = [...modal.querySelectorAll('button, [role="button"]')].filter(control => rendered(control)
+          && [control.getAttribute('aria-label'), visibleText(control),
+            ...[...control.querySelectorAll('[aria-label]')].map(node => node.getAttribute('aria-label'))]
+            .some(label => /^close$/i.test(String(label || '').trim())));
+        if (closeControls.length !== 1) fail('native-close-unavailable', 'Close the native list normally before checking again.');
+        assertContext(modal);
+        closeControls[0].click();
+        const closed = await waitFor(() => {
+          assertRelationshipRunActive(signal, startedAt, now, maxDurationMs);
+          const open = dialogs();
+          if (!open.length) { assertContext(); return true; }
+          if (open.length !== 1 || open[0] !== modal) fail('native-dialog-changed', 'The native dialog changed. Check stopped.');
+          return false;
+        }, 6_000, signal);
+        if (!closed) {
+          assertRelationshipRunActive(signal, startedAt, now, maxDurationMs);
+          fail('native-close-unavailable', 'Close the native list normally before checking again.');
+        }
+      }
+      assertContext();
+      return result();
+    } catch (error) {
+      if (types.some(type => lists[type]?.accounts.length)) {
+        error.partialResult = result(signal?.aborted || error?.code === 'stopped' ? 'stopped'
+          : error?.code === 'native-list-loading-timeout' ? 'native-list-loading-timeout' : 'native-context-changed');
+      }
+      throw error;
+    } finally {
+      onNativeReadContext?.(null);
+    }
   }
 
   // Enumerates messages the signed-in account sent in the open conversation.

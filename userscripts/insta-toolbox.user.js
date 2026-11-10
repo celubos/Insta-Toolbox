@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta Toolbox
 // @namespace    https://github.com/slaveofsolace/Insta-Toolbox
-// @version      4.3.1
+// @version      4.3.10
 // @description  Mutual Checker, Presence, and DM Unsend on Instagram.
 // @author       @slaveofsolace
 // @homepageURL  https://github.com/slaveofsolace/Insta-Toolbox
@@ -12,6 +12,10 @@
 // @license      MIT
 // @match        https://www.instagram.com/*
 // @sandbox      DOM
+// @grant        GM.getValue
+// @grant        GM.setValue
+// @grant        GM.listValues
+// @grant        GM.deleteValue
 // @grant        GM_getTab
 // @grant        GM_getValue
 // @grant        GM_addValueChangeListener
@@ -115,7 +119,10 @@
       '--insta-toolbox-bg-raised': 'rgb(var(--ig-elevated-background, 255 255 255))',
       '--insta-toolbox-bg-sunken': 'rgb(var(--ig-secondary-background, 250 250 250))',
       '--insta-toolbox-text': 'rgb(var(--ig-primary-text, 0 0 0))',
-      '--insta-toolbox-text-muted': 'rgb(var(--ig-secondary-text, 115 115 115))',
+      // The panel can overlap dark media on a light page, or the reverse.
+      // Move Instagram's secondary text toward its primary text so the
+      // translucent default surface retains readable secondary copy.
+      '--insta-toolbox-text-muted': 'color-mix(in srgb, rgb(var(--ig-secondary-text, 115 115 115)) 80%, rgb(var(--ig-primary-text, 0 0 0)))',
       '--insta-toolbox-line': 'rgb(var(--ig-separator, 219 219 219))',
       '--insta-toolbox-accent': '#b83d67',
       '--insta-toolbox-accent-violet': '#7657d6',
@@ -124,6 +131,9 @@
       '--insta-toolbox-success': 'rgb(var(--ig-success, 0 148 84))',
       '--insta-toolbox-warning': '#b26a00',
       '--insta-toolbox-danger': 'rgb(var(--ig-error-or-destructive, 237 73 86))',
+      // Filled controls need stronger contrast than Instagram's alert red.
+      '--insta-toolbox-danger-fill': '#b42331',
+      '--insta-toolbox-on-danger': '#fff',
       // Deliberately not the danger colour: an uncertain outcome may well have
       // succeeded, and colouring it as a failure would assert what we do not know.
       '--insta-toolbox-uncertain': '#7a5cc4',
@@ -221,7 +231,7 @@
     const selector = (theme) => scope === ':host'
       ? `:host([data-theme-preference="${theme}"])`
       : `${scope}[data-theme-preference="${theme}"]`;
-    return `${selector('light')} { --insta-toolbox-bg:#fff; --insta-toolbox-bg-raised:#fff; --insta-toolbox-bg-sunken:#fafafa; --insta-toolbox-text:#171717; --insta-toolbox-text-muted:#666; --insta-toolbox-line:#dbdbdb; color-scheme:light; }
+    return `${selector('light')} { --insta-toolbox-bg:#fff; --insta-toolbox-bg-raised:#fff; --insta-toolbox-bg-sunken:#fafafa; --insta-toolbox-text:#171717; --insta-toolbox-text-muted:#606060; --insta-toolbox-line:#dbdbdb; color-scheme:light; }
 ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2023; --insta-toolbox-bg-sunken:#17181a; --insta-toolbox-text:#f3f3f3; --insta-toolbox-text-muted:#b3b3b3; --insta-toolbox-line:#36383c; color-scheme:dark; }`;
   }
 
@@ -369,13 +379,14 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
     const confirmButton = query('confirm-accept');
     let pending = null;
 
-    function renderList(role, values) {
+    function renderList(role, values, itemLimit = 250) {
       const list = query(role);
       if (!list) return;
+      const limit = Number.isInteger(itemLimit) && itemLimit > 0 ? Math.min(itemLimit, 1_000) : 250;
       const items = (Array.isArray(values) ? values : [])
         .map((value) => cleanText(value))
         .filter(Boolean)
-        .slice(0, 250);
+        .slice(0, limit);
       list.replaceChildren(...items.map((value) => {
         const item = root.ownerDocument.createElement('li');
         item.textContent = value;
@@ -436,7 +447,7 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
       if (detail) detail.textContent = cleanText(request.detail, 'This cannot be undone.');
       confirmButton.textContent = cleanText(request.confirmLabel, 'Confirm');
       renderFacts(request.facts);
-      renderList('confirm-items', request.items);
+      renderList('confirm-items', request.items, request.itemLimit);
 
       const binding = immutableCopy(request.binding || {});
       return new Promise((resolve) => {
@@ -3560,6 +3571,17 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
   }
 
   function detectAuthenticatedUsername() {
+    const viewer = globalThis.InstaToolboxInstagramViewer;
+    if ('InstaToolboxInstagramViewer' in globalThis) {
+      // Feed and story avatars identify their authors, not the signed-in
+      // account. Use the same current navigation proof as the action runners.
+      // An unavailable verifier must never fall back to those unrelated rows.
+      if (typeof viewer?.inspect !== 'function') return '';
+      try {
+        const account = viewer.inspect({ document, location, session: inspectSession() });
+        return account.accountVerified === true ? normalizeUsername(account.accountId) : '';
+      } catch { return ''; }
+    }
     const candidates = new Set();
     const anchors = [
       ...document.querySelectorAll('a[href]'),
@@ -3786,7 +3808,9 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
             if (attemptSignal.aborted) throw error;
             if (error?.code === 'request-timeout' || error?.code === 'stopped') throw error;
             if (!response.ok) {
-              throw relationshipError('request-failed', `Instagram could not load this account request (HTTP ${response.status || 'error'}).`);
+              throw Object.assign(relationshipError('request-failed', `Instagram could not load this account request (HTTP ${response.status || 'error'}).`), {
+                httpStatus: response.status,
+              });
             }
             throw relationshipError('invalid-response', 'Instagram returned an invalid account response. Reload your profile before trying again.');
           }
@@ -3804,7 +3828,9 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
             throw relationshipError('action-blocked', 'Instagram restricted activity.');
           }
           if (!response.ok || data?.status === 'fail') {
-            throw relationshipError('request-failed', `Instagram could not load this follower page (HTTP ${response.status || 'error'}).`);
+            throw Object.assign(relationshipError('request-failed', `Instagram could not load this follower page (HTTP ${response.status || 'error'}).`), {
+              httpStatus: response.status,
+            });
           }
           return data;
         }, { clearTimer, setTimer, signal, timeoutMs: requestTimeoutMs });
@@ -3872,39 +3898,63 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
     return /^[1-9]\d{0,29}$/.test(id) ? id : '';
   }
 
-  async function resolveRelationshipUserId(username, options) {
-    const url = new URL('/api/v1/web/search/topsearch/', INSTAGRAM_WEB_ORIGIN);
-    url.searchParams.set('context', 'blended');
-    url.searchParams.set('query', username);
-    url.searchParams.set('include_reel', 'false');
-    const data = await fetchInstagramRelationshipJson(url, options);
-    const exact = (Array.isArray(data?.users) ? data.users : [])
-      .map((entry) => entry?.user)
-      .find((user) => normalizeUsername(user?.username) === username);
-    const userId = String(exact?.pk || '').trim();
-    if (!/^\d+$/.test(userId)) {
-      throw relationshipError('username-not-found', `Instagram could not resolve @${username}.`);
-    }
-    return {
-      userId,
-      ...(normalizeObservedInstagramId(exact?.pk)
-        ? { subjectInstagramId: normalizeObservedInstagramId(exact.pk) } : {}),
-    };
-  }
-
-  async function resolveRelationshipProfileCounts(username, userId, options) {
-    const url = new URL('/api/v1/users/web_profile_info/', INSTAGRAM_WEB_ORIGIN);
-    url.searchParams.set('username', username);
-    const data = await fetchInstagramRelationshipJson(url, options);
-    const profile = data?.data?.user;
-    const resolvedUsername = normalizeUsername(profile?.username);
-    const resolvedUserId = String(profile?.id || profile?.pk || '').trim();
-    if (resolvedUsername !== username || resolvedUserId !== userId) {
+  function boundRelationshipProfileId(profile, username, expectedUserId = '') {
+    const profileUsername = typeof profile?.username === 'string' ? profile.username.trim().toLowerCase() : '';
+    const suppliedIds = [profile?.id, profile?.pk].filter((value) => value !== undefined && value !== null);
+    const ids = suppliedIds.map(normalizeObservedInstagramId);
+    if (profileUsername !== username || !ids.length || ids.some((id) => !id)
+      || new Set(ids).size !== 1 || (expectedUserId && ids[0] !== expectedUserId)) {
       throw relationshipError(
         'profile-mismatch',
         `Instagram did not return the exact profile counters for @${username}. The previous comparison is unchanged.`,
       );
     }
+    return ids[0];
+  }
+
+  async function fetchRelationshipProfile(username, options) {
+    const url = new URL('/api/v1/users/web_profile_info/', INSTAGRAM_WEB_ORIGIN);
+    url.searchParams.set('username', username);
+    const data = await fetchInstagramRelationshipJson(url, options);
+    return data?.data?.user;
+  }
+
+  async function resolveRelationshipUserId(username, options) {
+    const url = new URL('/api/v1/web/search/topsearch/', INSTAGRAM_WEB_ORIGIN);
+    url.searchParams.set('context', 'blended');
+    url.searchParams.set('query', username);
+    url.searchParams.set('include_reel', 'false');
+    let data;
+    try {
+      data = await fetchInstagramRelationshipJson(url, options);
+    } catch (error) {
+      // A retired lookup route is not an authentication or transport failure.
+      // Use only the already allowlisted profile GET, never another search path.
+      if (error?.code !== 'request-failed' || ![404, 410].includes(error.httpStatus)) throw error;
+      let profile;
+      try { profile = await fetchRelationshipProfile(username, options); }
+      catch (profileError) {
+        if (profileError?.code === 'request-failed' && [404, 410].includes(profileError.httpStatus)) {
+          profileError.lookupRoutesRetired = true;
+        }
+        throw profileError;
+      }
+      const userId = boundRelationshipProfileId(profile, username);
+      return { userId, subjectInstagramId: userId, profile };
+    }
+    const exact = (Array.isArray(data?.users) ? data.users : [])
+      .map((entry) => entry?.user)
+      .find((user) => normalizeUsername(user?.username) === username);
+    const userId = normalizeObservedInstagramId(exact?.pk);
+    if (!userId) {
+      throw relationshipError('username-not-found', `Instagram could not resolve @${username}.`);
+    }
+    return { userId, subjectInstagramId: userId };
+  }
+
+  async function resolveRelationshipProfileCounts(username, userId, options, resolvedProfile = null) {
+    const profile = resolvedProfile || await fetchRelationshipProfile(username, options);
+    boundRelationshipProfileId(profile, username, userId);
     const followers = relationshipCount(
       profile?.edge_followed_by?.count,
       profile?.follower_count,
@@ -4129,12 +4179,14 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
   }
 
   async function fetchFollowerComparison({
+    allowNativeListFallback = false,
     clearTimer = clearTimeout,
     fetchImpl = globalThis.fetch?.bind(globalThis),
     maxAccounts = RELATIONSHIP_MAX_ACCOUNTS,
     maxDurationMs = RELATIONSHIP_MAX_DURATION_MS,
     maxPages = RELATIONSHIP_MAX_PAGES,
     now = Date.now,
+    onNativeReadContext = null,
     onProgress = null,
     random = Math.random,
     requestAttempts = RELATIONSHIP_REQUEST_ATTEMPTS,
@@ -4185,6 +4237,7 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
         maxDurationMs: boundedDuration,
         maxPages: boundedPages,
         now,
+        onNativeReadContext,
         onProgress,
         random,
         requestAttempts: boundedAttempts,
@@ -4197,13 +4250,15 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
         startedAt,
       };
       const openProfileCounts = openProfileRelationshipCounts(username);
-      const resolution = await resolveRelationshipUserId(username, {
-        ...common,
-        found: 0,
-        listType: null,
-        pages: 0,
-        username,
-      });
+      let resolution;
+      try {
+        resolution = await resolveRelationshipUserId(username, {
+          ...common, found: 0, listType: null, pages: 0, username,
+        });
+      } catch (error) {
+        if (allowNativeListFallback !== true || error?.lookupRoutesRetired !== true) throw error;
+        return await collectNativeFollowerComparison({ ...common, username });
+      }
       const { userId } = resolution;
       onProgress?.(Object.freeze({ found: 0, listType: null, pages: 0, phase: 'verifying-profile', username }));
       const profileCountsAtStart = openProfileCounts || await resolveRelationshipProfileCounts(username, userId, {
@@ -4212,7 +4267,7 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
         listType: null,
         pages: 0,
         username,
-      });
+      }, resolution.profile);
       onProgress?.(Object.freeze({
         expectedCounts: profileCountsAtStart,
         found: 0,
@@ -4289,7 +4344,8 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
       return result;
     } catch (error) {
       if (deadline.timedOut() && error?.code === 'stopped') {
-        throw relationshipError('time-limit', 'The follower check reached its 20-minute read limit.');
+        throw Object.assign(relationshipError('time-limit', 'The follower check reached its 20-minute read limit.'),
+          error.partialResult ? { partialResult: error.partialResult } : {});
       }
       throw error;
     } finally {
@@ -4299,7 +4355,8 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
 
   function normalizeFollowerDiagnostics(value) {
     const reasons = new Set(['pagination-complete', 'instagram-limited-list', 'cursor-missing',
-      'count-mismatch', 'count-unverified', 'count-changed', 'profile-count-disagreement', 'account-limit', 'page-limit']);
+      'count-mismatch', 'count-unverified', 'count-changed', 'profile-count-disagreement', 'account-limit', 'page-limit',
+      'native-list-complete', 'native-list-truncated', 'stopped', 'native-context-changed', 'native-list-loading-timeout']);
     const count = (number) => Number.isSafeInteger(number) && number >= 0 ? number : null;
     return {
       expectedCounts: Object.fromEntries(['followers', 'following'].map((type) => [type, count(value?.expectedCounts?.[type])])),
@@ -4327,6 +4384,11 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
         'profile-count-disagreement': 'Instagram profile counters disagreed.',
         'account-limit': 'The bounded account read limit was reached.',
         'page-limit': 'The bounded page read limit was reached.',
+        'native-list-complete': 'The native list finished and fresh profile totals matched.',
+        'native-list-truncated': 'The native list ended before all accounts could be verified.',
+        stopped: 'The native read was stopped; this is a partial capture.',
+        'native-context-changed': 'The native profile or list changed during the read.',
+        'native-list-loading-timeout': 'The native list did not finish its initial loading before the read deadline.',
       };
       return [`${label}: ${count}. ${explanations[reason]}`];
     });
@@ -5523,11 +5585,41 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
   function exactProfileListCount(listType, { requireScoped = false } = {}) {
     if (listType !== 'followers' && listType !== 'following') return null;
     const profileUsername = normalizeUsername(location.pathname);
-    const profileHeader = requireScoped ? verifiedProfileHeader(profileUsername).root : null;
+    const profileHeader = verifiedProfileHeader(profileUsername).root;
+    const backdrop = profileHeader?.closest?.('[aria-hidden="true"]');
+    const rendered = (element, allowedBackdrop = null) => {
+      if (element?.isConnected !== true || !element.getClientRects?.().length) return false;
+      for (let current = element; current; current = current.parentElement) {
+        if (current.hidden || (current.getAttribute?.('aria-hidden') === 'true'
+          && current !== allowedBackdrop)) return false;
+        const style = getComputedStyle(current);
+        if (style.display === 'none' || ['hidden', 'collapse'].includes(style.visibility)
+          || (style.opacity !== undefined && style.opacity !== '' && Number(style.opacity) === 0)) return false;
+      }
+      return true;
+    };
+    // A native list modal can aria-hide its still-rendered profile backdrop.
+    // Re-read only that current owner's header; hidden or cached totals are
+    // not evidence of completeness, and an unrelated modal grants no exception.
+    const exactProfileRoute = location.origin === INSTAGRAM_WEB_ORIGIN
+      && /^\/[a-z0-9._]+\/?$/i.test(location.pathname);
+    const dialogs = backdrop && exactProfileRoute && backdrop !== profileHeader
+      ? visibleDialogs().filter(dialog => rendered(dialog)) : [];
+    const modal = dialogs.length === 1
+      && accountListDialog(listType)?.dialog === dialogs[0] ? dialogs[0] : null;
+    const verifiedBackdrop = Boolean(modal && !backdrop.contains(modal)
+      && rendered(profileHeader, backdrop)
+      && [...profileHeader.querySelectorAll('a[href], h1, h2, [role="heading"]')]
+        .some(element => normalizeUsername(visibleText(element)) === profileUsername
+          && rendered(element, backdrop)));
     const scopedCounts = new Set();
     const fallbackCounts = new Set();
     for (const link of document.querySelectorAll('a[role="link"], a[href="#"]')) {
-      if (!visibleText(link) || link.closest?.('[hidden], [aria-hidden="true"], [role="dialog"]')) continue;
+      const backdropCount = verifiedBackdrop && profileHeader.contains(link)
+        && link.closest?.('[aria-hidden="true"]') === backdrop
+        && rendered(link, backdrop);
+      if (!visibleText(link) || (link.closest?.('[hidden], [aria-hidden="true"], [role="dialog"]')
+        && !backdropCount)) continue;
       const values = [
         link.getAttribute('title'),
         visibleText(link),
@@ -5550,7 +5642,7 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
         if (!digits) continue;
         const count = Number(digits);
         if (!Number.isSafeInteger(count)) continue;
-        fallbackCounts.add(count);
+        if (!backdropCount) fallbackCounts.add(count);
         const href = link.getAttribute?.('href');
         if (!href || !profileUsername) continue;
         // Instagram also renders profile counters as non-navigation links.
@@ -5561,11 +5653,13 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
         }
         try {
           const target = new URL(href, INSTAGRAM_WEB_ORIGIN);
-          if (target.origin !== INSTAGRAM_WEB_ORIGIN) continue;
+          if (target.origin !== INSTAGRAM_WEB_ORIGIN || target.username || target.password) continue;
+          if (backdropCount && (target.search || target.hash)) continue;
           const pathname = target.pathname
             .replace(/\/+$/, '')
             .toLowerCase();
-          if (pathname === `/${profileUsername}/${listType}`) scopedCounts.add(count);
+          if (pathname === `/${profileUsername}/${listType}`
+            || (pathname === `/${profileUsername}` && profileHeader?.contains(link))) scopedCounts.add(count);
         } catch {
           // Ignore malformed, non-navigation values such as JavaScript URLs.
         }
@@ -5576,13 +5670,26 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
     return null;
   }
 
-  function sleep(ms) {
-    return new Promise((resolve) => { setTimeout(resolve, ms); });
+  function sleep(ms, signal) {
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) { reject(relationshipError('stopped', 'List scan stopped.')); return; }
+      const stop = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener?.('abort', stop);
+        reject(relationshipError('stopped', 'List scan stopped.'));
+      };
+      const timer = setTimeout(() => {
+        signal?.removeEventListener?.('abort', stop);
+        resolve();
+      }, ms);
+      signal?.addEventListener?.('abort', stop, { once: true });
+    });
   }
 
   // Scrolls the open followers/following dialog to enumerate the full list.
   // Read-only: it only scrolls an already-open list and reads rendered rows.
-  async function collectAccountList({ maxScrolls = 1_200, settleMs = 500, listType = '' } = {}) {
+  async function collectAccountList({ maxScrolls = 1_200, settleMs = 500, listType = '', signal, onProgress,
+    validateContext = null, initialReadinessMs = 0, initialReadinessDeadline = null } = {}) {
     const session = inspectSession();
     if (session.sessionExpired || session.challenge || session.actionBlocked || session.rateLimited) {
       return { ...session, accounts: [], complete: false, reason: 'session-stop' };
@@ -5597,10 +5704,38 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
     const observedListType = listContext?.listType || expectedListType;
     expectedListType = observedListType;
     const profilePath = location.pathname;
-    const expectedCountAtStart = exactProfileListCount(observedListType);
-
+    const profileUsername = normalizeUsername(profilePath);
+    const ownerHeaderPresent = () => {
+      const header = verifiedProfileHeader(profileUsername).root;
+      return Boolean(header?.isConnected && header.getClientRects?.().length
+        && [...header.querySelectorAll('a[href], h1, h2, [role="heading"]')]
+          .some(element => normalizeUsername(visibleText(element)) === profileUsername
+            && element.isConnected && element.getClientRects?.().length));
+    };
+    const ownerHeaderAtStart = ownerHeaderPresent();
+    const expectedCountAtStart = exactProfileListCount(observedListType, { requireScoped: true });
     const accounts = new Map();
+    let stopReason = '';
+    let stoppedSession = null;
+    let reportedCount = -1;
+    const currentContext = () => {
+      if (signal?.aborted) { stopReason = 'stopped'; return null; }
+      if (validateContext !== null && (typeof validateContext !== 'function' || validateContext() !== true)) {
+        stopReason = 'profile-changed'; return null;
+      }
+      if (location.pathname !== profilePath) { stopReason = 'profile-changed'; return null; }
+      if (ownerHeaderAtStart && !ownerHeaderPresent()) { stopReason = 'profile-changed'; return null; }
+      const check = inspectSession();
+      if (check.sessionExpired || check.challenge || check.actionBlocked || check.rateLimited) {
+        stopReason = 'session-stop'; stoppedSession = check; return null;
+      }
+      const context = accountListDialog(expectedListType);
+      if (!context) stopReason = accountListDialog() ? 'list-changed' : 'list-closed';
+      return context;
+    };
     const harvest = () => {
+      const context = currentContext();
+      if (!context || context.dialog !== root) return false;
       for (const anchor of root.querySelectorAll('a[href^="/"]')) {
         const username = normalizeUsername(anchor.getAttribute('href'));
         if (!username || accounts.has(username)) continue;
@@ -5612,131 +5747,405 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
           source: 'extension-scrolled-dom',
         });
       }
+      if (accounts.size !== reportedCount && !signal?.aborted) {
+        reportedCount = accounts.size;
+        onProgress?.({ listType: observedListType, found: accounts.size, expectedCount: expectedCountAtStart });
+      }
+      return true;
     };
-
-    harvest();
-    // Recycled rows cannot all exist in the DOM at once. Start at the top and
-    // retain each window before advancing by less than one viewport.
-    if (scroller) {
-      scroller.scrollTop = 0;
-      await sleep(settleMs);
-    }
-    let complete = !scroller
-      && Number.isSafeInteger(expectedCountAtStart)
-      && accounts.size === expectedCountAtStart;
-    let stagnantRounds = 0;
-    for (let round = 0; round < maxScrolls; round += 1) {
-      const currentContext = accountListDialog(expectedListType);
-      if (!currentContext || location.pathname !== profilePath) {
-        complete = false;
-        break;
-      }
-      const currentRoot = currentContext.dialog;
-      const currentScroller = scrollableWithin(currentRoot);
-      if (currentRoot !== root || currentScroller !== scroller) {
-        listContext = currentContext;
-        root = currentRoot;
-        scroller = currentScroller;
-        stagnantRounds = 0;
-        if (scroller) {
-          scroller.scrollTop = 0;
-          await sleep(settleMs);
+    const settle = (ms) => sleep(ms, signal);
+    const readinessMs = Math.max(0, Math.min(RELATIONSHIP_REQUEST_TIMEOUT_MS, Math.trunc(Number(initialReadinessMs) || 0)));
+    const visibleLoading = () => {
+      const indicators = [...root.querySelectorAll('[role="progressbar"], svg[aria-label*="Loading" i], [aria-busy="true"]')];
+      if (root.getAttribute('aria-busy') === 'true') indicators.push(root);
+      return indicators.some(node => {
+        if (node.isConnected !== true || !node.getClientRects?.().length) return false;
+        for (let current = node; current; current = current.parentElement) {
+          const style = getComputedStyle(current);
+          if (current.hidden || current.getAttribute?.('aria-hidden') === 'true' || style.display === 'none'
+            || ['hidden', 'collapse'].includes(style.visibility)
+            || (style.opacity !== undefined && style.opacity !== '' && Number(style.opacity) === 0)) return false;
         }
-        harvest();
-      }
-      harvest();
-      if (!scroller) {
-        complete = Number.isSafeInteger(expectedCountAtStart)
-          && accounts.size === expectedCountAtStart;
-        break;
-      }
-      const beforeCount = accounts.size;
-      const beforeHeight = scroller.scrollHeight;
-      const beforeTop = scroller.scrollTop;
-      // Nudge only at the end to trigger a stalled lazy-loading sentinel.
-      if (scroller.scrollTop >= scroller.scrollHeight - scroller.clientHeight - 8) {
-        scroller.scrollTop = Math.max(
-          0,
-          scroller.scrollTop - Math.max(80, Math.floor(scroller.clientHeight / 2)),
-        );
-        await sleep(settleMs);
-        harvest();
-      }
-      scroller.scrollTop = Math.min(
-        Math.max(0, scroller.scrollHeight - scroller.clientHeight),
-        beforeTop + Math.max(1, Math.floor(scroller.clientHeight * 0.75)),
-      );
-      await sleep(settleMs);
-      // A long Followers list keeps a spinner up well past the settle delay.
-      // Waiting for it to clear is what stops a big list being declared
-      // complete while thousands of rows are still unfetched.
-      let loading = false;
-      for (let wait = 0; wait < 24; wait += 1) {
-        loading = Boolean(root.querySelector('[role="progressbar"], svg[aria-label*="Loading" i]'));
-        if (!loading) break;
-        await sleep(250);
-      }
-      const settledContext = accountListDialog(expectedListType);
-      if (location.pathname !== profilePath || !settledContext) {
-        complete = false;
-        break;
-      }
-      if (settledContext.dialog !== root || scrollableWithin(root) !== scroller) continue;
-      harvest();
-
-      const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 8;
-      const grew = accounts.size > beforeCount || scroller.scrollHeight > beforeHeight;
-      stagnantRounds = grew || loading ? 0 : stagnantRounds + 1;
-      const check = inspectSession();
-      if (check.sessionExpired || check.challenge || check.actionBlocked || check.rateLimited) {
-        return {
-          ...check,
-          accounts: [...accounts.values()],
-          complete: false,
-          reason: 'session-stop',
+        const rect = element => {
+          const box = element?.getBoundingClientRect?.();
+          return box && ['top', 'bottom', 'left', 'right'].every(key => Number.isFinite(box[key])) ? box : null;
         };
+        const box = rect(node);
+        if (box) {
+          let top = box.top, bottom = box.bottom, left = box.left, right = box.right;
+          const clip = (bounds, vertical = true, horizontal = true) => {
+            if (!bounds) return;
+            if (vertical) { top = Math.max(top, bounds.top); bottom = Math.min(bottom, bounds.bottom); }
+            if (horizontal) { left = Math.max(left, bounds.left); right = Math.min(right, bounds.right); }
+          };
+          clip(rect(root));
+          for (let parent = node.parentElement; parent && parent !== root; parent = parent.parentElement) {
+            const style = getComputedStyle(parent);
+            clip(rect(parent), /^(auto|scroll|hidden|clip)$/.test(style.overflowY || style.overflow || ''),
+              /^(auto|scroll|hidden|clip)$/.test(style.overflowX || style.overflow || ''));
+          }
+          if (Number.isFinite(globalThis.innerHeight) && globalThis.innerHeight > 0) {
+            top = Math.max(0, top); bottom = Math.min(globalThis.innerHeight, bottom);
+          }
+          if (Number.isFinite(globalThis.innerWidth) && globalThis.innerWidth > 0) {
+            left = Math.max(0, left); right = Math.min(globalThis.innerWidth, right);
+          }
+          if (bottom <= top || right <= left) return false;
+        }
+        return true;
+      });
+    };
+    const awaitInitialReadiness = async () => {
+      const deadline = Math.min(Date.now() + readinessMs,
+        Number.isFinite(initialReadinessDeadline) ? initialReadinessDeadline : Infinity);
+      let emptySince = null;
+      while (true) {
+        const context = currentContext();
+        if (!context) return false;
+        if (context.dialog !== root) { stopReason = 'list-changed'; return false; }
+        scroller = scrollableWithin(root);
+        if (!harvest() || !currentContext()) return false;
+        // Real rows and a scroll owner can be read while a trailing lazy-load
+        // sentinel is mounted. This starts collection; it does not prove an end.
+        if (accounts.size > 0 && scroller) return true;
+        const loading = visibleLoading();
+        const empty = !loading && expectedCountAtStart === 0 && accounts.size === 0;
+        if (!empty) emptySince = null;
+        else emptySince ??= Date.now();
+        // A mounted dialog can precede both rows and its scrolling owner.
+        // Exact small lists need no scroller; an exact zero must survive a
+        // rendering turn without a visible loader. Neither changes end proof.
+        if (!loading && (accounts.size > 0 && accounts.size === expectedCountAtStart
+          || emptySince !== null && Date.now() - emptySince >= 100)) return true;
+        if (Date.now() >= deadline) { stopReason = 'list-loading-timeout'; return false; }
+        await settle(Math.min(100, deadline - Date.now()));
       }
-      if (atBottom && !loading
-        && Number.isSafeInteger(expectedCountAtStart)
-        && accounts.size === expectedCountAtStart) {
-        complete = true;
-        break;
+    };
+    let complete = false;
+    let stagnantRounds = 0;
+    const scan = async () => {
+      if (!harvest() || !currentContext()) return;
+      if (readinessMs && !await awaitInitialReadiness()) return;
+      // Recycled rows cannot all exist in the DOM at once. Start at the top and
+      // retain each window before advancing by less than one viewport.
+      if (scroller) {
+        scroller.scrollTop = 0;
+        await settle(settleMs);
       }
-      // Instagram lazy-loads in bursts and can pause between pages, so a couple
-      // of quiet rounds does not mean the end. Be patient before concluding.
-      if (atBottom && !loading && stagnantRounds >= 10) {
-        break;
-      }
-    }
+      for (let round = 0; round < maxScrolls; round += 1) {
+        const context = currentContext();
+        if (!context) return;
+        const currentRoot = context.dialog;
+        const currentScroller = scrollableWithin(currentRoot);
+        if (currentRoot !== root || currentScroller !== scroller) {
+          listContext = context;
+          root = currentRoot;
+          scroller = currentScroller;
+          stagnantRounds = 0;
+          if (scroller) {
+            scroller.scrollTop = 0;
+            await settle(settleMs);
+          }
+        }
+        if (!harvest()) { if (stopReason) return; continue; }
+        if (!currentContext()) return;
+        if (!scroller) {
+          complete = Number.isSafeInteger(expectedCountAtStart)
+            && accounts.size === expectedCountAtStart;
+          return;
+        }
+        const beforeCount = accounts.size;
+        const beforeHeight = scroller.scrollHeight;
+        const beforeTop = scroller.scrollTop;
+        // Nudge only at the end to trigger a stalled lazy-loading sentinel.
+        if (scroller.scrollTop >= scroller.scrollHeight - scroller.clientHeight - 8) {
+          scroller.scrollTop = Math.max(
+            0,
+            scroller.scrollTop - Math.max(80, Math.floor(scroller.clientHeight / 2)),
+          );
+          await settle(settleMs);
+          if (!harvest()) { if (stopReason) return; continue; }
+        }
+        if (!currentContext()) return;
+        scroller.scrollTop = Math.min(
+          Math.max(0, scroller.scrollHeight - scroller.clientHeight),
+          beforeTop + Math.max(1, Math.floor(scroller.clientHeight * 0.75)),
+        );
+        await settle(settleMs);
+        // A long Followers list keeps a spinner up well past the settle delay.
+        // Waiting for it to clear stops a big list being declared complete while
+        // thousands of rows are still unfetched. Stop also interrupts this wait.
+        let loading = false;
+        for (let wait = 0; wait < 24; wait += 1) {
+          const context = currentContext();
+          if (!context) return;
+          if (context.dialog !== root || scrollableWithin(root) !== scroller) break;
+          loading = readinessMs ? visibleLoading()
+            : Boolean(root.querySelector('[role="progressbar"], svg[aria-label*="Loading" i]'));
+          if (!loading) break;
+          await settle(250);
+        }
+        const settledContext = currentContext();
+        if (!settledContext) return;
+        if (settledContext.dialog !== root || scrollableWithin(root) !== scroller) continue;
+        if (!harvest() || !currentContext()) return;
 
-    const expectedCountAtEnd = exactProfileListCount(observedListType);
+        const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 8;
+        const grew = accounts.size > beforeCount || scroller.scrollHeight > beforeHeight;
+        stagnantRounds = grew || loading ? 0 : stagnantRounds + 1;
+        if (atBottom && !loading
+          && Number.isSafeInteger(expectedCountAtStart)
+          && accounts.size === expectedCountAtStart) {
+          complete = true;
+          return;
+        }
+        // Instagram lazy-loads in bursts and can pause between pages, so a couple
+        // of quiet rounds does not mean the end. Be patient before concluding.
+        if (atBottom && !loading && stagnantRounds >= 10) return;
+      }
+    };
+    try { await scan(); }
+    catch (error) {
+      if (signal?.aborted || error?.code === 'stopped') stopReason = 'stopped';
+      else throw error;
+    }
+    currentContext();
+    const expectedCountAtEnd = stopReason ? null : exactProfileListCount(observedListType, { requireScoped: true });
     const expectedCount = expectedCountAtEnd ?? expectedCountAtStart;
     const countChanged = Number.isSafeInteger(expectedCountAtStart)
       && Number.isSafeInteger(expectedCountAtEnd)
       && expectedCountAtStart !== expectedCountAtEnd;
     const countMismatch = Number.isSafeInteger(expectedCount)
       && accounts.size !== expectedCount;
-    if (countChanged || countMismatch || !Number.isSafeInteger(expectedCount)) complete = false;
+    const latestCountUnverified = !Number.isSafeInteger(expectedCountAtEnd);
+    if (stopReason || countChanged || countMismatch || latestCountUnverified) complete = false;
 
     return {
-      ...session,
+      ...(stoppedSession || session),
       accounts: [...accounts.values()]
         .sort((left, right) => left.username.localeCompare(right.username)),
       complete,
       listType: listContext?.listType || null,
       expectedCount,
       observedCount: accounts.size,
+      profilePath,
       capturedAt: new Date().toISOString(),
-      reason: countChanged
+      reason: stopReason || (countChanged
         ? 'list-count-changed'
-        : countMismatch
-          ? 'list-count-mismatch'
-          : !Number.isSafeInteger(expectedCount)
-            ? 'list-count-unverified'
+        : latestCountUnverified
+          ? 'list-count-unverified'
+          : countMismatch
+            ? 'list-count-mismatch'
             : complete
               ? 'list-complete'
-              : 'list-truncated',
+              : 'list-truncated'),
     };
+  }
+
+  // Used by explicit userscript native reads after both existing lookup GETs
+  // explicitly retire. These are native reads, never authenticated API evidence.
+  async function collectNativeFollowerComparison({ username, signal, onProgress, onNativeReadContext,
+    now, startedAt, maxDurationMs, maxAccounts }) {
+    const types = ['followers', 'following'];
+    const lists = {};
+    const initialPath = location.pathname;
+    const viewer = detectAuthenticatedUsername();
+    let ownerHeader = null;
+    let initialCounts = null;
+    let activeListType = '';
+    const readViewer = (modal = null) => {
+      const ordinary = detectAuthenticatedUsername();
+      if (ordinary || !modal) return ordinary;
+      try {
+        const account = globalThis.InstaToolboxInstagramViewer?.inspect?.({ document, location, session: inspectSession(),
+          nativeListDialog: { dialog: modal, profileHeader: ownerHeader, username, listType: activeListType } });
+        return account?.accountVerified === true ? normalizeUsername(account.accountId) : '';
+      } catch { return ''; }
+    };
+    const fail = (code, message) => { throw relationshipError(code, message); };
+    const rendered = (element) => {
+      if (element?.isConnected !== true || !element.getClientRects?.().length) return false;
+      for (let node = element; node; node = node.parentElement) {
+        const style = getComputedStyle(node);
+        if (node.hidden || node.getAttribute?.('aria-hidden') === 'true' || style.display === 'none'
+          || ['hidden', 'collapse'].includes(style.visibility)
+          || (style.opacity !== undefined && style.opacity !== '' && Number(style.opacity) === 0)) return false;
+      }
+      return true;
+    };
+    const dialogs = () => visibleDialogs().filter(rendered);
+    const assertContext = (modal = null) => {
+      assertRelationshipRunActive(signal, startedAt, now, maxDurationMs);
+      if (!viewer || readViewer(modal) !== viewer) fail('profile-mismatch', 'The signed-in account changed or could not be verified. Native check stopped.');
+      if (location.origin !== INSTAGRAM_WEB_ORIGIN || location.pathname !== initialPath
+        || !new RegExp(`^/${username.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/?$`, 'i').test(location.pathname)) {
+        fail('native-profile-required', `Open @${username}'s profile in this tab, then run Check mutuals again.`);
+      }
+      const header = verifiedProfileHeader(username).root;
+      if (!header || (ownerHeader && header !== ownerHeader) || !header.isConnected || !header.getClientRects?.().length) {
+        fail('profile-mismatch', 'Keep the exact profile header open until the native check finishes.');
+      }
+      const open = dialogs();
+      if (modal ? open.length !== 1 || open[0] !== modal : open.length !== 0) {
+        fail('native-dialog-changed', 'Close the open Instagram dialog, then run Check mutuals again from the profile.');
+      }
+      if (!modal && !rendered(header)) fail('profile-mismatch', 'The profile header is hidden. Open the profile before checking.');
+      return header;
+    };
+    const result = (interrupted = '') => {
+      const bound = location.origin === INSTAGRAM_WEB_ORIGIN && location.pathname === initialPath
+        && detectAuthenticatedUsername() === viewer && verifiedProfileHeader(username).root === ownerHeader;
+      const ending = initialCounts && bound ? Object.fromEntries(types.map(type => [type,
+        exactProfileListCount(type, { requireScoped: true })])) : {};
+      return Object.freeze({
+        username, source: 'list-dialog', capturedAt: new Date(now()).toISOString(),
+        followers: Object.freeze(lists.followers?.accounts || []), following: Object.freeze(lists.following?.accounts || []),
+        verified: Object.freeze(Object.fromEntries(types.map(type => [type, Boolean(lists[type])]))),
+        complete: Object.freeze(Object.fromEntries(types.map(type => [type, !interrupted && lists[type]?.complete === true
+          && Number.isSafeInteger(ending[type]) && ending[type] === initialCounts[type]
+          && lists[type].accounts.length === ending[type]]))),
+        expectedCounts: Object.freeze(Object.fromEntries(types.map(type => [type,
+          Number.isSafeInteger(ending[type]) ? ending[type] : initialCounts?.[type] ?? null]))),
+        pages: Object.freeze({ followers: null, following: null }),
+        reasons: Object.freeze(Object.fromEntries(types.map(type => {
+          const list = lists[type];
+          const reason = interrupted || (!list ? 'native-list-truncated'
+            : !Number.isSafeInteger(ending[type]) ? 'count-unverified'
+              : ending[type] !== initialCounts[type] || list.reason === 'list-count-changed' ? 'count-changed'
+                : list.reason === 'list-count-unverified' ? 'count-unverified'
+                : list.reason === 'account-limit' ? 'account-limit'
+                  : list.accounts.length !== ending[type] ? 'count-mismatch'
+                    : list.complete ? 'native-list-complete' : 'native-list-truncated');
+          return [type, reason];
+        }))),
+      });
+    };
+    try {
+      ownerHeader = assertContext();
+      initialCounts = openProfileRelationshipCounts(username);
+      if (!initialCounts) fail('profile-count-unavailable', 'Keep the exact Followers and Following totals visible on the open profile, then try again.');
+      onProgress?.({ phase: 'native-lists', username, expectedCounts: initialCounts, found: 0, listType: null });
+      for (const type of types) {
+        activeListType = type;
+        const header = assertContext();
+        const controls = [...header.querySelectorAll('a[role="link"], a[href="#"]')].filter(control => {
+          if (!rendered(control) || !new RegExp(`^[0-9][0-9., \\u00a0\\u202f]*[kmb]?\\s+${type}$`, 'i').test(visibleText(control).trim())) return false;
+          const href = control.getAttribute('href');
+          if (href === '#') return true;
+          try {
+            const target = new URL(href, INSTAGRAM_WEB_ORIGIN);
+            return target.origin === INSTAGRAM_WEB_ORIGIN && !target.username && !target.password && !target.search && !target.hash
+              && [`/${username}`, `/${username}/${type}`].includes(target.pathname.replace(/\/+$/, '').toLowerCase());
+          } catch { return false; }
+        });
+        if (controls.length !== 1 || !Number.isSafeInteger(exactProfileListCount(type, { requireScoped: true }))) {
+          fail('native-list-control-unavailable', `Open the exact @${username} profile with a single visible ${type} control, then try again.`);
+        }
+        const readinessDeadline = Date.now() + RELATIONSHIP_REQUEST_TIMEOUT_MS;
+        const captureGuard = globalThis.InstaToolboxInstagramViewer?.captureNativeListReadGuard;
+        const openingGuard = typeof captureGuard === 'function' ? captureGuard({ document, location,
+          profileHeader: header, username, listType: type, actor: viewer, readSession: inspectSession,
+          deadline: readinessDeadline,
+          isActive() {
+            assertRelationshipRunActive(signal, startedAt, now, maxDurationMs);
+            return true;
+          } }) : null;
+        if (typeof captureGuard === 'function' && !openingGuard) {
+          fail('profile-mismatch', 'The native read could not retain its exact account and profile context.');
+        }
+        if (openingGuard) onNativeReadContext?.({ phase: 'opening',
+          validate: () => openingGuard.check().phase !== 'invalid' });
+        assertContext();
+        controls[0].click();
+        const modal = await waitFor(() => {
+          assertRelationshipRunActive(signal, startedAt, now, maxDurationMs);
+          if (openingGuard) {
+            const opening = openingGuard.check();
+            if (opening.phase === 'invalid') fail('native-dialog-changed', 'The account, profile, or native opening dialog changed. Read stopped.');
+            if (opening.phase === 'timeout') fail('native-list-loading-timeout', `Instagram's ${type} list is still loading. Let it finish loading, close it, then retry from this profile.`);
+            if (opening.phase !== 'ready') return null;
+            assertContext(opening.dialog);
+            return opening.dialog;
+          }
+          const open = dialogs();
+          if (!open.length) return null;
+          if (open.length !== 1 || accountListDialog(type)?.dialog !== open[0]) {
+            fail('native-dialog-changed', `Instagram did not open the exact ${type} list. No other list was opened.`);
+          }
+          assertContext(open[0]);
+          return open[0];
+        }, Math.max(1, readinessDeadline - Date.now()), signal);
+        if (!modal) {
+          assertRelationshipRunActive(signal, startedAt, now, maxDurationMs);
+          fail('native-list-loading-timeout', `Instagram's ${type} list is still loading. Let it finish loading, close it, then retry from this profile.`);
+        }
+        assertContext(modal);
+        // The caller must recheck normal actor-scoped storage continuity before
+        // this fully qualified list can yield any observed rows.
+        onNativeReadContext?.({ phase: 'ready' });
+        const listController = new AbortController();
+        const stopList = () => listController.abort();
+        signal?.addEventListener?.('abort', stopList, { once: true });
+        let limited = false;
+        let contextError = null;
+        let scanned;
+        try {
+          scanned = await collectAccountList({ listType: type, signal: listController.signal,
+            initialReadinessMs: RELATIONSHIP_REQUEST_TIMEOUT_MS,
+            initialReadinessDeadline: readinessDeadline,
+            validateContext() {
+              try { assertContext(modal); }
+              catch (error) { contextError = error; return false; }
+              return true;
+            },
+            onProgress(progress) {
+              onProgress?.({ ...progress, found: Math.min(progress.found, maxAccounts), phase: 'native-reading', username });
+              if (progress.found >= maxAccounts) { limited = true; listController.abort(); }
+            } });
+        } finally { signal?.removeEventListener?.('abort', stopList); }
+        if (scanned.profilePath === initialPath && scanned.listType === type) {
+          lists[type] = { ...scanned, accounts: scanned.accounts.slice(0, maxAccounts),
+            complete: scanned.complete === true && !limited,
+            reason: limited ? 'account-limit' : scanned.reason };
+        }
+        if (contextError) throw contextError;
+        assertContext(modal);
+        if (scanned.reason === 'list-loading-timeout') {
+          fail('native-list-loading-timeout', `Instagram's ${type} list is still loading. Let this list finish loading, close it, then retry the read from the same profile.`);
+        }
+        if (!lists[type] || ['profile-changed', 'list-changed', 'list-closed', 'session-stop', 'stopped'].includes(scanned.reason) && !limited) {
+          fail('native-dialog-changed', 'The native list changed before the check finished.');
+        }
+        const closeControls = [...modal.querySelectorAll('button, [role="button"]')].filter(control => rendered(control)
+          && [control.getAttribute('aria-label'), visibleText(control),
+            ...[...control.querySelectorAll('[aria-label]')].map(node => node.getAttribute('aria-label'))]
+            .some(label => /^close$/i.test(String(label || '').trim())));
+        if (closeControls.length !== 1) fail('native-close-unavailable', 'Close the native list normally before checking again.');
+        assertContext(modal);
+        closeControls[0].click();
+        const closed = await waitFor(() => {
+          assertRelationshipRunActive(signal, startedAt, now, maxDurationMs);
+          const open = dialogs();
+          if (!open.length) { assertContext(); return true; }
+          if (open.length !== 1 || open[0] !== modal) fail('native-dialog-changed', 'The native dialog changed. Check stopped.');
+          return false;
+        }, 6_000, signal);
+        if (!closed) {
+          assertRelationshipRunActive(signal, startedAt, now, maxDurationMs);
+          fail('native-close-unavailable', 'Close the native list normally before checking again.');
+        }
+      }
+      assertContext();
+      return result();
+    } catch (error) {
+      if (types.some(type => lists[type]?.accounts.length)) {
+        error.partialResult = result(signal?.aborted || error?.code === 'stopped' ? 'stopped'
+          : error?.code === 'native-list-loading-timeout' ? 'native-list-loading-timeout' : 'native-context-changed');
+      }
+      throw error;
+    } finally {
+      onNativeReadContext?.(null);
+    }
   }
 
   // Enumerates messages the signed-in account sent in the open conversation.
@@ -6036,19 +6445,90 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
         && !url.search && !url.hash ? url.pathname : '';
     } catch { return ''; }
   }
-  function inspect({ document = globalThis.document, location = globalThis.location,
+  function nativeListBackdrop({ document, location, context }, { capture = false, opening = false, openingPortal = null } = {}) {
+    const owner = username(context?.username), type = context?.listType;
+    const header = context?.profileHeader, dialog = context?.dialog;
+    const gap = !capture && opening && openingPortal && dialog === null;
+    const surface = gap ? openingPortal : dialog;
+    if (!owner || !['followers', 'following'].includes(type)
+      || !new RegExp(`^/${owner.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/?$`, 'i').test(location.pathname)) return null;
+    const backdrop = header?.closest?.('[aria-hidden="true"]');
+    const rendered = (node, allowed = null, fadingDialog = null) => {
+      if (!node?.isConnected || !node.getClientRects?.().length || typeof getComputedStyle !== 'function') return false;
+      for (let parent = node; parent; parent = parent.parentElement) {
+        const style = getComputedStyle(parent);
+        if (parent.hidden || (parent.getAttribute?.('aria-hidden') === 'true' && parent !== allowed)
+          || style.display === 'none' || ['hidden', 'collapse'].includes(style.visibility)
+          || (style.opacity !== undefined && style.opacity !== '' && Number(style.opacity) === 0
+            && parent !== fadingDialog)) return false;
+      }
+      return true;
+    };
+    if (capture ? backdrop || !rendered(header) : !backdrop || backdrop === header
+      || backdrop.contains(surface) || !rendered(header, backdrop) || !rendered(surface, null, opening && !gap ? dialog : null)) return null;
+    const dialogs = [...document.querySelectorAll('[role="dialog"]')]
+      .filter(node => rendered(node, null, capture || opening ? node : null));
+    if (capture ? dialogs.length !== 0 : gap ? dialogs.length !== 0 : dialogs.length !== 1 || dialogs[0] !== dialog) return null;
+    const labels = capture || gap ? [] : [dialog.getAttribute('aria-label'),
+      ...[...dialog.querySelectorAll('[role="heading"], h1, h2')]
+        .filter(node => rendered(node, null, opening ? dialog : null)).map(node => node.textContent),
+      String((opening && typeof dialog.innerText === 'string' ? dialog.innerText : dialog.textContent) || '')
+        .split(/\r?\n/).map(line => line.trim()).find(Boolean)];
+    const types = new Set(labels.map(label => String(label || '').normalize('NFKC').trim().toLowerCase().match(/^(followers|following)(?:\s|$)/)?.[1]).filter(Boolean));
+    if (!capture && (types.size > 1 || types.size === 1 && !types.has(type))) return null;
+    const typed = types.size === 1 && types.has(type);
+    const ready = !gap && typed && (!opening || rendered(dialog));
+    const empty = !capture && !gap && labels.every(label => !String(label || '').normalize('NFKC').trim())
+      && !dialog.querySelector('a[href], main, article');
+    if (!capture && !gap && (opening || !ready) && (!opening || (typed ? labels.slice(0, -1) : labels).some(label => {
+      const text = String(label || '').normalize('NFKC').trim();
+      return text && !/^loading[.\s\u2026]*$/i.test(text)
+        && !new RegExp(`^${type}(?:\\s|$)`, 'i').test(text);
+    }))) return null;
+    const headers = [...document.querySelectorAll('main header')].filter(node => rendered(node, backdrop));
+    if (headers.length !== 1 || headers[0] !== header
+      || ![...header.querySelectorAll('a[href], h1, h2, [role="heading"]')]
+        .some(node => rendered(node, backdrop) && username(node.textContent) === owner)) return null;
+    const countControls = [], totals = [];
+    for (const listType of ['followers', 'following']) {
+      const controls = [...header.querySelectorAll('a[role="link"], a[href="#"]')].filter(node => {
+        if (!rendered(node, backdrop) || !new RegExp(`\\s${listType}$`, 'i').test(String(node.textContent || '').trim())) return false;
+        const href = node.getAttribute('href'), path = pathOf(node).replace(/\/+$/, '').toLowerCase();
+        return href === '#' || [`/${owner}`, `/${owner}/${listType}`].includes(path);
+      });
+      if (controls.length !== 1) return null;
+      const control = controls[0], counts = new Set();
+      const title = control.querySelector?.('[title]')?.getAttribute('title');
+      for (const value of [control.getAttribute('title'), control.textContent, title ? `${title} ${listType}` : '']) {
+        const match = String(value || '').normalize('NFKC').replace(/[\u00a0\u202f]/g, ' ').trim().toLowerCase()
+          .match(/^([0-9][0-9., ]*)\s+(followers|following)$/);
+        if (!match || match[2] !== listType || !/^(?:\d+|\d{1,3}([,. ])\d{3}(?:\1\d{3})*)$/.test(match[1])) continue;
+        const count = Number(match[1].replace(/\D/g, ''));
+        if (Number.isSafeInteger(count)) counts.add(count);
+      }
+      if (counts.size !== 1) return null;
+      countControls.push(control); totals.push([...counts][0]);
+    }
+    return { backdrop, controls: countControls, totals, ready, typed, empty, shown: node => rendered(node, backdrop)
+      && node.closest?.('[aria-hidden="true"]') === backdrop };
+  }
+  function inspectCurrent({ document = globalThis.document, location = globalThis.location,
     session = globalThis.InstaToolboxInstagramInspector?.inspectSession?.() || {},
-    reactionDialog = false } = {}) {
+    reactionDialog = false, nativeListDialog = null } = {}, opening = false, evidence = null, openingPortal = null) {
     const unavailable = { accountVerified: false, usable: false, accountId: null, threadId: null };
     if (location?.origin !== origin) return { ...unavailable, reason: 'instagram-origin-required' };
     const threadId = String(location.pathname).match(/^\/direct\/t\/([0-9]+)\/?$/)?.[1] || null;
     const restriction = session.sessionExpired || session.challenge || session.actionBlocked || session.rateLimited;
     if (restriction) return { ...unavailable, threadId, restriction: true, reason: 'instagram-restricted' };
+    const nativeBackdrop = nativeListDialog === null ? null
+      : nativeListBackdrop({ document, location, context: nativeListDialog }, { opening, openingPortal });
+    if (nativeListDialog !== null && !nativeBackdrop) return { ...unavailable, threadId, reason: 'native-list-context-unavailable' };
     const rawLists = [...document.querySelectorAll('[aria-label="Thread list"]')];
     const dialogs = reactionDialog ? [...document.querySelectorAll('[role="dialog"]')]
       .filter(visible).filter(node => [...node.querySelectorAll('h1, h2, h3, [role="heading"]')]
         .some(heading => String(heading.textContent || '').trim() === 'Reactions')) : [];
     const shown = (node) => {
+      if (nativeBackdrop) return nativeBackdrop.shown(node);
       if (visible(node)) return true;
       if (dialogs.length !== 1 || !node?.isConnected || node.closest?.('[hidden]')
         || !node.getClientRects?.().length) return false;
@@ -6069,8 +6549,11 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
     if (list && headings.length !== 1) return { ...unavailable, threadId, reason: 'account-picker-ambiguous' };
     const pickerAccount = list ? username(headings[0].textContent) : null;
     if (list && !pickerAccount) return { ...unavailable, threadId, reason: 'account-name-unavailable' };
+    const navigation = new Map();
     const profiles = [...document.querySelectorAll('a[role="link"][href]')].filter((link) => {
-      if (!shown(link) || list?.contains(link)
+      // Dialog profile rows are content, not account navigation. Reject them
+      // before ancestor searches so growing native lists do not cause quadratic work.
+      if (link.closest?.('[role="dialog"]') || !shown(link) || list?.contains(link)
         || link.getAttribute('aria-label')?.startsWith('Open the profile page of')) return false;
       const match = pathOf(link).match(/^\/([a-z0-9._]+)\/?$/i);
       const accountId = match && username(match[1]);
@@ -6085,7 +6568,9 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
         const messages = links.some(node => /^\/direct\/t\/\d+\/?$/.test(pathOf(node))
           && (node.getAttribute('aria-label') === 'Messages' || node.querySelector?.('[aria-label="Messages"]')));
         if (paths.has('/') && (paths.has('/reels/') || paths.has('/reels'))
-          && (paths.has('/direct/inbox/') || paths.has('/direct/inbox') || messages)) return true;
+          && (paths.has('/direct/inbox/') || paths.has('/direct/inbox') || messages)) {
+          navigation.set(link, { rail, picture: pictures[0] }); return true;
+        }
       }
       return false;
     });
@@ -6094,13 +6579,99 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
     const profileControls = profiles.filter(link => !profiles.some(other =>
       other !== link && other.contains(link) && pathOf(other) === pathOf(link)));
     if (profileControls.length !== 1) return { ...unavailable, threadId, reason: 'account-navigation-unavailable' };
+    if (evidence) Object.assign(evidence, { profile: profileControls[0], ...navigation.get(profileControls[0]) });
     const accountId = pickerAccount || username(pathOf(profileControls[0]).split('/')[1]);
     return { accountVerified: true, accountId, threadId, usable: Boolean(threadId),
       accountKey: accountKey(accountId), identityKind: 'verified-viewer-username',
       restriction: false, evidence: list ? 'visible-account-picker-and-navigation' : 'visible-account-navigation' };
   }
+  const inspect = options => inspectCurrent(options);
+
+  // This capability permits waiting for one native read's opening surface.
+  // It does not return an account identity or authorize storage or actions.
+  function captureNativeListReadGuard({ document = globalThis.document, location = globalThis.location,
+    profileHeader, username: owner, listType, actor, readSession, isActive,
+    deadline = Infinity, now = Date.now } = {}) {
+    if (typeof readSession !== 'function' || typeof isActive !== 'function' || !username(actor)) return null;
+    const initialPath = location.pathname;
+    const originalBodyRoots = new Set(document.body?.children || []);
+    const context = { profileHeader, username: owner, listType, dialog: null };
+    let captured, originalNavigation;
+    try {
+      if (isActive() !== true || now() >= deadline) return null;
+      const evidence = {}, value = inspectCurrent({ document, location, session: readSession() }, false, evidence);
+      captured = nativeListBackdrop({ document, location, context }, { capture: true });
+      if (!captured || value.accountVerified !== true || value.accountId !== actor
+        || ['profile', 'rail', 'picture'].some(key => !captured.shown(evidence[key]))) return null;
+      originalNavigation = evidence;
+    } catch { return null; }
+    const originalAncestors = new Set();
+    for (let node = profileHeader; node; node = node.parentElement) originalAncestors.add(node);
+    let retainedDialog = null, retainedBackdrop = null, invalid = false;
+    let openingPortal = null, handoffEligible = false, handoffUsed = false, handoffGap = false, initialRoleSeen = false;
+    const portalOf = node => {
+      let root = node;
+      while (root?.parentElement && root.parentElement !== document.body) root = root.parentElement;
+      return root && root !== node && root.parentElement === document.body && !originalBodyRoots.has(root)
+        && !root.contains(profileHeader) && !root.contains(originalNavigation.rail) ? root : null;
+    };
+    const refuse = () => { invalid = true; return Object.freeze({ phase: 'invalid', dialog: null }); };
+    return Object.freeze({ check() {
+      if (invalid) return refuse();
+      try {
+        if (isActive() !== true || location.origin !== origin || location.pathname !== initialPath) return refuse();
+        // An empty dialog still has geometry. Do not infer its absence from text.
+        const rendered = node => {
+          if (!node?.isConnected || !node.getClientRects?.().length) return false;
+          for (let parent = node; parent; parent = parent.parentElement) {
+            const style = getComputedStyle(parent);
+            if (parent.hidden || parent.getAttribute?.('aria-hidden') === 'true' || style.display === 'none'
+              || ['hidden', 'collapse'].includes(style.visibility)
+              || (style.opacity !== undefined && style.opacity !== '' && Number(style.opacity) === 0
+                && parent !== node)) return false;
+          }
+          return true;
+        };
+        const dialogs = [...document.querySelectorAll('[role="dialog"]')].filter(rendered);
+        if (dialogs.length > 1) return refuse();
+        let gap = false;
+        if (retainedDialog && (dialogs[0] !== retainedDialog || handoffGap)) {
+          // One empty native skeleton may retire before its typed successor is
+          // mounted. Keep only this newly inserted portal, never another popup.
+          if (!handoffEligible || handoffUsed || !openingPortal?.isConnected
+            || openingPortal.parentElement !== document.body) return refuse();
+          if (dialogs.length) {
+            if (portalOf(dialogs[0]) !== openingPortal || handoffGap && dialogs[0] === retainedDialog) return refuse();
+            retainedDialog = dialogs[0]; handoffUsed = true; handoffEligible = false; handoffGap = false;
+          } else { gap = true; handoffGap = true; }
+        }
+        if (dialogs.length) retainedDialog ||= dialogs[0];
+        context.dialog = gap ? null : retainedDialog;
+        const profile = nativeListBackdrop({ document, location, context },
+          retainedDialog ? { opening: true, openingPortal: gap ? openingPortal : null } : { capture: true });
+        if (!profile || profile.backdrop && (!originalAncestors.has(profile.backdrop)
+          || retainedBackdrop && profile.backdrop !== retainedBackdrop)
+          || profile.controls.some((control, index) => control !== captured.controls[index]
+          || profile.totals[index] !== captured.totals[index])) return refuse();
+        retainedBackdrop ||= profile.backdrop;
+        if (retainedDialog && !initialRoleSeen) {
+          initialRoleSeen = true;
+          openingPortal = profile.empty ? portalOf(retainedDialog) : null;
+          handoffEligible = Boolean(openingPortal);
+        }
+        if (profile.typed) handoffEligible = false;
+        const evidence = {}, value = inspectCurrent({ document, location, session: readSession(),
+          ...(retainedDialog ? { nativeListDialog: context } : {}) }, true, evidence, gap ? openingPortal : null);
+        if (value.accountVerified !== true || value.accountId !== actor
+          || ['profile', 'rail', 'picture'].some(key => evidence[key] !== originalNavigation[key]
+            || !profile.shown(evidence[key]))) return refuse();
+        if (profile.ready && inspectCurrent({ document, location, session: readSession(), nativeListDialog: context }).accountId !== actor) return refuse();
+        return Object.freeze({ phase: now() >= deadline ? 'timeout' : profile.ready ? 'ready' : 'opening', dialog: context.dialog });
+      } catch { return refuse(); }
+    } });
+  }
   Object.defineProperty(globalThis, 'InstaToolboxInstagramViewer', {
-    configurable: false, writable: false, value: Object.freeze({ inspect, accountKey }),
+    configurable: false, writable: false, value: Object.freeze({ inspect, accountKey, captureNativeListReadGuard }),
   });
 })();
 
@@ -6373,7 +6944,7 @@ function createNativeInboxDiscovery({
   sections = ['primary'], expiresAt, now = Date.now, signal,
   maxThreads = 1_000, maxSamples = 1_000, maxVisits = 20_000,
   routeTimeoutMs = 8_000, settleMs = 400, paginationTimeoutMs = routeTimeoutMs,
-  proveTerminal = null, resolveSection = null, onProgress = null,
+  proveTerminal = null, resolveSection = null, onProgress = null, onCheckpoint = null,
   targetThreadId = null,
 } = {}) {
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(accountId || '') || typeof resolveAccount !== 'function') throw new Error('account-identity-required');
@@ -6385,6 +6956,7 @@ function createNativeInboxDiscovery({
   if (proveTerminal !== null && typeof proveTerminal !== 'function') throw new Error('terminal-adapter-invalid');
   if (resolveSection !== null && typeof resolveSection !== 'function') throw new Error('section-adapter-invalid');
   if (onProgress !== null && typeof onProgress !== 'function') throw new Error('progress-adapter-invalid');
+  if (onCheckpoint !== null && typeof onCheckpoint !== 'function') throw new Error('checkpoint-adapter-invalid');
   if (targetThreadId !== null && !/^[A-Za-z0-9_-]{1,128}$/.test(targetThreadId)) throw new Error('thread-identity-invalid');
   const sectionState = [...new Set(sections)].map((section) => ({ section, samples: 0, complete: false, reason: 'not-scanned' }));
   const inventory = new Map();
@@ -6705,7 +7277,16 @@ function createNativeInboxDiscovery({
           displayLabels.delete(threadId);
           if (threadId === targetThreadId || error.message !== 'navigation-timeout') throw error;
         }
-        windowIds.push(threadId); publish();
+        windowIds.push(threadId);
+        if (onCheckpoint) {
+          // Read-only observations must survive a document replacement before
+          // another native click. Navigation evidence and approval stay local.
+          const labels = [...displayLabels].map(([id, label]) => ({ threadId: id, ...label }));
+          try { await onCheckpoint(snapshot(), labels); }
+          catch { throw new Error('inbox-discovery-save-failed'); }
+          guard();
+        }
+        publish();
         // A worker only needs to find its assigned conversation. Do not make
         // every worker rescan the entire inbox before it can begin.
         if (threadId === targetThreadId) return;
@@ -7332,18 +7913,72 @@ const ORIGIN = 'https://www.instagram.com';
 const visible = (node) => Boolean(node?.isConnected && !node.closest?.('[hidden], [aria-hidden="true"]')
   && node.getClientRects?.().length);
 const copy = (value) => structuredClone(value);
+const CHECKPOINT_KIND = 'insta-toolbox-inbox-discovery';
+const DISCOVERY_TTL_MS = 20 * 60_000;
+const SECTIONS = ['primary', 'general', 'requests'];
+const invalidCheckpoint = () => { throw new Error('inbox-discovery-checkpoint-invalid'); };
+
+// Only bounded observations cross documents. Unknown fields never become
+// selection, approval, native row evidence, or a verified message pane.
+function readOnlyCheckpoint(value, at) {
+  if (!value || value.version !== 1 || value.kind !== CHECKPOINT_KIND
+    || typeof value.accountId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(value.accountId)
+    || ![value.startedAt, value.savedAt, value.expiresAt].every(time => Number.isSafeInteger(time) && time >= 0)
+    || value.startedAt > value.savedAt || value.savedAt > at || value.savedAt >= value.expiresAt
+    || value.expiresAt - value.startedAt > DISCOVERY_TTL_MS) invalidCheckpoint();
+  if (value.expiresAt <= at) throw new Error('inbox-discovery-recovery-expired');
+  if (!Array.isArray(value.sections) || !value.sections.length || value.sections.length > SECTIONS.length) invalidCheckpoint();
+  const sections = value.sections.map(entry => {
+    if (!entry || !SECTIONS.includes(entry.section) || !Number.isSafeInteger(entry.samples)
+      || entry.samples < 0 || entry.samples > 1_000) invalidCheckpoint();
+    return { section: entry.section, samples: entry.samples };
+  });
+  const sectionNames = new Set(sections.map(entry => entry.section));
+  if (sectionNames.size !== sections.length || !Array.isArray(value.conversations)
+    || !value.conversations.length || value.conversations.length > 1_000) invalidCheckpoint();
+  const ids = new Set();
+  const conversations = value.conversations.map(entry => {
+    if (!entry || typeof entry.threadId !== 'string' || !/^[0-9]{1,128}$/.test(entry.threadId)
+      || ids.has(entry.threadId) || !Array.isArray(entry.sections) || !entry.sections.length
+      || entry.sections.length > SECTIONS.length || new Set(entry.sections).size !== entry.sections.length
+      || !entry.sections.every(section => sectionNames.has(section)
+        && sections.some(item => item.section === section && item.samples > 0))) invalidCheckpoint();
+    ids.add(entry.threadId);
+    return { threadId: entry.threadId, sections: [...entry.sections] };
+  });
+  if (!Array.isArray(value.labels) || value.labels.length > conversations.length) invalidCheckpoint();
+  const labeled = new Set();
+  const labels = value.labels.map(entry => {
+    if (!entry || !ids.has(entry.threadId) || labeled.has(entry.threadId)
+      || typeof entry.title !== 'string' || entry.title.length > 160
+      || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u202a-\u202e\u2066-\u2069]/.test(entry.title)
+      || (entry.username !== null && (typeof entry.username !== 'string'
+        || !/^[A-Za-z0-9._]{1,30}$/.test(entry.username)))) invalidCheckpoint();
+    const title = entry.title.replace(/\s+/g, ' ').trim();
+    if (!title) invalidCheckpoint();
+    labeled.add(entry.threadId);
+    return { threadId: entry.threadId, title, username: entry.username?.toLowerCase() || null };
+  });
+  return { version: 1, kind: CHECKPOINT_KIND, accountId: value.accountId,
+    startedAt: value.startedAt, expiresAt: value.expiresAt, savedAt: value.savedAt,
+    sections, conversations, labels };
+}
 
 // Inventory, review, and captured native navigation never approve cleanup.
 function createUserscriptInboxDiscovery({
   document = globalThis.document, window = globalThis.window,
   viewer = globalThis.InstaToolboxInstagramViewer, now = Date.now, onProgress = null,
-  routeTimeoutMs = 8_000, settleMs = 400,
+  routeTimeoutMs = 8_000, settleMs = 400, checkpointStorage = null,
 } = {}) {
   if (!document || !window?.location || typeof viewer?.inspect !== 'function'
     || typeof viewer.accountKey !== 'function' || typeof now !== 'function'
-    || (onProgress !== null && typeof onProgress !== 'function')) throw new Error('inbox-discovery-unavailable');
+    || (onProgress !== null && typeof onProgress !== 'function')
+    || (checkpointStorage !== null && (typeof checkpointStorage?.read !== 'function'
+      || typeof checkpointStorage?.write !== 'function'))) throw new Error('inbox-discovery-unavailable');
   let active = null, inventory = null, captured = null, navigator = null, opening = null;
-  let state = { status: 'idle', reason: null, inventory: null, executionAvailable: false };
+  let restoring = null, recovery = null, operationEpoch = 0;
+  let state = { status: 'idle', reason: null, inventory: null, executionAvailable: false,
+    recovered: false, recoveryExpiresAt: null };
   const snapshot = () => copy(state);
   const inboxReady = () => /^\/direct\/(?:inbox\/?|t\/\d+\/?)$/.test(window.location.pathname)
     && [...document.querySelectorAll('[aria-label="Thread list"]')].filter(visible).length === 1;
@@ -7353,8 +7988,8 @@ function createUserscriptInboxDiscovery({
     return snapshot();
   };
   function rejectContext(reason) {
-    navigator?.stop(); navigator = null; captured = null; inventory = null;
-    publish({ status: 'needs-attention', reason, inventory: null });
+    navigator?.stop(); navigator = null; captured = null; inventory = null; recovery = null;
+    publish({ status: 'needs-attention', reason, inventory: null, recovered: false, recoveryExpiresAt: null });
     throw new Error(reason);
   }
   function context() {
@@ -7366,6 +8001,18 @@ function createUserscriptInboxDiscovery({
     if (evidence.restriction) return rejectContext('inbox-account-restricted');
     return { accountId: key, verified: true, restriction: null };
   }
+  async function writeCheckpoint(value) {
+    try { await checkpointStorage.write(value); }
+    catch { throw new Error('inbox-discovery-checkpoint-unavailable'); }
+  }
+  function validateInventory() {
+    if (active || opening || restoring) throw new Error('inbox-discovery-active');
+    if (!inventory) throw new Error('inbox-discovery-required');
+    const current = context();
+    if (current.accountId !== inventory.accountId) return rejectContext('inbox-account-changed');
+    if (recovery && now() >= recovery.expiresAt) throw new Error('inbox-discovery-recovery-expired');
+    return current;
+  }
   function section() {
     const roots = [...document.querySelectorAll('[aria-label="Thread list"]')].filter(visible);
     if (roots.length !== 1) return null;
@@ -7376,6 +8023,8 @@ function createUserscriptInboxDiscovery({
     return nativeInboxSection(label);
   }
   const stop = () => {
+    operationEpoch += 1;
+    if (restoring) { restoring.abort(); restoring = null; return true; }
     if (opening) { opening.abort(); return true; }
     if (navigator) { navigator.stop(); navigator = null; return true; }
     if (!active) return false;
@@ -7384,6 +8033,46 @@ function createUserscriptInboxDiscovery({
   };
   return Object.freeze({
     snapshot, stop,
+    async hasReadOnlyCheckpoint() {
+      if (!checkpointStorage) return false;
+      try { readOnlyCheckpoint(await checkpointStorage.read(), now()); return true; }
+      catch { return false; }
+    },
+    async restoreReadOnly() {
+      if (active || opening || restoring) throw new Error('inbox-discovery-active');
+      if (!checkpointStorage) throw new Error('inbox-discovery-checkpoint-unavailable');
+      const identity = context(), epoch = ++operationEpoch;
+      const controller = new AbortController(); restoring = controller;
+      navigator?.stop(); navigator = null; captured = null; inventory = null; recovery = null;
+      const interrupted = () => stop();
+      window.addEventListener?.('pagehide', interrupted);
+      document.addEventListener?.('freeze', interrupted);
+      try {
+        let value;
+        try { value = await checkpointStorage.read(); }
+        catch { throw new Error('inbox-discovery-checkpoint-unavailable'); }
+        if (controller.signal.aborted || epoch !== operationEpoch) throw new Error('cancelled');
+        const current = context();
+        if (current.accountId !== identity.accountId) return rejectContext('inbox-account-changed');
+        const saved = readOnlyCheckpoint(value, now());
+        if (saved.accountId !== current.accountId) return rejectContext('inbox-account-changed');
+        recovery = saved;
+        inventory = { version: 1, accountId: current.accountId, complete: false, stopped: true,
+          reason: 'recovered-observation', visits: 0, needsInboxReturn: !inboxReady(),
+          sections: saved.sections.map(entry => ({ ...entry, complete: false, reason: 'recovered-observation' })),
+          conversations: copy(saved.conversations) };
+        return publish({ status: 'ready', reason: 'recovered-observation', inventory,
+          recovered: true, recoveryExpiresAt: saved.expiresAt, executionAvailable: false });
+      } catch (error) {
+        if (epoch === operationEpoch) publish({ status: 'needs-attention', reason: error.message,
+          inventory: null, recovered: false, recoveryExpiresAt: null });
+        throw error;
+      } finally {
+        if (restoring === controller) restoring = null;
+        window.removeEventListener?.('pagehide', interrupted);
+        document.removeEventListener?.('freeze', interrupted);
+      }
+    },
     availableSections() {
       const roots = [...document.querySelectorAll('[aria-label="Thread list"]')].filter(visible);
       if (roots.length !== 1) return [];
@@ -7396,6 +8085,10 @@ function createUserscriptInboxDiscovery({
     reviewLabels() {
       const current = context();
       if (state.inventory && current.accountId !== state.inventory.accountId) return rejectContext('inbox-account-changed');
+      if (recovery) {
+        if (now() >= recovery.expiresAt) throw new Error('inbox-discovery-recovery-expired');
+        return recovery.labels.map(label => ({ ...label, kind: label.username ? 'profile' : 'chat-title', source: 'recovered-observation' }));
+      }
       return (active || captured)?.reviewLabels() || [];
     },
     async discover({ navigationAcknowledged = false, sections = null, expiresAt = now() + 20 * 60_000,
@@ -7403,7 +8096,22 @@ function createUserscriptInboxDiscovery({
       if (active || opening) throw new Error('inbox-discovery-active');
       if (navigationAcknowledged !== true) throw new Error('navigation-acknowledgment-required');
       if (!Number.isFinite(expiresAt) || expiresAt <= now() || expiresAt > now() + 20 * 60_000) throw new Error('discovery-expired');
-      const identity = context();
+      const identity = context(), startedAt = now(), epoch = ++operationEpoch;
+      restoring?.abort(); restoring = null;
+      navigator?.stop(); navigator = null; captured = null; inventory = null; recovery = null;
+      publish({ status: 'discovering', reason: null, inventory: null, recovered: false, recoveryExpiresAt: null });
+      if (checkpointStorage) {
+        const controller = new AbortController(); opening = controller;
+        try {
+          await writeCheckpoint(null);
+          if (controller.signal.aborted || signal?.aborted || epoch !== operationEpoch) throw new Error('cancelled');
+          if (context().accountId !== identity.accountId) return rejectContext('inbox-account-changed');
+          if (now() >= expiresAt) throw new Error('discovery-expired');
+        } catch (error) {
+          publish({ status: 'needs-attention', reason: error.message, inventory: null });
+          throw error;
+        } finally { if (opening === controller) opening = null; }
+      }
       if (!inboxReady()) {
         const links = [...document.querySelectorAll('a[href]')].filter(node => {
           if (!visible(node)) return false;
@@ -7437,13 +8145,19 @@ function createUserscriptInboxDiscovery({
         } finally { opening = null; }
       }
       if (sections === null) sections = this.availableSections();
-      navigator?.stop(); navigator = null; captured = null; inventory = null;
       const operation = createNativeInboxDiscovery({
         accountId: identity.accountId, resolveAccount: context,
         navigationAcknowledged, document, window, sections, expiresAt, now,
         routeTimeoutMs, settleMs, resolveSection: section,
         targetThreadId, signal,
         onProgress: (value) => publish({ inventory: value }),
+        onCheckpoint: checkpointStorage ? async (value, labels) => {
+          if (epoch !== operationEpoch || signal?.aborted) throw new Error('cancelled');
+          const saved = readOnlyCheckpoint({ version: 1, kind: CHECKPOINT_KIND, accountId: identity.accountId,
+            startedAt, expiresAt, savedAt: now(), sections: value.sections,
+            conversations: value.conversations, labels }, now());
+          await writeCheckpoint(saved);
+        } : null,
       });
       active = operation;
       const interrupted = () => { operation.stop(); publish({ status: 'stopping', reason: 'page-interrupted' }); };
@@ -7495,20 +8209,25 @@ function createUserscriptInboxDiscovery({
       return navigator;
     },
     review({ threadIds, scope = 'all', limit = null } = {}) {
-      if (active) throw new Error('inbox-discovery-active');
-      if (!inventory) throw new Error('inbox-discovery-required');
-      const current = context();
-      if (current.accountId !== inventory.accountId) {
-        return rejectContext('inbox-account-changed');
-      }
+      const current = validateInventory();
       const available = new Set(inventory.conversations.map((entry) => entry.threadId));
       if (!Array.isArray(threadIds) || !threadIds.length
         || !threadIds.every((id) => available.has(id))) throw new Error('thread-not-discovered');
       return createInboxReview({ accountId: current.accountId, threadIds, scope, limit,
         speed: 'standard', workerCount: 1, removeOwnReactions: false,
+        ...(recovery ? { expiresAt: recovery.expiresAt } : {}),
         discovery: { sections: inventory.sections.filter((entry) => entry.samples > 0).map((entry) => entry.section),
           complete: inventory.complete === true },
       }, now());
+    },
+    validateReview(review) {
+      const current = validateInventory();
+      if (!review || review.accountId !== current.accountId) throw new Error('inbox-review-changed');
+      if (!Number.isFinite(review.expiresAt) || now() >= review.expiresAt) throw new Error('inbox-review-expired');
+      const available = new Set(inventory.conversations.map(entry => entry.threadId));
+      if (!Array.isArray(review.threadIds) || !review.threadIds.length || review.threadIds.length > 1_000
+        || !review.threadIds.every(id => available.has(id))) throw new Error('thread-not-discovered');
+      return true;
     },
   });
 }
@@ -8407,12 +9126,22 @@ const { createUserscriptGhostBridge, userscriptGhostReviewKey } = localModules["
 
 
 
+function inboxReviewTargets(threadIds, labels) {
+  const byThread = new Map(labels.map(label => [label.threadId, label]));
+  return threadIds.map(threadId => {
+    const label = byThread.get(threadId);
+    const title = String(label?.title || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+    const description = [title, label?.username ? `@${label.username}` : ''].filter(Boolean).join(' · ');
+    return `Thread ${threadId}${description ? ` — ${description}` : ''}`;
+  });
+}
+
 function mountUserscriptInboxPanel({
   container, document = globalThis.document, window = globalThis.window,
   viewer = globalThis.InstaToolboxInstagramViewer,
   runner = globalThis.InstaToolboxDmThreadUnsender,
   confirmAction, cancelConfirmation = () => {}, save, load = async () => null,
-  workerTransport = null,
+  workerTransport = null, discoveryCheckpointStorage = null,
   defaultWorkerCount = 10,
   openWorkersInBackground = true,
   discoveryTiming = {},
@@ -8425,6 +9154,7 @@ function mountUserscriptInboxPanel({
   const rows = new Map();
   let inventory = null, controller = null, active = false, checkpoint = null, operationEpoch = 0;
   let loading = true, loadFailed = false, needsReconciliation = false, unsubscribe = null;
+  let savedDiscoveryAvailable = false;
   const create = (tag, text, className) => {
     const node = document.createElement(tag);
     if (text) node.textContent = text;
@@ -8437,6 +9167,8 @@ function mountUserscriptInboxPanel({
   startGhost.setAttribute('data-ghost-start', '');
   const find = create('button', 'Find conversations', 'button quiet');
   find.type = 'button';
+  const restoreDiscovery = create('button', 'Restore found conversations', 'button quiet');
+  restoreDiscovery.type = 'button'; restoreDiscovery.hidden = true;
   const section = create('select');
   section.setAttribute('aria-label', 'Inbox section');
   for (const [value, label] of [['all', 'All available'], ['primary', 'Primary'], ['general', 'General'], ['requests', 'Requests']]) {
@@ -8499,7 +9231,7 @@ function mountUserscriptInboxPanel({
   const actions = create('div', null, 'toolbar'); actions.append(selectAll, review, resume, pause, skip, stop);
   advanced.append(section, acknowledgment, controls, filterLabel, filterStatus,
     list, workersLabel, workerModeLabel, workerNote);
-  container.append(startGhost, note, inventoryStatus, advanced, supportNote, recovery, actions, storageNote, results);
+  container.append(startGhost, restoreDiscovery, note, inventoryStatus, advanced, supportNote, recovery, actions, storageNote, results);
 
   function context() {
     const value = viewer.inspect({ document, location: window.location });
@@ -8545,6 +9277,9 @@ function mountUserscriptInboxPanel({
   }
   function updateControls() {
     inventoryStatus.hidden = !inventoryStatus.textContent;
+    restoreDiscovery.hidden = !savedDiscoveryAvailable;
+    startGhost.hidden = savedDiscoveryAvailable;
+    restoreDiscovery.disabled = active || loading || loadFailed || busy();
     list.hidden = !rows.size;
     filterLabel.hidden = !rows.size; filter.disabled = active;
     const query = filter.value.trim().toLowerCase();
@@ -8557,7 +9292,8 @@ function mountUserscriptInboxPanel({
       if (matches) shown += 1; else if (selected.has(id)) hiddenSelected += 1;
     }
     filterStatus.textContent = query
-      ? `${shown} shown${hiddenSelected ? ` · ${hiddenSelected} selected outside this filter` : ''}${query.startsWith('@') ? '. Only verified profile links match @usernames.' : ''}` : '';
+      ? `${shown} shown${hiddenSelected ? ` · ${hiddenSelected} selected outside this filter` : ''}${query.startsWith('@')
+        ? discovery.snapshot().recovered ? '. Names came from earlier observations and may have changed.' : '. Only verified profile links match @usernames.' : ''}` : '';
     filterStatus.hidden = !filterStatus.textContent;
     results.hidden = !checkpoint?.tasks?.length;
     storageNote.hidden = !storageNote.textContent;
@@ -8571,7 +9307,8 @@ function mountUserscriptInboxPanel({
     selectAll.textContent = query ? 'Select visible matches' : 'Select all found';
     review.hidden = !inventory?.conversations.length;
     review.disabled = active || loading || loadFailed || !selected.size || !window.navigator?.locks?.request
-      || (needsReconciliation && !reconciled.checked);
+      || (needsReconciliation && !reconciled.checked)
+      || (discovery.snapshot().recovered && !ghostBridge);
     review.textContent = `Review ${selected.size} conversation${selected.size === 1 ? '' : 's'}`;
     const remaining = remainingThreads();
     resume.hidden = Boolean(ghostBridge) || active || !remaining.length;
@@ -8615,12 +9352,15 @@ function mountUserscriptInboxPanel({
     }
     if (!inventory) { selected.clear(); rows.clear(); list.replaceChildren(); }
     const finding = value.status === 'discovering';
-    inventoryStatus.textContent = finding ? `Found ${threads.length} conversations…`
-      : `${threads.length} conversations found.${inventory?.complete ? '' : ' This may not include your whole inbox.'}`;
+    inventoryStatus.textContent = value.recovered
+      ? `${threads.length} conversations restored from this tab. Partial inventory; names may have changed. Select exact threads and review them again.${ghostBridge ? '' : ' Managed worker tabs are required for recovered results.'}`
+      : finding ? `Found ${threads.length} conversations…`
+        : `${threads.length} conversations found.${inventory?.complete ? '' : ' This may not include your whole inbox.'}`;
     if (value.reason) inventoryStatus.textContent += ` ${friendlyReason(value.reason)}`;
     updateControls();
   }
   const discovery = createUserscriptInboxDiscovery({ document, window, viewer, onProgress: showInventory,
+    checkpointStorage: discoveryCheckpointStorage, now: discoveryTiming.now ?? Date.now,
     routeTimeoutMs: discoveryTiming.routeTimeoutMs ?? 8_000, settleMs: discoveryTiming.settleMs ?? 400 });
   function friendlyReason(reason) {
     const labels = {
@@ -8639,6 +9379,11 @@ function mountUserscriptInboxPanel({
       'conversation-load-timeout': 'The assigned conversation did not finish loading.',
       'removal-not-proven': 'Instagram did not confirm the last removal. Review the conversation before continuing.',
       'approval-expired': 'This cleanup approval expired. Review the conversations again.',
+      'inbox-discovery-save-failed': 'Found conversations could not be saved. Discovery stopped before opening another chat.',
+      'inbox-discovery-checkpoint-invalid': 'Saved discovery is invalid. Find conversations again.',
+      'inbox-discovery-checkpoint-unavailable': 'No saved discovery is available for this tab. Find conversations again.',
+      'inbox-discovery-recovery-expired': 'Saved discovery expired. Find conversations again.',
+      'inbox-recovered-workers-required': 'Recovered conversations require managed worker tabs. Find conversations again for a fresh single-tab review.',
       cancelled: 'Stopped.', 'end-unverified': '', 'repeated-window-unverified': '',
     };
     return labels[reason] ?? String(reason || '').replaceAll('-', ' ');
@@ -8690,10 +9435,27 @@ function mountUserscriptInboxPanel({
       ? 'Previous cleanup was interrupted. Check its last conversation; nothing resumes automatically.'
       : 'Previous cleanup. Find conversations to start a new review.';
   }
-  const ready = Promise.resolve().then(loadCheckpoint).catch(() => {
+  const ready = Promise.resolve().then(async () => {
+    await loadCheckpoint();
+    savedDiscoveryAvailable = await discovery.hasReadOnlyCheckpoint();
+    if (savedDiscoveryAvailable) inventoryStatus.textContent = 'Previously found conversations are saved in this tab. Restore them to select and review again. Nothing resumes automatically.';
+  }).catch(() => {
     loadFailed = true;
     storageNote.textContent = 'Saved cleanup progress could not be read. Reload before starting another cleanup.';
   }).finally(() => { loading = false; updateControls(); });
+  restoreDiscovery.addEventListener('click', async () => {
+    if (active || loading || loadFailed || busy()) return;
+    const epoch = ++operationEpoch;
+    active = true; inventory = null; selected.clear(); rows.clear(); filter.value = ''; list.replaceChildren();
+    unsubscribe?.(); unsubscribe = null; controller = null; updateControls();
+    try {
+      await discovery.restoreReadOnly();
+      if (epoch !== operationEpoch) return;
+      savedDiscoveryAvailable = false; advanced.open = true;
+      announce('Restored partial discovery. Names may have changed; select exact threads for a new review.');
+    } catch (error) { if (epoch === operationEpoch) announce(friendlyReason(error.message)); }
+    finally { active = false; updateControls(); }
+  });
   async function findConversations({ all = false } = {}) {
     if (active || loading || loadFailed || busy()) return;
     if (!all && !acknowledged.checked) { announce('Confirm that opening conversations may mark them read.'); acknowledged.focus(); return; }
@@ -8740,6 +9502,8 @@ function mountUserscriptInboxPanel({
     try {
       const options = messageOptions();
       const captured = discovery.review({ threadIds, scope: options.scope, limit: options.limit });
+      const recovered = discovery.snapshot().recovered === true;
+      if (recovered && !ghostBridge) throw new Error('inbox-recovered-workers-required');
       if (ghostBridge) {
         const account = context();
         const plan = ghostBridge.createReview({
@@ -8756,7 +9520,7 @@ function mountUserscriptInboxPanel({
           title: `Clean up ${plan.threadIds.length} conversation${plan.threadIds.length === 1 ? '' : 's'}?`,
           message: plan.scope === 'all' ? 'Permanently unsend your messages in the selected conversations.'
             : `Permanently unsend the ${plan.scope} ${plan.limit} message${plan.limit === 1 ? '' : 's'} you sent in each selected conversation?`,
-          detail: `Keep the inbox tab open. Up to ${plan.workerCount} conversation tabs open together, finish, and close before the next batch. Unsend clicks share the account pacing.`,
+          detail: `${recovered ? 'These thread IDs were recovered from an interrupted partial discovery. Names may have changed. ' : ''}Keep the inbox tab open. Up to ${plan.workerCount} conversation tabs open together, finish, and close before the next batch. Unsend clicks share the account pacing.`,
           confirmLabel: 'Start Ghost mode',
           facts: [{ label: 'Account', value: account.accountLabel ? `@${account.accountLabel}` : 'Current signed-in account' },
             { label: 'Conversations', value: String(plan.threadIds.length) },
@@ -8764,12 +9528,14 @@ function mountUserscriptInboxPanel({
             { label: 'Open tabs', value: plan.openInBackground ? 'In the background' : 'In front' },
             { label: 'Messages', value: plan.scope === 'all' ? 'All messages you sent'
               : `${plan.scope === 'newest' ? 'Newest' : 'Oldest'} ${plan.limit} in each conversation` }],
+          items: inboxReviewTargets(plan.threadIds, discovery.reviewLabels()), itemLimit: 1_000,
           binding: { action: 'inbox-unsend-workers', reviewKey: key },
         });
         if (!confirmed || epoch !== operationEpoch) { announce('Canceled. Nothing was removed.'); return; }
         if (confirmed.action !== 'inbox-unsend-workers' || confirmed.reviewKey !== key || busy()) {
           throw new Error('inbox-review-changed');
         }
+        discovery.validateReview(captured);
         controller = ghostBridge.createManager(plan);
         needsReconciliation = false; recovery.hidden = true; reconciled.checked = false;
         unsubscribe = controller.subscribe(value => {
@@ -8791,8 +9557,9 @@ function mountUserscriptInboxPanel({
         detail: 'Messages you send while cleanup is running may also be removed. Keep this Instagram tab loaded and do not send messages in these conversations until it finishes.',
         confirmLabel: 'Start cleanup',
         facts: [{ label: 'Account', value: `@${account.accountId}` },
-          { label: 'Conversations', value: plan.threadIds.join(', ') },
+          { label: 'Conversations', value: String(plan.threadIds.length) },
           { label: 'Messages', value: 'All messages you sent; one conversation at a time' }],
+        items: inboxReviewTargets(plan.threadIds, discovery.reviewLabels()), itemLimit: 1_000,
         binding: { action: 'inbox-unsend', reviewKey: key },
       });
       if (!confirmed || epoch !== operationEpoch) { announce('Canceled. Nothing was removed.'); return; }
@@ -9475,7 +10242,7 @@ localModules["extension/presence-native-actions.js"] = (() => {
 
 const PROFILE_PATH = /^\/([A-Za-z0-9._]{1,30})\/?$/;
 const STORY_PATH = /^\/stories\/([A-Za-z0-9._]{1,30})(?:\/([^/?#]+))?\/?$/;
-const CONTENT_PATH = /^\/(?:p|reels?)\/([^/?#]+)\/?/;
+const CONTENT_PATH = /^\/(?:p|reels?)\/([A-Za-z0-9_-]+)\/?$/;
 const STORY_TILE_LABEL = /^story by ([A-Za-z0-9._]{1,30})(?:,|$)/i;
 const RESERVED = new Set(['accounts', 'about', 'api', 'direct', 'explore', 'reels', 'settings', 'stories', 'web']);
 
@@ -9926,28 +10693,50 @@ function createPresenceNativeActions({
           : { verified: false, skipped: true, reason: STORY_PATH.test(String(location.pathname))
             ? 'Next story did not finish loading' : 'End of stories' };
       }
+      const sentContext = inspectContext();
+      if (sentContext.accountVerified !== true || sentContext.usable !== true || !clean(sentContext.accountId)) {
+        throw fail('presence-context-changed');
+      }
+      assertCurrent();
       current.control.click();
-      const verified = await waitFor(() => {
-        if (!current.root.isConnected) return false;
-        if (action === 'reactStories') {
-          const displayed = currentStory();
-          if (!displayed || displayed.username !== current.target.username
-            || displayed.storyId !== current.target.storyId) return false;
-        }
-        if (action === 'likePosts' || action === 'reactStories') {
-          return exactButtons(current.root, new Set(['unlike'])).length === 1;
-        }
-        if (action === 'followPeople') {
-          return exactButtons(current.root, new Set(['following', 'requested'])).length === 1;
-        }
-        if (action === 'acceptRequests') {
-          return exactButtons(current.root, new Set(['following', 'remove'])).length === 1;
-        }
-        return false;
-      }, signal);
+      let verified;
+      try {
+        // Stop revokes further clicks. It must not discard the outcome of a
+        // click already sent: finish this bounded, read-only verification and
+        // keep an unconfirmed attempt separate from a proven result.
+        verified = await waitFor(() => {
+          const observed = inspectContext();
+          if (observed.accountVerified !== true || observed.usable !== true
+            || observed.accountId !== sentContext.accountId
+            || (sentContext.accountKey && observed.accountKey !== sentContext.accountKey)
+            || observed.challenge || observed.actionBlocked || observed.rateLimited
+            || observed.sessionExpired || observed.frozen || observed.discarded || document.wasDiscarded === true) {
+            throw fail('presence-verification-context-changed');
+          }
+          if (!current.root.isConnected) return false;
+          if (action === 'reactStories') {
+            const displayed = currentStory();
+            if (!displayed || displayed.username !== current.target.username
+              || displayed.storyId !== current.target.storyId) return false;
+          }
+          if (action === 'likePosts' || action === 'reactStories') {
+            return exactButtons(current.root, new Set(['unlike'])).length === 1;
+          }
+          if (action === 'followPeople') {
+            return exactButtons(current.root, new Set(['following', 'requested'])).length === 1;
+          }
+          if (action === 'acceptRequests') {
+            return exactButtons(current.root, new Set(['following', 'remove'])).length === 1;
+          }
+          return false;
+        });
+      } catch {
+        return { verified: false, uncertain: true,
+          reason: 'The account or Instagram context changed before the action could be confirmed' };
+      }
       if (!verified) return { verified: false, uncertain: true, reason: 'Instagram did not confirm the action' };
       const reason = action === 'likePosts' ? 'Post liked'
-        : action === 'reactStories' ? 'Story reaction added'
+        : action === 'reactStories' ? 'Story liked'
           : action === 'followPeople'
             ? (exactButtons(current.root, new Set(['requested'])).length === 1
               ? 'Follow requested'
@@ -9975,7 +10764,7 @@ const ACTION_ORDER = Object.freeze([
 
 const PRESENCE_ACTION_LABELS = Object.freeze({
   viewStories: 'View stories',
-  reactStories: 'React to stories',
+  reactStories: 'Like stories',
   likePosts: 'Like posts',
   followPeople: 'Follow people',
   acceptRequests: 'Accept incoming requests',
@@ -10057,6 +10846,7 @@ function createPresenceSession({
 
   let controller = null;
   let pauseGate = null;
+  let reviewDeadline = 0;
   let runSequence = 0;
   let state = Object.freeze({
     status: 'idle', reason: null, accountId: null, current: null,
@@ -10064,11 +10854,14 @@ function createPresenceSession({
     mode: 'session', runId: null, enabledActions: Object.freeze([]),
     results: Object.freeze([]), canPause: false,
     canResume: false, canStop: false,
+    startedAt: null, expiresAt: null, nextActionAt: null, waitingReason: null,
   });
 
   const publish = (patch = {}) => {
     const nextResults = patch.results || state.results;
-    state = Object.freeze({ ...state, ...patch, results: Object.freeze([...nextResults].slice(0, 50)) });
+    const clearWait = patch.status && !['waiting', 'quiet', 'paused'].includes(patch.status)
+      ? { nextActionAt: null, waitingReason: null } : {};
+    state = Object.freeze({ ...state, ...clearWait, ...patch, results: Object.freeze([...nextResults].slice(0, 50)) });
     onUpdate(snapshot());
     return state;
   };
@@ -10125,7 +10918,7 @@ function createPresenceSession({
   }
 
   async function start(review) {
-    if (active()) fail('presence-session-active');
+    if (controller) fail('presence-session-active');
     if (!review || !reviews.has(review) || consumed.has(review)) fail('presence-review-required');
     if (review.expiresAt <= now()) fail('presence-review-expired');
     if (!locks) fail('presence-account-lock-unavailable');
@@ -10137,8 +10930,14 @@ function createPresenceSession({
       if (!lock || lock.name !== lockName || lock.mode !== 'exclusive') fail('presence-account-busy');
       context(review.accountId);
       consumed.add(review);
-      controller = new AbortController();
-      const { signal } = controller;
+      const runController = new AbortController();
+      controller = runController;
+      reviewDeadline = review.expiresAt;
+      const { signal } = runController;
+      // A paused run must release its account lane at the reviewed deadline
+      // without requiring a later Resume or Stop click.
+      const expiryTimer = setTimeout(() => runController.abort('presence-session-expired'),
+        Math.max(0, review.expiresAt - now()));
       const results = [];
       const seen = new Set();
       const unavailableUntil = new Map();
@@ -10172,10 +10971,12 @@ function createPresenceSession({
         completed: 0, skipped: 0, uncertain: 0, maxActions: review.options.maxActions,
         mode: review.options.mode, runId, enabledActions: review.enabledActions,
         results, canPause: true, canResume: false, canStop: true,
+        startedAt: now(), expiresAt: review.expiresAt,
       });
       try {
         while (!signal.aborted && !reachedLimit() && now() < review.expiresAt) {
           await awaitResume(signal);
+          if (signal.aborted || now() >= review.expiresAt) break;
           context(review.accountId);
           const action = itinerary[cursor % itinerary.length];
           cursor += 1;
@@ -10185,7 +10986,8 @@ function createPresenceSession({
             if (review.enabledActions.every(value => (unavailableUntil.get(value) || 0) > now())) {
               if (review.options.mode !== 'live') break;
               const next = Math.min(...review.enabledActions.map(value => unavailableUntil.get(value)));
-              publish({ status: 'searching', current: null });
+              publish({ status: 'waiting', current: null, waitingReason: 'no-activities',
+                nextActionAt: Math.min(next, review.expiresAt) });
               await waitWithinReview(next - now());
             }
             continue;
@@ -10264,26 +11066,31 @@ function createPresenceSession({
             && review.options.scheduledBreaks
             && verifiedInBurst >= review.options.liveBurstActions) {
             verifiedInBurst = 0;
-            publish({ status: 'quiet', current: null });
+            publish({ status: 'quiet', current: null, waitingReason: 'scheduled-break',
+              nextActionAt: Math.min(now() + review.options.quietMinutes * 60_000, review.expiresAt) });
             await waitWithinReview(review.options.quietMinutes * 60_000);
             await awaitResume(signal);
             if (!signal.aborted) publish({ status: 'running' });
             continue;
           }
           const delay = Math.round(minDelayMs + random() * (maxDelayMs - minDelayMs));
-          publish({ status: 'waiting', current: null });
+          publish({ status: 'waiting', current: null, waitingReason: 'spacing',
+            nextActionAt: Math.min(now() + delay, review.expiresAt) });
           await waitWithinReview(delay);
           if (!signal.aborted && state.status !== 'paused') publish({ status: 'running' });
         }
         if (signal.aborted) throw new DOMException('Stopped', 'AbortError');
         const expired = now() >= review.expiresAt;
         publish({ status: expired ? 'expired' : 'completed',
-          reason: expired ? 'presence-session-expired' : null, current: null,
+          reason: expired ? 'presence-session-expired'
+            : reachedLimit() ? 'presence-action-limit-reached' : 'presence-no-activities', current: null,
           canPause: false, canResume: false, canStop: false });
         return snapshot();
       } catch (error) {
         if (signal.aborted || error?.name === 'AbortError') {
-          publish({ status: 'stopped', reason: 'presence-session-stopped', current: null,
+          const expired = signal.reason === 'presence-session-expired';
+          publish({ status: expired ? 'expired' : 'stopped',
+            reason: expired ? 'presence-session-expired' : 'presence-session-stopped', current: null,
             canPause: false, canResume: false, canStop: false });
           return snapshot();
         }
@@ -10291,7 +11098,9 @@ function createPresenceSession({
           canPause: false, canResume: false, canStop: false });
         return snapshot();
       } finally {
+        clearTimeout(expiryTimer);
         controller = null;
+        reviewDeadline = 0;
         pauseGate = null;
       }
     });
@@ -10308,6 +11117,11 @@ function createPresenceSession({
     },
     resume() {
       if (!controller || state.status !== 'paused') return false;
+      if (now() >= reviewDeadline) {
+        controller.abort('presence-session-expired');
+        pauseGate?.();
+        return false;
+      }
       publish({ status: 'running', canPause: true, canResume: false, canStop: true });
       pauseGate?.();
       return true;
@@ -10379,6 +11193,7 @@ function normalizePresenceActivityLog(value, { limit = DEFAULT_LIMIT } = {}) {
 }
 
 function createPresenceActivityLog({
+  journal = null,
   read = () => null,
   write = () => {},
   onWriteError = () => {},
@@ -10388,6 +11203,33 @@ function createPresenceActivityLog({
   if (typeof read !== 'function' || typeof write !== 'function'
     || typeof onWriteError !== 'function' || typeof now !== 'function') {
     throw new Error('presence-log-adapter-required');
+  }
+  if (journal !== null) {
+    for (const name of ['refresh', 'append', 'clear', 'snapshot', 'settled', 'exportRecord', 'subscribe', 'dispose']) {
+      if (typeof journal?.[name] !== 'function') throw new Error('presence-log-journal-required');
+    }
+    const report = (promise) => {
+      void promise.catch(error => { try { onWriteError(error); } catch { /* Storage failure remains in journal state. */ } });
+      return promise;
+    };
+    return Object.freeze({
+      append(value = {}) {
+        const at = timestamp(value.at) || timestamp(now());
+        const eventId = clean(value.eventId, 160)
+          || `${at}:${clean(value.kind, 24)}:${clean(value.action, 48)}:${clean(value.outcome, 32)}`;
+        const entry = normalizeEntry({ ...value, at, eventId });
+        if (!entry) throw new Error('presence-log-entry-invalid');
+        report(journal.append([entry]));
+        return entry;
+      },
+      clear: options => report(journal.clear(options)),
+      refresh: options => journal.refresh(options),
+      snapshot: () => journal.snapshot(),
+      settled: () => journal.settled(),
+      exportRecord: () => journal.exportRecord(),
+      subscribe: listener => journal.subscribe(listener),
+      dispose: () => journal.dispose(),
+    });
   }
   let record = normalizePresenceActivityLog(read(), { limit });
   let writeQueue = Promise.resolve();
@@ -10452,6 +11294,382 @@ function createPresenceActivityLog({
 
 return Object.freeze({ normalizePresenceActivityLog, createPresenceActivityLog });
 })();
+localModules["extension/presence-history-journal.js"] = (() => {
+const { normalizePresenceActivityLog } = localModules["extension/presence-activity-log.js"];
+
+const prefix = actor => 'instaToolboxPresenceActivityLogV1:' + actor + ':journal:v1:op:';
+const legacyKey = actor => 'instaToolboxPresenceActivityLogV1:' + actor;
+const noticeKey = actor => legacyKey(actor) + ':journal:v1:notice';
+const failure = reason => new Error(reason);
+const secureId = () => {
+  if (typeof globalThis.crypto?.getRandomValues !== 'function') throw failure('history-randomness-unavailable');
+  return [...globalThis.crypto.getRandomValues(new Uint8Array(16))]
+    .map(value => value.toString(16).padStart(2, '0')).join('');
+};
+const contentHash = async value => {
+  if (typeof globalThis.crypto?.subtle?.digest !== 'function') throw failure('history-hash-unavailable');
+  const bytes = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(value)));
+  return [...new Uint8Array(bytes)].map(value => value.toString(16).padStart(2, '0')).join('');
+};
+
+const clone = value => structuredClone(value);
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+function validOperation(key, value, actor) {
+  if (!value || value.version !== 1 || value.actor !== actor
+    || !['baseline', 'append', 'clear', 'checkpoint'].includes(value.kind)
+    || typeof value.id !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(value.id)
+    || key !== prefix(actor) + value.id || !Array.isArray(value.clearIds)
+    || value.clearIds.some(id => typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(id))
+    || new Set(value.clearIds).size !== value.clearIds.length
+    || !Array.isArray(value.entries) || value.entries.length > 500) return null;
+  const normalized = normalizePresenceActivityLog({ entries: value.entries });
+  if (!same(normalized.entries, value.entries)) return null;
+  if (value.kind === 'clear' && value.entries.length) return null;
+  if (value.kind === 'baseline' && (value.clearIds.length || !/^baseline_[a-f0-9]{64}$/.test(value.id))) return null;
+  if (value.kind === 'checkpoint' && (!Array.isArray(value.covers) || value.covers.length > 32
+    || value.covers.some(ref => !ref || !ref.key?.startsWith(prefix(actor)) || !/^[a-f0-9]{64}$/.test(ref.hash))
+    || !Array.isArray(value.rows) || value.rows.length > 500 || value.entries.length
+    || value.rows.some(row => !row || !same(normalizePresenceActivityLog({ entries: [row.entry] }).entries, [row.entry])
+      || !Array.isArray(row.contexts) || !row.contexts.length || row.contexts.some(context => !Array.isArray(context)
+        || context.some(id => typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(id))))
+    || !Array.isArray(value.legacyImportIds)
+    || value.legacyImportIds.some(id => typeof id !== 'string' || !/^baseline_[a-f0-9]{64}$/.test(id)))) return null;
+  return clone(value);
+}
+
+function reduceView(known, actor, unresolvedKeys = []) {
+  const operations = [...known].flatMap(([key, value]) => {
+    const operation = validOperation(key, value, actor);
+    return operation ? [operation] : [];
+  });
+  // Every observed immutable Clear barrier remains in the applied fence set.
+  // Time never chooses a winning Clear or establishes discovery completeness.
+  const clearIds = [...new Set(operations.flatMap(op => [
+    ...(op.kind === 'clear' ? [op.id] : []),
+    ...(op.kind === 'checkpoint' ? op.clearIds : []),
+  ]))].sort();
+  const legacyImportIds = [...new Set(operations.flatMap(op => op.kind === 'baseline'
+    ? [op.id] : op.kind === 'checkpoint' ? op.legacyImportIds : []))].sort();
+  const byId = new Map(), conflicts = new Set(), contextsById = new Map();
+  let fencedOperationCount = 0;
+  for (const operation of operations) {
+    if (operation.kind === 'clear') continue;
+    const rows = operation.kind === 'checkpoint' ? operation.rows
+      : operation.entries.map(entry => ({ entry, contexts: [operation.clearIds] }));
+    for (const { entry, contexts } of rows) {
+      const eligible = contexts.filter(context => clearIds.every(id => context.includes(id)));
+      if (!eligible.length) { fencedOperationCount += 1; continue; }
+      const old = byId.get(entry.eventId);
+      if (old && !same(old, entry)) conflicts.add(entry.eventId);
+      else byId.set(entry.eventId, entry);
+      const original = contextsById.get(entry.eventId) || new Map();
+      for (const context of eligible) original.set(JSON.stringify([...context].sort()), [...context].sort());
+      contextsById.set(entry.eventId, original);
+    }
+  }
+  const entries = [...byId.values()].filter(entry => !conflicts.has(entry.eventId))
+    .sort((a, b) => b.at - a.at || a.eventId.localeCompare(b.eventId)).slice(0, 500);
+  const rows = entries.map(entry => ({ entry, contexts: [...contextsById.get(entry.eventId).values()] }));
+  return Object.freeze({ version: 1, entries, rows, clearIds, legacyImportIds,
+    viewScope: 'confirmed-discovered-operations', globallyFresh: false,
+    discoveredOperationCount: operations.length, unresolvedKeys: [...unresolvedKeys],
+    fencedOperationCount, conflictingEventIds: [...conflicts].sort(),
+  });
+}
+
+
+/**
+ * Private, actor-bound history only. Immutable acknowledged operations avoid
+ * overwriting another instance's history. Discovery is never a freshness/CAS
+ * claim. The 500 bound is the visible/exported view, not all backing storage.
+ */
+function createPresenceHistoryJournal({
+  accountKey, readLegacy, storage, randomId = secureId, hash = contentHash,
+  now = Date.now, timeoutMs = 10_000,
+} = {}) {
+  if (typeof accountKey !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(accountKey)
+    || typeof readLegacy !== 'function' || typeof randomId !== 'function'
+    || typeof hash !== 'function' || typeof now !== 'function'
+    || !Number.isFinite(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000
+    || ['getValue', 'listValues', 'setValue', 'deleteValue', 'listen', 'unlisten']
+      .some(name => typeof storage?.[name] !== 'function')) throw failure('history-adapter-unavailable');
+  const actor = accountKey;
+  const known = new Map(), pending = new Map(), issued = new Set(), listeners = new Set();
+  const cleanupUncertain = new Set();
+  let unresolved = [], tail = Promise.resolve(), latest = Promise.resolve();
+  let initialized = false, loading = false, clearing = false, readFailed = false;
+  let disposed = false, refreshing = null, compacting = null, remoteClearRevision = 0;
+  let applied = new Set();
+
+  const view = () => reduceView(known, actor, unresolved);
+  const pendingRelevant = () => {
+    const fences = view().clearIds;
+    return [...pending.values()].filter(item => ['append', 'clear'].includes(item.operation.kind)
+      && (item.operation.kind === 'clear' || fences.every(id => item.operation.clearIds.includes(id))));
+  };
+  const snapshot = () => {
+    const current = view(), waiting = pendingRelevant();
+    return clone({ version: 1, entries: current.entries, history: {
+      initialized, loading, saving: waiting.some(item => !item.failed),
+      clearing, error: readFailed || waiting.some(item => item.failed),
+      pendingCount: waiting.length, unresolvedCount: unresolved.length + cleanupUncertain.size,
+      conflictCount: current.conflictingEventIds.length, scope: 'confirmed-discovered',
+      globallyFresh: false, remoteClearRevision,
+    } });
+  };
+  function publish() {
+    const next = new Set(view().clearIds);
+    for (const id of next) if (!applied.has(id) && !issued.has(id)) remoteClearRevision += 1;
+    applied = next;
+    if (disposed) return;
+    const value = snapshot();
+    for (const listener of listeners) { try { listener(value); } catch { /* A view cannot authorize or abort storage work. */ } }
+  }
+  const alive = signal => {
+    if (disposed || signal.aborted) throw failure('history-operation-interrupted');
+  };
+  function awaitSignal(value, signal) {
+    if (signal.aborted) { void Promise.resolve(value).catch(() => {}); return Promise.reject(failure('history-operation-timeout')); }
+    return new Promise((resolve, reject) => {
+      const abort = () => { signal.removeEventListener('abort', abort); reject(failure('history-operation-timeout')); };
+      signal.addEventListener('abort', abort, { once: true });
+      Promise.resolve(value).then(result => {
+        signal.removeEventListener('abort', abort);
+        if (signal.aborted) reject(failure('history-operation-timeout')); else resolve(result);
+      }, error => { signal.removeEventListener('abort', abort); reject(error); });
+    });
+  }
+  async function call(name, args, signal) {
+    alive(signal);
+    const result = storage[name](...args);
+    if (!result || typeof result.then !== 'function') throw failure('history-acknowledged-adapter-required');
+    const value = await awaitSignal(result, signal);
+    alive(signal);
+    return value;
+  }
+  function schedule(operation) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const result = tail.then(() => { alive(controller.signal); return operation(controller.signal); });
+    tail = result.catch(() => {});
+    const bounded = awaitSignal(result, controller.signal).finally(() => clearTimeout(timer));
+    void bounded.catch(() => {});
+    return bounded;
+  }
+  function checkGuard(guard) {
+    if (guard === undefined) return;
+    if (typeof guard !== 'function') throw failure('history-account-changed');
+    const result = guard();
+    if (result !== true) {
+      if (result && typeof result.then === 'function') void Promise.resolve(result).catch(() => {});
+      throw failure('history-account-changed');
+    }
+  }
+  function operation(kind, entries = []) {
+    const id = randomId();
+    if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(id)) throw failure('history-operation-id-invalid');
+    return { version: 1, actor, id, kind,
+      clearIds: [...new Set([...view().clearIds, ...issued])].sort(),
+      entries: normalizePresenceActivityLog({ entries }).entries };
+  }
+  function prepare(value, guard) {
+    const key = prefix(actor) + value.id;
+    const clean = validOperation(key, value, actor);
+    if (!clean) throw failure('history-operation-invalid');
+    checkGuard(guard);
+    const existing = pending.get(key);
+    if (existing && !same(existing.operation, clean)) throw failure('history-operation-retry-changed');
+    const item = existing || { operation: clean, failed: false };
+    pending.set(key, item);
+    if (clean.kind === 'clear') issued.add(clean.id);
+    return { key, item, guard };
+  }
+  async function commitInside(prepared, signal) {
+    const { key, item, guard } = prepared;
+    let dispatched = false;
+    try {
+      alive(signal);
+      checkGuard(guard); // No await between fresh actor proof and dispatch.
+      dispatched = true;
+      prepared.dispatched = true;
+      item.failed = false;
+      await call('setValue', [key, clone(item.operation)], signal);
+      known.set(key, clone(item.operation));
+      pending.delete(key);
+      publish();
+      // Notice is an optional discovery hint, never a canonical record or receipt.
+      try {
+        const hint = storage.setValue(noticeKey(actor), { version: 1, operationKey: key });
+        void Promise.resolve(hint).catch(() => {});
+      } catch { /* The immutable operation is already acknowledged. */ }
+      return { operationId: item.operation.id, acknowledged: true,
+        fenced: item.operation.kind !== 'clear' && !view().clearIds.every(id => item.operation.clearIds.includes(id)),
+        view: snapshot() };
+    } catch (error) {
+      if (!dispatched && item.operation.kind === 'clear') {
+        pending.delete(key); issued.delete(item.operation.id);
+      } else item.failed = true;
+      publish();
+      throw error;
+    }
+  }
+  function submit(value, guard) {
+    let prepared;
+    try { prepared = prepare(value, guard); }
+    catch (error) { return Promise.reject(error); }
+    publish();
+    const result = schedule(signal => commitInside(prepared, signal));
+    void result.catch(() => { prepared.item.failed = true; publish(); });
+    return result;
+  }
+  async function discoverInside(signal) {
+    const keys = await call('listValues', [], signal);
+    if (!Array.isArray(keys) || keys.some(key => typeof key !== 'string')) throw failure('history-discovery-invalid');
+    const missing = [];
+    for (const key of keys) {
+      if (!key.startsWith(prefix(actor)) || pending.has(key)) continue;
+      const value = await call('getValue', [key, null], signal);
+      const clean = validOperation(key, value, actor);
+      if (!clean) { missing.push(key); continue; }
+      const old = known.get(key);
+      if (old && !same(old, clean)) { missing.push(key); continue; }
+      known.set(key, clean);
+    }
+    unresolved = missing;
+    alive(signal);
+  }
+  async function importInside(signal) {
+    const record = await awaitSignal(readLegacy(), signal);
+    alive(signal);
+    const entries = normalizePresenceActivityLog(record).entries;
+    const id = 'baseline_' + await awaitSignal(hash(entries), signal);
+    alive(signal);
+    if (!/^baseline_[a-f0-9]{64}$/.test(id)) throw failure('history-hash-invalid');
+    if (view().legacyImportIds.includes(id)) return;
+    // Import is always original generation, including after Clear/reload.
+    await commitInside(prepare({ version: 1, actor, id, kind: 'baseline', clearIds: [], entries }), signal);
+  }
+  async function retryInside(signal) {
+    for (const [key, item] of [...pending]) {
+      if (item.operation.kind !== 'append' || !item.failed) continue;
+      if (!view().clearIds.every(id => item.operation.clearIds.includes(id))) { pending.delete(key); continue; }
+      await commitInside({ key, item }, signal);
+    }
+  }
+  function refresh({ retryPending = false } = {}) {
+    if (refreshing) return refreshing;
+    loading = true; publish();
+    refreshing = schedule(async signal => {
+      await discoverInside(signal);
+      await importInside(signal);
+      if (retryPending) await retryInside(signal);
+      alive(signal);
+      initialized = true; readFailed = false;
+      return snapshot();
+    }).catch(error => { readFailed = true; throw error; }).finally(() => {
+      loading = false; refreshing = null; publish();
+    }).then(() => snapshot());
+    void refreshing.catch(() => {});
+    return refreshing;
+  }
+  function append(entries) {
+    if (!Array.isArray(entries) || !entries.length || entries.length > 500) return Promise.reject(failure('history-entry-invalid'));
+    const normalized = normalizePresenceActivityLog({ entries }).entries;
+    if (normalized.length !== entries.length) return Promise.reject(failure('history-entry-invalid'));
+    const value = operation('append', normalized); // Capture original context before queue wait.
+    latest = submit(value);
+    void latest.then(() => { if (known.size > 64) void compact().catch(() => {}); }, () => {});
+    return latest;
+  }
+  function clear({ beforeCommit } = {}) {
+    if (clearing) return Promise.reject(failure('history-clear-pending'));
+    let prepared;
+    try { prepared = prepare(operation('clear'), beforeCommit); }
+    catch (error) { return Promise.reject(error); }
+    clearing = true; publish();
+    latest = schedule(signal => commitInside(prepared, signal)).catch(error => {
+      if (!prepared.dispatched) { pending.delete(prepared.key); issued.delete(prepared.item.operation.id); }
+      throw error;
+    }).finally(() => { clearing = false; publish(); });
+    void latest.catch(() => {});
+    return latest;
+  }
+  async function compactInside(signal) {
+    const before = view(), conflicts = new Set(before.conflictingEventIds);
+    const candidates = [...known].filter(([, value]) => value.kind !== 'clear'
+      && !(value.kind === 'checkpoint' ? value.rows.map(row => row.entry) : value.entries)
+        .some(entry => conflicts.has(entry.eventId))).slice(0, 32);
+    if (!candidates.length) return snapshot();
+    const value = operation('checkpoint');
+    value.clearIds = [...before.clearIds];
+    value.rows = clone(before.rows);
+    value.legacyImportIds = [...before.legacyImportIds];
+    value.covers = [];
+    for (const [key, covered] of candidates) {
+      const fingerprint = await awaitSignal(hash(covered), signal);
+      alive(signal);
+      if (!/^[a-f0-9]{64}$/.test(fingerprint)) throw failure('history-hash-invalid');
+      value.covers.push({ key, hash: fingerprint });
+    }
+    await commitInside(prepare(value), signal);
+    // The acknowledged checkpoint establishes logical 500-entry retirement.
+    // Physical deletion is separate and may fail/settle indeterminately.
+    const cleanup = [];
+    const currentConflicts = new Set(view().conflictingEventIds);
+    for (const ref of value.covers) {
+      const covered = known.get(ref.key);
+      if (!covered || covered.kind === 'clear') continue;
+      const fingerprint = await awaitSignal(hash(covered), signal);
+      alive(signal);
+      const rows = covered.kind === 'checkpoint' ? covered.rows.map(row => row.entry) : covered.entries;
+      if (fingerprint !== ref.hash || rows.some(entry => currentConflicts.has(entry.eventId))) continue;
+      cleanup.push(ref.key);
+    }
+    for (const key of cleanup) known.delete(key);
+    publish();
+    for (const key of cleanup) {
+      try { await call('deleteValue', [key], signal); cleanupUncertain.delete(key); }
+      catch (error) { cleanupUncertain.add(key); publish(); throw error; }
+    }
+    publish();
+    return snapshot();
+  }
+  function compact() {
+    if (compacting) return compacting;
+    compacting = schedule(signal => compactInside(signal)).finally(() => { compacting = null; publish(); });
+    void compacting.catch(() => {});
+    return compacting;
+  }
+  const listenerId = storage.listen(noticeKey(actor), value => {
+    if (disposed || value?.version !== 1 || typeof value.operationKey !== 'string'
+      || !value.operationKey.startsWith(prefix(actor))) return;
+    void refresh().catch(() => {});
+  });
+  return Object.freeze({
+    refresh, append, clear, compact, snapshot,
+    settled: () => latest,
+    exportRecord() {
+      const value = snapshot();
+      return Object.freeze({ schemaVersion: 1, kind: 'insta-toolbox-presence-log',
+        generatedAt: new Date(now()).toISOString(), entries: value.entries,
+        historyScope: 'confirmed-discovered', globallyFresh: false,
+        pendingActivityExcluded: value.history.pendingCount > 0 });
+    },
+    subscribe(listener) {
+      if (typeof listener !== 'function') throw failure('presence-log-listener-required');
+      listeners.add(listener); listener(snapshot());
+      return () => listeners.delete(listener);
+    },
+    dispose() {
+      if (disposed) return;
+      disposed = true; listeners.clear(); storage.unlisten(listenerId);
+    },
+  });
+}
+
+return Object.freeze({ createPresenceHistoryJournal });
+})();
 localModules["extension/presence-session-panel.js"] = (() => {
 const { PRESENCE_ACTION_LABELS, normalizePresenceSessionOptions } = localModules["extension/presence-session.js"];
 const { createPresenceActivityLog } = localModules["extension/presence-activity-log.js"];
@@ -10459,13 +11677,15 @@ const { createPresenceActivityLog } = localModules["extension/presence-activity-
 
 const ACTIONS = Object.freeze([
   ['viewStories', 'View stories'],
-  ['reactStories', 'React to stories'],
+  ['reactStories', 'Like stories'],
   ['likePosts', 'Like posts'],
   ['followPeople', 'Follow on Explore'],
   ['acceptRequests', 'Accept incoming requests'],
 ]);
 
 const clean = (value) => String(value ?? '').trim();
+const durationLabelFor = minutes => minutes % 60 === 0
+  ? `${minutes / 60} hour${minutes === 60 ? '' : 's'}` : `${minutes} minutes`;
 
 function mountPresenceSessionPanel({
   container,
@@ -10476,6 +11696,8 @@ function mountPresenceSessionPanel({
   writePreferences = () => {},
   readLog = () => null,
   writeLog = () => {},
+  createHistoryStore = null,
+  onAccountReady = () => {},
   busy = () => false,
   onStatus = () => {},
   document = globalThis.document,
@@ -10487,7 +11709,8 @@ function mountPresenceSessionPanel({
     || typeof inspectAccount !== 'function' || typeof confirmAction !== 'function'
     || typeof readPreferences !== 'function' || typeof writePreferences !== 'function'
     || typeof readLog !== 'function' || typeof writeLog !== 'function'
-    || typeof busy !== 'function' || typeof onStatus !== 'function' || typeof now !== 'function') {
+    || (createHistoryStore !== null && typeof createHistoryStore !== 'function')
+    || typeof onAccountReady !== 'function' || typeof busy !== 'function' || typeof onStatus !== 'function' || typeof now !== 'function') {
     throw new Error('presence-panel-adapter-required');
   }
 
@@ -10554,6 +11777,8 @@ function mountPresenceSessionPanel({
   liveOption.value = 'live';
   mode.append(sessionOption, liveOption);
   modeLabel.append(mode);
+  const modeHelp = create('p', '', 'lead');
+  modeHelp.setAttribute('data-presence-mode-help', '');
   const limitLabel = create('label', 'Actions this session', 'presence-limit');
   const limit = create('input');
   limit.type = 'number';
@@ -10566,8 +11791,8 @@ function mountPresenceSessionPanel({
   const liveOptions = create('div', null, 'presence-live-options');
   const durationLabel = create('label', 'Keep running', 'presence-limit');
   const duration = create('select');
-  for (const [value, label] of [[60, '1 hour'], [120, '2 hours'], [240, '4 hours'], [480, '8 hours'], [720, '12 hours']]) {
-    const option = create('option', label); option.value = String(value); duration.append(option);
+  for (const value of [30, 60, 120, 240, 480, 720]) {
+    const option = create('option', durationLabelFor(value)); option.value = String(value); duration.append(option);
   }
   durationLabel.append(duration);
   const breaksLabel = create('label', null, 'presence-option');
@@ -10602,6 +11827,9 @@ function mountPresenceSessionPanel({
   stop.setAttribute('data-presence-stop', '');
   actions.append(start, pause, resume, stop);
   const statusBox = create('div', null, 'presence-status');
+  statusBox.setAttribute('role', 'status');
+  statusBox.setAttribute('aria-live', 'polite');
+  statusBox.setAttribute('aria-atomic', 'true');
   const statusTitle = create('strong', 'Ready');
   const statusDetail = create('span', 'Nothing happens until you confirm.');
   statusBox.append(statusTitle, statusDetail);
@@ -10611,6 +11839,8 @@ function mountPresenceSessionPanel({
   const logSummary = create('summary', 'Activity log');
   const logBody = create('div', null, 'presence-log-body');
   const logEmpty = create('p', 'No Presence activity yet.', 'presence-log-empty');
+  const logStatus = create('p', '', 'presence-log-empty');
+  const logHint = create('p', '', 'presence-log-empty');
   const logRecent = create('ul', null, 'presence-results');
   logRecent.setAttribute('aria-label', 'Recent Presence activity');
   const logControls = create('div', null, 'presence-controls');
@@ -10618,22 +11848,90 @@ function mountPresenceSessionPanel({
   const exportLog = create('button', 'Download log', 'button quiet'); exportLog.type = 'button';
   const clearLog = create('button', 'Clear log', 'button quiet'); clearLog.type = 'button';
   logControls.append(openLog, exportLog, clearLog);
-  logBody.append(logEmpty, logRecent, logControls);
+  logBody.append(logStatus, logHint, logEmpty, logRecent, logControls);
   logDetails.append(logSummary, logBody);
-  root.append(style, heading, intro, options, runGrid, statusBox, actions, results, logDetails);
+  root.append(style, heading, intro, options, runGrid, modeHelp, statusBox, actions, results, logDetails);
   container.replaceChildren(root);
 
   let disposed = false;
   let confirming = false;
+  let historyStart = null;
+  let lastSessionActions = 10;
   let logWindow = null;
   const loggedEvents = new Set();
   const listeners = [];
-  const activityLog = createPresenceActivityLog({
-    read: readLog,
-    write: writeLog,
-    onWriteError: () => onStatus('Presence activity could not be saved. Existing history is unchanged.'),
-    now,
-  });
+  const logs = new Map();
+  const runLogs = new Map();
+  let visibleLog = null;
+  let unsubscribeLog = null;
+  let currentRunLog = null;
+  let logReadFailed = false;
+  const initialHistory = new Map();
+  const historyUi = new Map();
+  const clearingLogs = new Set();
+  const verifiedLogAccount = (value) => {
+    try {
+      const account = value === undefined ? inspectAccount() : value;
+      return account?.accountVerified === true && account.usable === true
+        && typeof account.accountId === 'string' && clean(account.accountId)
+        && typeof account.accountKey === 'string' && clean(account.accountKey)
+        ? { accountId: clean(account.accountId), accountKey: clean(account.accountKey) } : null;
+    } catch { return null; }
+  };
+  const sameLogAccount = (left, right) => Boolean(left && right
+    && left.accountId === right.accountId && left.accountKey === right.accountKey);
+  function scopedLog(account) {
+    if (!account) return null;
+    const existing = logs.get(account.accountKey);
+    if (existing) return sameLogAccount(existing.account, account) ? existing : null;
+    let binding;
+    try {
+      const owner = Object.freeze({ ...account });
+      const journal = createHistoryStore ? createHistoryStore(owner.accountKey) : null;
+      if (createHistoryStore && journal == null) throw new Error('presence-log-journal-required');
+      const log = createPresenceActivityLog({
+        ...(createHistoryStore ? { journal }
+          : { read: () => readLog(owner.accountKey), write: value => writeLog(value, owner.accountKey) }), now,
+        onWriteError: () => {
+          if (binding) historyUi.get(binding).error = true;
+          if (visibleLog === binding) renderLog();
+        } });
+      binding = Object.freeze({ account: owner, log });
+      logs.set(owner.accountKey, binding);
+      historyUi.set(binding, { error: false, notice: '', saving: false, remoteClearRevision: 0 });
+      if (typeof log.refresh === 'function') {
+        const ready = Promise.resolve(log.refresh()).catch(() => {
+          historyUi.get(binding).error = true;
+          if (!disposed && visibleLog === binding) renderLog();
+          return log.snapshot();
+        });
+        initialHistory.set(binding, ready);
+      }
+      logReadFailed = false;
+      return binding;
+    } catch {
+      logReadFailed = true;
+      return null;
+    }
+  }
+  function refreshLog() {
+    if (disposed) return null;
+    const account = verifiedLogAccount();
+    if (!account) logReadFailed = false;
+    const next = scopedLog(account);
+    if (next !== visibleLog) {
+      unsubscribeLog?.();
+      visibleLog = next;
+      unsubscribeLog = next?.log.subscribe(record => {
+        if (disposed || visibleLog !== next) return;
+        if (sameLogAccount(verifiedLogAccount(), next.account)) renderLog(record);
+        else refreshLog();
+      }) || null;
+      if (!next) renderLog();
+      if (next) { try { onAccountReady(next.account); } catch { /* Context guidance cannot change action authority. */ } }
+    } else renderLog();
+    return next;
+  }
   const listen = (node, type, handler) => {
     node.addEventListener(type, handler);
     listeners.push(() => node.removeEventListener(type, handler));
@@ -10641,7 +11939,7 @@ function mountPresenceSessionPanel({
 
   function readOptions() {
     const maxActions = Number(limit.value);
-    if (!Number.isInteger(maxActions) || maxActions < 1 || maxActions > 50) {
+    if (mode.value !== 'live' && (!Number.isInteger(maxActions) || maxActions < 1 || maxActions > 50)) {
       throw new Error('presence-action-limit-invalid');
     }
     return normalizePresenceSessionOptions({
@@ -10666,7 +11964,11 @@ function mountPresenceSessionPanel({
     breaks.checked = options.scheduledBreaks;
     burst.value = String(options.liveBurstActions);
     quiet.value = String(options.quietMinutes);
-    writePreferences({ ...structuredClone(options), sessionActions: Number(limit.value) });
+    const sessionActions = Number(limit.value);
+    if (Number.isInteger(sessionActions) && sessionActions >= 1 && sessionActions <= 50) {
+      lastSessionActions = sessionActions;
+    }
+    writePreferences({ ...structuredClone(options), sessionActions: lastSessionActions });
     return options;
   }
   function load() {
@@ -10679,42 +11981,69 @@ function mountPresenceSessionPanel({
     const sessionActions = Number(source.sessionActions ?? (saved.mode === 'session' ? saved.maxActions : 10));
     limit.value = String(Number.isInteger(sessionActions) && sessionActions >= 1 && sessionActions <= 50
       ? sessionActions : 10);
-    duration.value = String(saved.liveDurationMinutes);
+    lastSessionActions = Number(limit.value);
+    const restoreChoice = (select, value, label) => {
+      if (![...select.children].some(option => option.value === String(value))) {
+        const option = create('option', label); option.value = String(value); select.append(option);
+      }
+      select.value = String(value);
+    };
+    restoreChoice(duration, saved.liveDurationMinutes, durationLabelFor(saved.liveDurationMinutes));
     breaks.checked = saved.scheduledBreaks;
-    burst.value = String(saved.liveBurstActions);
-    quiet.value = String(saved.quietMinutes);
+    restoreChoice(burst, saved.liveBurstActions, `${saved.liveBurstActions} actions`);
+    restoreChoice(quiet, saved.quietMinutes, `${saved.quietMinutes} minutes`);
   }
   function describe(snapshot) {
     const count = Number(snapshot.completed || 0);
+    const progress = `${count}${Number.isInteger(snapshot.maxActions) && snapshot.maxActions > 0
+      ? ` of ${snapshot.maxActions}` : ''} verified action${snapshot.maxActions === 1 || (count === 1 && !snapshot.maxActions) ? '' : 's'}.`
+      + (snapshot.skipped ? ` ${snapshot.skipped} skipped.` : '');
+    const time = value => new Date(value).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    const ends = snapshot.expiresAt ? ` Run ends at ${time(snapshot.expiresAt)}.` : '';
     if (snapshot.status === 'idle') return ['Ready', 'Nothing happens until you confirm.'];
-    if (snapshot.status === 'running') return [snapshot.current?.label || 'Presence is running', `${count} verified action${count === 1 ? '' : 's'}.`];
-    if (snapshot.status === 'searching') return ['Looking for something to do', `${count} verified action${count === 1 ? '' : 's'}. Presence is checking the loaded Instagram tab now.`];
-    if (snapshot.status === 'waiting') return ['Presence is running', `${count} verified action${count === 1 ? '' : 's'}. Next action coming up.`];
-    if (snapshot.status === 'quiet') return ['Scheduled break', `${count} verified action${count === 1 ? '' : 's'}. Presence will continue in this loaded tab.`];
-    if (snapshot.status === 'paused') return ['Paused', `${count} verified action${count === 1 ? '' : 's'}. Resume or stop when ready.`];
-    if (snapshot.status === 'stopping') return ['Stopping', 'No new action will begin.'];
-    if (snapshot.status === 'stopped') return ['Stopped', `${count} verified action${count === 1 ? '' : 's'}.`];
-    if (snapshot.status === 'completed') return ['Presence finished', `${count} verified action${count === 1 ? '' : 's'}.`];
-    if (snapshot.status === 'expired') return ['Time limit reached', `${count} verified action${count === 1 ? '' : 's'}. Start again to continue.`];
+    if (snapshot.status === 'running') return [snapshot.current?.label || 'Presence is running', progress + ends];
+    if (snapshot.status === 'searching') return ['Looking for something to do', `${progress} Checking the loaded Instagram tab now.${ends}`];
+    if (snapshot.status === 'waiting' && snapshot.waitingReason === 'no-activities') {
+      return ['Waiting for eligible activity', `${progress} Nothing eligible is loaded. Checking again${snapshot.nextActionAt
+        ? ` at ${new Date(snapshot.nextActionAt).toLocaleTimeString()}` : ' shortly'}.${ends}`];
+    }
+    if (snapshot.status === 'waiting') return ['Presence is running', `${progress} Next action coming up.${ends}`];
+    if (snapshot.status === 'quiet') return ['Scheduled break', `${progress} Continuing${snapshot.nextActionAt
+      ? ` at ${time(snapshot.nextActionAt)}` : ' after this break'} in this loaded tab.${ends}`];
+    if (snapshot.status === 'paused') return ['Paused', `${progress} Resume before the time limit, or stop.${ends}`];
+    if (snapshot.status === 'stopping') return ['Stopping', 'No new action will begin. Checking the outcome of any action already sent.'];
+    if (snapshot.status === 'stopped') return ['Stopped', progress];
+    if (snapshot.status === 'completed' && snapshot.reason === 'presence-no-activities') {
+      return [count ? 'No more eligible activity found' : 'No eligible activity found',
+        `${progress} The loaded pages had no remaining eligible targets. You can choose different activities and start again.`];
+    }
+    if (snapshot.status === 'completed') return ['Presence finished', progress];
+    if (snapshot.status === 'expired') return ['Time limit reached', `${progress} Start again to continue.`];
     return ['Needs attention', clean(snapshot.reason) || 'Check Instagram before starting again.'];
   }
   function render(snapshot = session.snapshot()) {
     if (disposed) return;
+    refreshLog();
     logResultEntries(snapshot);
     const [title, detail] = describe(snapshot);
     const active = ['running', 'searching', 'waiting', 'quiet', 'paused', 'stopping'].includes(snapshot.status);
     intro.hidden = active;
     options.hidden = active;
     runGrid.hidden = active;
+    modeHelp.hidden = active;
+    modeHelp.textContent = mode.value === 'live'
+      ? 'Live like me repeats only your selected activities until the time limit. It does not learn your tastes. Keep this Instagram tab open.'
+      : 'One session stops at your action limit or when no eligible activity is found. Only verified actions count toward the limit.';
     limitLabel.hidden = mode.value === 'live';
     liveOptions.hidden = mode.value !== 'live';
     burstLabel.hidden = !breaks.checked;
     quietLabel.hidden = !breaks.checked;
     statusBox.hidden = snapshot.status === 'idle';
-    statusTitle.textContent = title;
-    statusDetail.textContent = detail;
+    if (statusTitle.textContent !== title) statusTitle.textContent = title;
+    if (statusDetail.textContent !== detail) statusDetail.textContent = detail;
     start.hidden = snapshot.status !== 'idle' && !['completed', 'stopped', 'expired', 'needs-attention'].includes(snapshot.status);
     start.disabled = confirming || busy();
+    start.textContent = historyStart ? 'Loading history…' : 'Start';
     pause.hidden = snapshot.canPause !== true;
     pause.disabled = snapshot.canPause !== true;
     resume.hidden = snapshot.canResume !== true;
@@ -10742,21 +12071,52 @@ function mountPresenceSessionPanel({
     const label = entry.target || PRESENCE_ACTION_LABELS[entry.action] || 'Presence';
     return { label, detail: `${time} · ${entry.outcome}${entry.detail ? ` · ${entry.detail}` : ''}` };
   }
-  function renderLog(record = activityLog.snapshot()) {
+  function historyPresentation(record, binding = visibleLog) {
+    const history = record.history, ui = historyUi.get(binding);
+    if (!binding) return { ready: false, status: logReadFailed
+      ? 'Activity history could not be loaded. Reopen Activity log to retry.'
+      : 'Verify your account to load its local Presence history.', hint: '' };
+    if (!history) return { ready: true, status: ui?.error ? 'Some activity could not be saved. Keep this tab open.' : ui?.notice || '', hint: '' };
+    const remoteClear = ui && history.remoteClearRevision > ui.remoteClearRevision;
+    if (ui?.saving && !history.saving && !history.pendingCount && !history.error) ui.notice = 'Activity saved.';
+    if (remoteClear) { ui.remoteClearRevision = history.remoteClearRevision; ui.notice = 'Activity log cleared in another tab.'; }
+    if (ui) ui.saving = history.saving || history.pendingCount > 0;
+    const status = history.clearing || clearingLogs.has(binding) ? 'Clearing activity…'
+      : history.loading ? 'Loading activity…'
+        : history.error || ui?.error ? 'Activity history could not be updated. Keep this tab open and reopen Activity log to retry.'
+          : history.saving || history.pendingCount > 0 ? 'Saving activity…'
+            : !history.initialized ? 'Activity history is unavailable. Reopen Activity log to retry before starting.'
+              : history.unresolvedCount ? 'Some history updates are still being reconciled.'
+                : history.conflictCount ? 'Some activity could not be read. The loaded log may be incomplete.'
+                : ui?.notice || '';
+    const hint = 'Shows up to 500 activity entries received by this tab. Other tabs may take time to appear.'
+      + (history.pendingCount > 0 ? ' Activity still being saved is not included in downloads.' : '');
+    return { ready: history.initialized === true, status, hint };
+  }
+  function renderLog(record = visibleLog?.log.snapshot() || { entries: [] }) {
     if (disposed) return;
+    if (visibleLog && !sameLogAccount(verifiedLogAccount(), visibleLog.account)) { refreshLog(); return; }
+    const presentation = historyPresentation(record);
     logRecent.replaceChildren();
-    logEmpty.hidden = record.entries.length > 0;
+    if (logStatus.textContent !== presentation.status) logStatus.textContent = presentation.status;
+    logStatus.hidden = !presentation.status;
+    logHint.textContent = presentation.hint;
+    logHint.hidden = !presentation.hint;
+    logEmpty.textContent = record.history ? 'No activity to show.' : 'No Presence activity yet.';
+    logEmpty.hidden = !presentation.ready || record.entries.length > 0;
     for (const entry of record.entries.slice(0, 5)) {
       const row = create('li');
       const formatted = formatEntry(entry);
       row.append(create('strong', formatted.label), create('small', formatted.detail));
       logRecent.append(row);
     }
-    clearLog.disabled = record.entries.length === 0;
-    exportLog.disabled = record.entries.length === 0;
+    clearLog.disabled = !presentation.ready || clearingLogs.has(visibleLog) || record.history?.clearing === true
+      || (!record.history && record.entries.length === 0);
+    exportLog.disabled = !visibleLog || record.entries.length === 0;
+    openLog.disabled = !visibleLog;
     renderLogWindow(record);
   }
-  function downloadRecord(record = activityLog.exportRecord(), targetWindow = window) {
+  function downloadRecord(record, targetWindow = window) {
     const blob = new targetWindow.Blob([`${JSON.stringify(record, null, 2)}\n`], { type: 'application/json' });
     const href = targetWindow.URL.createObjectURL(blob);
     const link = targetWindow.document.createElement('a');
@@ -10765,21 +12125,28 @@ function mountPresenceSessionPanel({
     link.click();
     targetWindow.setTimeout(() => targetWindow.URL.revokeObjectURL(href), 0);
   }
-  function renderLogWindow(record = activityLog.snapshot()) {
-    if (!logWindow || logWindow.closed) return;
+  function renderLogWindow(record = visibleLog?.log.snapshot() || { entries: [] }) {
+    if (disposed || !logWindow || logWindow.closed) return;
+    if (visibleLog && !sameLogAccount(verifiedLogAccount(), visibleLog.account)) { refreshLog(); return; }
     const target = logWindow.document;
     const styleNode = target.createElement('style');
     styleNode.textContent = 'html{color-scheme:light dark}body{margin:0;padding:24px;background:#101114;color:#f4f1e8;font:15px/1.5 system-ui,sans-serif}main{max-width:760px;margin:auto}h1{font-size:22px;margin:0 0 4px}p{color:#b8b8bd;margin:0 0 20px}ol{list-style:none;margin:0;padding:0;border-top:1px solid #34363d}li{padding:12px 0;border-bottom:1px solid #34363d}strong,small{display:block;overflow-wrap:anywhere}small{color:#b8b8bd;margin-top:2px}.actions{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 20px}button{min-height:44px;padding:8px 14px;border:1px solid #545760;border-radius:8px;background:#202228;color:inherit;font:inherit;cursor:pointer}button:focus-visible{outline:2px solid #d94d7c;outline-offset:2px}@media(forced-colors:active){button{border-color:CanvasText}}';
     const main = target.createElement('main');
     const title = target.createElement('h1'); title.textContent = 'Presence activity';
-    const note = target.createElement('p'); note.textContent = 'Stored only in this browser.';
+    const displayedLog = visibleLog;
+    const note = target.createElement('p'); note.textContent = displayedLog
+      ? `Stored only in this browser for @${displayedLog.account.accountId}.` : 'Verify your account to load its local Presence history.';
+    const presentation = historyPresentation(record, displayedLog);
+    const state = target.createElement('p'); state.textContent = presentation.status;
+    const hint = target.createElement('p'); hint.textContent = presentation.hint;
     const buttons = target.createElement('div'); buttons.className = 'actions';
     const download = target.createElement('button'); download.type = 'button'; download.textContent = 'Download log';
-    download.disabled = record.entries.length === 0;
-    download.addEventListener('click', () => downloadRecord(activityLog.exportRecord(), logWindow));
+    download.disabled = !displayedLog || record.entries.length === 0;
+    download.addEventListener('click', () => exportHistory(displayedLog, logWindow));
     const clear = target.createElement('button'); clear.type = 'button'; clear.textContent = 'Clear log';
-    clear.disabled = record.entries.length === 0;
-    clear.addEventListener('click', () => { if (logWindow.confirm('Clear the local Presence activity log?')) activityLog.clear(); });
+    clear.disabled = !presentation.ready || clearingLogs.has(displayedLog) || record.history?.clearing === true
+      || (!record.history && record.entries.length === 0);
+    clear.addEventListener('click', () => clearHistory(displayedLog, logWindow));
     buttons.append(download, clear);
     const list = target.createElement('ol');
     for (const entry of record.entries) {
@@ -10789,27 +12156,77 @@ function mountPresenceSessionPanel({
       const small = target.createElement('small'); small.textContent = formatted.detail;
       row.append(strong, small); list.append(row);
     }
-    if (!record.entries.length) {
-      const empty = target.createElement('p'); empty.textContent = 'No Presence activity yet.'; list.append(empty);
+    if (!record.entries.length && presentation.ready) {
+      const empty = target.createElement('p'); empty.textContent = record.history ? 'No activity to show.' : 'No Presence activity yet.'; list.append(empty);
     }
-    main.append(title, note, buttons, list);
+    main.append(title, note, state, hint, buttons, list);
     target.head.replaceChildren(styleNode);
     target.title = 'Insta Toolbox · Presence activity';
     target.body.replaceChildren(main);
   }
-  function appendLog(value) {
-    try { activityLog.append(value); } catch { onStatus('Presence ran, but its activity log could not be updated.'); }
+  function exportHistory(expected = visibleLog, targetWindow = window) {
+    const binding = refreshLog();
+    if (!binding || expected !== binding) return false;
+    downloadRecord(binding.log.exportRecord(), targetWindow);
+    return true;
   }
-  function logResultEntries(snapshot) {
+  async function refreshHistory(expected = visibleLog) {
+    const binding = refreshLog();
+    if (!binding || binding !== expected || typeof binding.log.refresh !== 'function') return false;
+    if (binding.log.snapshot().history?.loading) return false;
+    const ui = historyUi.get(binding);
+    ui.error = false;
+    try { await binding.log.refresh({ retryPending: true }); }
+    catch { ui.error = true; }
+    if (disposed || binding !== visibleLog || !sameLogAccount(verifiedLogAccount(), binding.account)) return false;
+    renderLog();
+    return binding.log.snapshot().history?.initialized === true;
+  }
+  async function clearHistory(expected = visibleLog, targetWindow = window) {
+    const binding = refreshLog();
+    if (!binding || expected !== binding || clearingLogs.has(binding)
+      || binding.log.snapshot().history?.initialized === false || binding.log.snapshot().history?.clearing) return false;
+    const ui = historyUi.get(binding);
+    try {
+      if (targetWindow?.confirm?.(`Clear the local Presence activity log for @${binding.account.accountId}? This also discards activity waiting to sync from other tabs. Tabs can add new activity after they receive the clear.`) !== true) return false;
+    } catch { ui.error = true; renderLog(); return false; }
+    if (disposed || visibleLog !== binding || !sameLogAccount(verifiedLogAccount(), binding.account)) { refreshLog(); return false; }
+    clearingLogs.add(binding); ui.error = false; ui.notice = '';
+    renderLog();
+    try {
+      await binding.log.clear({ beforeCommit: () => !disposed && visibleLog === binding
+        && sameLogAccount(verifiedLogAccount(), binding.account) });
+      if (disposed || visibleLog !== binding || !sameLogAccount(verifiedLogAccount(), binding.account)) return false;
+      ui.notice = 'Activity log cleared.';
+      return true;
+    } catch {
+      if (!disposed && visibleLog === binding && sameLogAccount(verifiedLogAccount(), binding.account)) ui.error = true;
+      return false;
+    } finally {
+      clearingLogs.delete(binding);
+      if (!disposed) refreshLog();
+    }
+  }
+  function appendLog(value, binding) {
+    if (!binding) return;
+    try { binding.log.append(value); } catch {
+      historyUi.get(binding).error = true;
+      if (visibleLog === binding) renderLog();
+    }
+  }
+  const logRunFor = snapshot => snapshot.accountId ? runLogs.get(snapshot.accountId) : currentRunLog;
+  function logResultEntries(snapshot, run = logRunFor(snapshot)) {
+    if (!run || snapshot.accountId && snapshot.accountId !== run.accountId) return;
     for (const entry of [...(snapshot.results || [])].reverse()) {
       if (!entry.eventId || loggedEvents.has(entry.eventId)) continue;
       appendLog({ eventId: entry.eventId, at: entry.at, kind: 'action', action: entry.action,
-        target: entry.label, outcome: entry.status, detail: entry.reason });
+        target: entry.label, outcome: entry.status, detail: entry.reason }, run.binding);
       loggedEvents.add(entry.eventId);
     }
   }
+  const sessionActive = () => ['running', 'searching', 'waiting', 'quiet', 'paused', 'stopping'].includes(session.snapshot().status);
   async function begin() {
-    if (disposed || confirming || busy()) return false;
+    if (disposed || confirming || historyStart || busy() || sessionActive()) return false;
     let options;
     try { options = save(); } catch { onStatus('Choose a valid action limit.'); return false; }
     const enabled = ACTIONS.filter(([key]) => options.actions[key]);
@@ -10819,15 +12236,37 @@ function mountPresenceSessionPanel({
       onStatus('Instagram account could not be verified. Reload Instagram and try again.');
       return false;
     }
+    const binding = refreshLog();
     const reviewedSignature = signature(options);
+    if (createHistoryStore && !binding) { logDetails.open = true; renderLog(); return false; }
+    if (binding?.log.snapshot().history?.initialized === false) {
+      const attempt = {};
+      historyStart = attempt;
+      confirming = true;
+      render();
+      let ownsAttempt = false;
+      try { await initialHistory.get(binding); }
+      finally {
+        ownsAttempt = historyStart === attempt;
+        if (ownsAttempt) { historyStart = null; confirming = false; }
+        render();
+      }
+      let unchangedOptions = false;
+      try { unchangedOptions = signature(readOptions()) === reviewedSignature; } catch { /* Refuse changed choices. */ }
+      if (!ownsAttempt || disposed || confirming || busy() || sessionActive()
+        || !sameLogAccount(verifiedLogAccount(), binding.account) || !unchangedOptions) return false;
+      if (binding.log.snapshot().history?.initialized !== true) { logDetails.open = true; renderLog(); return false; }
+    }
+    if (disposed || busy() || sessionActive()) return false;
     const expiresAt = now() + (options.mode === 'live'
       ? options.liveDurationMinutes * 60_000 : 15 * 60_000);
     confirming = true;
     render();
-    const confirmation = await confirmAction({
+    let confirmation;
+    try { confirmation = await confirmAction({
       title: `Start Presence for @${account.accountId}?`,
       message: options.mode === 'live'
-        ? `Run Presence for up to ${options.liveDurationMinutes / 60} hour${options.liveDurationMinutes === 60 ? '' : 's'} in this loaded tab.`
+        ? `Run Presence for up to ${durationLabelFor(options.liveDurationMinutes)} in this loaded tab.`
         : `Allow up to ${options.maxActions} action${options.maxActions === 1 ? '' : 's'} in this tab.`,
       detail: 'Presence stops on Instagram restrictions, an account change, an uncertain result, or when you press Stop.',
       confirmLabel: 'Start Presence',
@@ -10844,13 +12283,23 @@ function mountPresenceSessionPanel({
       ],
       binding: { action: 'presence', accountId: account.accountId, expiresAt,
         maxActions: options.maxActions, options: reviewedSignature },
-    });
-    confirming = false;
+    }); } catch {
+      onStatus('The confirmation could not open. Nothing changed. Try again.');
+      return false;
+    } finally {
+      confirming = false;
+      render();
+    }
+    if (disposed || busy() || sessionActive()) return false;
     if (!confirmation) { render(); onStatus('Presence canceled. Nothing changed.'); return false; }
     const current = inspectAccount();
-    const currentOptions = readOptions();
+    let currentOptions;
+    try { currentOptions = readOptions(); } catch {
+      render(); onStatus('The Presence choices changed. Check them and start again.'); return false;
+    }
     if (current?.accountVerified !== true || current.usable !== true
       || current.accountId !== account.accountId || signature(currentOptions) !== reviewedSignature
+      || (createHistoryStore && current.accountKey !== account.accountKey)
       || confirmation.action !== 'presence' || confirmation.accountId !== account.accountId
       || confirmation.maxActions !== options.maxActions || confirmation.options !== reviewedSignature
       || Number(confirmation.expiresAt) !== expiresAt || expiresAt <= now()) {
@@ -10859,8 +12308,11 @@ function mountPresenceSessionPanel({
       return false;
     }
     const review = session.createReview({ accountId: account.accountId, options, expiresAt });
+    const runLog = Object.freeze({ accountId: current.accountId, binding: binding || scopedLog(verifiedLogAccount(current)) });
+    currentRunLog = runLog;
+    runLogs.set(runLog.accountId, runLog);
     appendLog({ eventId: `${review.reviewedDigest}:started`, at: now(), kind: 'session',
-      outcome: 'started', detail: options.mode === 'live' ? 'Live like me started' : 'Presence started' });
+      outcome: 'started', detail: options.mode === 'live' ? 'Live like me started' : 'Presence started' }, runLog.binding);
     render(session.snapshot());
     let outcome;
     try {
@@ -10871,52 +12323,68 @@ function mountPresenceSessionPanel({
         ? 'Another Presence or Ghost run is already active.'
         : 'Presence could not start safely in this browser.');
       appendLog({ eventId: `${review.reviewedDigest}:start-failed`, at: now(), kind: 'session',
-        outcome: 'needs-attention', detail: clean(error?.message) || 'Presence could not start' });
+        outcome: 'needs-attention', detail: clean(error?.message) || 'Presence could not start' }, runLog.binding);
       return false;
     }
-    logResultEntries(outcome);
+    logResultEntries(outcome, runLog);
     appendLog({ eventId: `${review.reviewedDigest}:${outcome.status}`, at: now(), kind: 'session',
       outcome: ['completed', 'stopped', 'expired', 'needs-attention'].includes(outcome.status)
-        ? outcome.status : 'needs-attention', detail: describe(outcome)[0] });
+        ? outcome.status : 'needs-attention', detail: describe(outcome)[0] }, runLog.binding);
     render(outcome);
-    onStatus(describe(outcome).join('. '));
+    if (!disposed) onStatus(describe(outcome).join('. '));
     return outcome.status === 'completed';
   }
 
   load();
-  const unsubscribeLog = activityLog.subscribe(renderLog);
+  listen(logDetails, 'toggle', () => {
+    if (!logDetails.open) return;
+    const binding = refreshLog();
+    if (binding) void refreshHistory(binding);
+  });
   listen(start, 'click', () => { void begin(); });
-  listen(pause, 'click', () => { if (session.pause()) { const state = session.snapshot(); appendLog({ eventId: `${state.runId}:paused:${now()}`, at: now(), kind: 'session', outcome: 'paused', detail: 'Paused' }); render(); onStatus('Presence paused.'); } });
-  listen(resume, 'click', () => { if (session.resume()) { const state = session.snapshot(); appendLog({ eventId: `${state.runId}:resumed:${now()}`, at: now(), kind: 'session', outcome: 'resumed', detail: 'Resumed' }); render(); onStatus('Presence resumed.'); } });
-  listen(stop, 'click', () => { if (session.stop()) { const state = session.snapshot(); appendLog({ eventId: `${state.runId}:stopped:${now()}`, at: now(), kind: 'session', outcome: 'stopped', detail: 'Stop requested' }); render(); onStatus('Stopping Presence.'); } });
-  for (const input of controls.values()) listen(input, 'change', () => { save(); render(); });
-  listen(limit, 'change', () => { save(); render(); });
-  for (const input of [mode, duration, breaks, burst, quiet]) listen(input, 'change', () => { save(); render(); });
+  listen(pause, 'click', () => { if (session.pause()) { const state = session.snapshot(); appendLog({ eventId: `${state.runId}:paused:${now()}`, at: now(), kind: 'session', outcome: 'paused', detail: 'Paused' }, logRunFor(state)?.binding); render(); onStatus('Presence paused.'); } });
+  listen(resume, 'click', () => { if (session.resume()) { const state = session.snapshot(); appendLog({ eventId: `${state.runId}:resumed:${now()}`, at: now(), kind: 'session', outcome: 'resumed', detail: 'Resumed' }, logRunFor(state)?.binding); render(); onStatus('Presence resumed.'); } });
+  listen(stop, 'click', () => { if (session.stop()) { const state = session.snapshot(); appendLog({ eventId: `${state.runId}:stopped:${now()}`, at: now(), kind: 'session', outcome: 'stopped', detail: 'Stop requested' }, logRunFor(state)?.binding); render(); onStatus('Stopping Presence.'); } });
+  const saveChanges = () => {
+    try { save(); } catch { onStatus('Choose an action limit from 1 to 50 for One session.'); }
+    render();
+  };
+  for (const input of controls.values()) listen(input, 'change', saveChanges);
+  listen(limit, 'change', saveChanges);
+  for (const input of [mode, duration, breaks, burst, quiet]) listen(input, 'change', saveChanges);
   listen(openLog, 'click', () => {
-    logWindow = window?.open?.('', 'insta-toolbox-presence-log', 'popup=yes,width=620,height=760,resizable=yes,scrollbars=yes') || null;
-    if (!logWindow) { onStatus('Allow pop-ups to open the Presence log window.'); return; }
+    const binding = refreshLog();
+    if (!binding) return;
+    try { logWindow = window?.open?.('', 'insta-toolbox-presence-log', 'popup=yes,width=620,height=760,resizable=yes,scrollbars=yes') || null; }
+    catch { logWindow = null; }
+    if (!logWindow) {
+      historyUi.get(binding).notice = 'The log window was blocked. Allow pop-ups and try again, or use Activity log here.';
+      renderLog(); return;
+    }
     logWindow.addEventListener?.('load', () => renderLogWindow(), { once: true });
     renderLogWindow();
     window.setTimeout?.(() => renderLogWindow(), 0);
+    void refreshHistory(binding);
   });
-  listen(exportLog, 'click', () => downloadRecord());
-  listen(clearLog, 'click', () => {
-    if (window?.confirm?.('Clear the local Presence activity log?')) activityLog.clear();
-  });
+  listen(exportLog, 'click', () => exportHistory());
+  listen(clearLog, 'click', () => clearHistory());
   render();
 
   return Object.freeze({
     begin,
     render,
+    refreshLog: () => Boolean(refreshLog()),
     stop: () => session.stop(),
-    busy: () => ['running', 'searching', 'waiting', 'quiet', 'paused', 'stopping']
-      .includes(session.snapshot().status),
+    busy: () => !disposed && (confirming || sessionActive()),
     snapshot: () => session.snapshot(),
     dispose() {
       if (disposed) return;
       session.stop();
       disposed = true;
-      unsubscribeLog();
+      confirming = false;
+      historyStart = null;
+      unsubscribeLog?.();
+      for (const binding of logs.values()) binding.log.dispose?.();
       listeners.splice(0).forEach((remove) => remove());
       root.remove();
     },
@@ -10946,6 +12414,7 @@ function observedAccounts(rows) {
   for (const row of Array.isArray(rows) ? rows : []) {
     const username = growthUsername(typeof row === 'string' ? row : row?.username);
     if (!username) continue;
+    if (row?.instagramIdAmbiguous === true) { accounts.set(username, null); continue; }
     const id = typeof row === 'object' && row !== null
       && /^[1-9]\d{0,29}$/.test(String(row.instagramId || '')) ? String(row.instagramId) : '';
     const prior = accounts.get(username);
@@ -11043,17 +12512,244 @@ function dueGrowthUnfollows(campaign, { account, now = Date.now() } = {}) {
 
 return Object.freeze({ growthUsername, rankGrowthCandidates, createGrowthCampaign, recordGrowthOutcome, growthOutcomeVerified, dueGrowthUnfollows });
 })();
+localModules["extension/presence-growth-draft.js"] = (() => {
+const { growthUsername } = localModules["extension/presence-growth.js"];
+
+const MAX_AGE = 30 * 60_000;
+const TYPES = ['followers', 'following'];
+const NATIVE_ROW_SOURCES = ['extension-scrolled-dom', 'extension-visible-dom', 'tampermonkey-visible-dom'];
+const REASONS = new Set(['pagination-complete', 'instagram-limited-list', 'cursor-missing', 'count-mismatch',
+  'count-unverified', 'count-changed', 'profile-count-disagreement', 'account-limit', 'page-limit',
+  'native-list-complete', 'native-list-truncated', 'stopped', 'native-context-changed', 'native-list-loading-timeout']);
+const freeze = value => {
+  if (value && typeof value === 'object') { Object.values(value).forEach(freeze); Object.freeze(value); }
+  return value;
+};
+const integer = value => Number.isSafeInteger(value) && value >= 0;
+const identity = value => typeof value === 'string' && /^[1-9]\d{0,29}$/.test(value);
+const object = value => value && typeof value === 'object' && !Array.isArray(value)
+  && [Object.prototype, null].includes(Object.getPrototypeOf(value));
+function keys(value, allowed, required = allowed) {
+  return object(value) && Object.keys(value).every(key => allowed.includes(key))
+    && required.every(key => Object.prototype.hasOwnProperty.call(value, key));
+}
+function handle(value) {
+  return typeof value === 'string' && growthUsername(value) === value ? value : '';
+}
+function timestamp(value) {
+  if (typeof value !== 'string') return null;
+  const parsed = Date.parse(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 && new Date(parsed).toISOString() === value ? parsed : null;
+}
+function rows(value, { max, source, nativeIds = true, seedRead = false } = {}) {
+  if (!Array.isArray(value) || value.length > max) return null;
+  const names = new Set(), ids = new Set(), output = [];
+  for (const row of value) {
+    if (!keys(row, ['username', 'source', 'instagramId', 'instagramIdAmbiguous', 'profileUrl', 'displayName'], ['username', 'source'])
+      || !handle(row.username) || names.has(row.username)
+      || (source === 'authenticated-web' ? row.source !== 'authenticated-instagram-web'
+        : source === 'list-dialog' ? !NATIVE_ROW_SOURCES.includes(row.source)
+          : ![...NATIVE_ROW_SOURCES, 'authenticated-instagram-web'].includes(row.source))
+      || (seedRead && source === 'list-dialog' && row.source !== 'extension-scrolled-dom')
+      || (row.profileUrl !== undefined && row.profileUrl !== `https://www.instagram.com/${row.username}/`)
+      || (row.displayName !== undefined && (typeof row.displayName !== 'string' || row.displayName.length > 500))
+      || (row.instagramId !== undefined && (!nativeIds || !identity(row.instagramId) || ids.has(row.instagramId)))
+      || (row.instagramIdAmbiguous !== undefined && (!nativeIds || seedRead || row.instagramIdAmbiguous !== true))
+      || (row.instagramId && row.instagramIdAmbiguous)) return null;
+    names.add(row.username);
+    if (row.instagramId) ids.add(row.instagramId);
+    output.push({ username: row.username, source: row.source,
+      ...(row.instagramId ? { instagramId: row.instagramId } : {}),
+      ...(row.instagramIdAmbiguous ? { instagramIdAmbiguous: true } : {}),
+      profileUrl: `https://www.instagram.com/${row.username}/`,
+      displayName: row.displayName || '' });
+  }
+  return output.sort((left, right) => left.username.localeCompare(right.username));
+}
+
+function growthFollowingSnapshot(value, { actor, now = Date.now() } = {}) {
+  try {
+    if (!handle(actor) || !integer(now) || !keys(value,
+      ['subjectUsername', 'listType', 'verified', 'source', 'capturedAt', 'complete', 'accounts'])
+      || value.subjectUsername !== actor || value.listType !== 'following' || value.verified !== true
+      || !['list-dialog', 'authenticated-web'].includes(value.source) || typeof value.complete !== 'boolean') return null;
+    const captured = timestamp(value.capturedAt);
+    const accounts = rows(value.accounts, { max: 25_000, source: value.source });
+    if (captured === null || captured > now || now - captured >= MAX_AGE || !accounts) return null;
+    return freeze({ subjectUsername: actor, listType: 'following', verified: true, source: value.source,
+      capturedAt: value.capturedAt, complete: value.complete, accounts });
+  } catch { return null; }
+}
+
+// An integrity checksum plus full snapshot comparison detects storage corruption.
+// This read-only record is never a receipt or permission to perform an action.
+function snapshotDigest(snapshot) {
+  const serialized = JSON.stringify(snapshot);
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < serialized.length; index += 1) {
+    hash ^= serialized.charCodeAt(index); hash = Math.imul(hash, 0x01000193);
+  }
+  return `growth-following-v1-${serialized.length}-${(hash >>> 0).toString(16).padStart(8, '0')}`;
+}
+
+function normalizedRead(value, seed, createdAt, now) {
+  if (!keys(value, ['username', 'source', 'startedAt', 'capturedAt', 'partial', 'lists'])
+    || value.username !== seed || !['list-dialog', 'authenticated-instagram-web'].includes(value.source)
+    || !integer(value.startedAt) || value.startedAt < createdAt || value.startedAt > now
+    || typeof value.partial !== 'boolean' || !keys(value.lists, TYPES)) return null;
+  const observedAt = timestamp(value.capturedAt);
+  if (observedAt === null || observedAt < value.startedAt || observedAt > now) return null;
+  const native = value.source === 'list-dialog', lists = {};
+  for (const type of TYPES) {
+    const list = value.lists[type];
+    if (!keys(list, ['owner', 'listType', 'source', 'verified', 'complete', 'capturedAt', 'expectedCount', 'pages', 'reason', 'accounts'])
+      || list.owner !== seed || list.listType !== type || list.source !== value.source
+      || typeof list.verified !== 'boolean' || typeof list.complete !== 'boolean'
+      || timestamp(list.capturedAt) === null || timestamp(list.capturedAt) < createdAt || timestamp(list.capturedAt) > observedAt
+      || (list.expectedCount !== null && !integer(list.expectedCount))
+      || (native ? list.pages !== null : !integer(list.pages) || list.pages > 1_000)
+      || (list.reason === 'native-list-loading-timeout' && (!native || value.partial !== true))
+      || !REASONS.has(list.reason) || (list.complete && (!list.verified
+        || list.reason !== (native ? 'native-list-complete' : 'pagination-complete')))) return null;
+    const accounts = rows(list.accounts, { max: 2_000, source: native ? 'list-dialog' : 'authenticated-web', nativeIds: !native, seedRead: true });
+    if (!accounts || (!list.verified && accounts.length)
+      || (list.complete && (list.expectedCount === null || list.expectedCount !== accounts.length))) return null;
+    lists[type] = { owner: seed, listType: type, source: value.source, verified: list.verified,
+      complete: list.complete, capturedAt: list.capturedAt, expectedCount: list.expectedCount,
+      pages: list.pages, reason: list.reason, accounts };
+  }
+  return { username: seed, source: value.source, startedAt: value.startedAt,
+    capturedAt: value.capturedAt, partial: value.partial, lists };
+}
+
+function validateGrowthReadDraft(value, { actor, followingSnapshot, now = Date.now() } = {}) {
+  try {
+    const fields = ['schemaVersion', 'kind', 'id', 'actor', 'createdAt', 'expiresAt', 'status', 'revision',
+      'followingSnapshot', 'followingDigest', 'followers', 'seeds', 'results'];
+    if (!keys(value, fields) || value.schemaVersion !== 1 || value.kind !== 'growth-read-draft'
+      || !handle(actor) || value.actor !== actor || typeof value.id !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(value.id)
+      || !integer(now) || !integer(value.createdAt) || value.createdAt <= 0 || value.createdAt > now
+      || !integer(value.expiresAt) || value.expiresAt <= now || value.expiresAt <= value.createdAt
+      || value.expiresAt > value.createdAt + MAX_AGE || !['active', 'stopped'].includes(value.status)
+      || !integer(value.revision) || value.revision > 100_000) return null;
+    const snapshot = growthFollowingSnapshot(value.followingSnapshot, { actor, now });
+    const current = growthFollowingSnapshot(followingSnapshot, { actor, now });
+    if (!snapshot || !current || value.followingDigest !== snapshotDigest(snapshot)
+      || JSON.stringify(snapshot) !== JSON.stringify(current)
+      || value.expiresAt > timestamp(snapshot.capturedAt) + MAX_AGE) return null;
+    const followers = rows(value.followers, { max: 25_000 });
+    const followingNames = new Set(snapshot.accounts.map(row => row.username));
+    if (!followers || !Array.isArray(value.seeds) || value.seeds.length < 1 || value.seeds.length > 3
+      || value.seeds.some(seed => !handle(seed) || seed === actor || !followingNames.has(seed))
+      || new Set(value.seeds).size !== value.seeds.length || !object(value.results)
+      || Object.keys(value.results).some(seed => !value.seeds.includes(seed))) return null;
+    const results = Object.create(null);
+    for (const seed of value.seeds) {
+      if (!Object.prototype.hasOwnProperty.call(value.results, seed)) continue;
+      const read = normalizedRead(value.results[seed], seed, value.createdAt, now);
+      if (!read) return null;
+      results[seed] = read;
+    }
+    return freeze({ schemaVersion: 1, kind: 'growth-read-draft', id: value.id, actor,
+      createdAt: value.createdAt, expiresAt: value.expiresAt, status: value.status, revision: value.revision,
+      followingSnapshot: snapshot, followingDigest: value.followingDigest, followers, seeds: [...value.seeds], results });
+  } catch { return null; }
+}
+
+function checkedDraft(value, now) {
+  const draft = validateGrowthReadDraft(value, { actor: value?.actor, followingSnapshot: value?.followingSnapshot, now });
+  if (!draft) throw new Error('growth-read-draft-invalid');
+  return draft;
+}
+
+function createGrowthReadDraft({ actor, followingSnapshot, followers = [], seeds, now = Date.now(), id } = {}) {
+  const snapshot = growthFollowingSnapshot(followingSnapshot, { actor, now });
+  if (!snapshot) throw new Error('growth-following-snapshot-invalid');
+  const draft = validateGrowthReadDraft({ schemaVersion: 1, kind: 'growth-read-draft', id, actor, createdAt: now,
+    expiresAt: Math.min(now + MAX_AGE, timestamp(snapshot.capturedAt) + MAX_AGE), status: 'active', revision: 0,
+    followingSnapshot: snapshot, followingDigest: snapshotDigest(snapshot), followers, seeds, results: {} },
+  { actor, followingSnapshot: snapshot, now });
+  if (!draft) throw new Error('growth-read-draft-invalid');
+  return draft;
+}
+
+function recordGrowthSeedRead(value, { seed, result, startedAt, now = Date.now(), partial = false } = {}) {
+  const draft = checkedDraft(value, now);
+  if ((draft.status !== 'active' && partial !== true) || !draft.seeds.includes(seed) || !integer(startedAt)
+    || startedAt < draft.createdAt || startedAt > now || typeof partial !== 'boolean') throw new Error('growth-seed-read-invalid');
+  const native = result?.source === 'list-dialog';
+  const allowed = ['username', 'source', 'capturedAt', 'followers', 'following', 'verified', 'complete', 'expectedCounts', 'pages', 'reasons',
+    ...(native ? [] : ['userId', 'subjectInstagramId'])];
+  const required = ['username', 'source', 'capturedAt', 'followers', 'following', 'complete', 'expectedCounts', 'pages', 'reasons',
+    ...(native ? ['verified'] : ['userId', 'subjectInstagramId'])];
+  if (!keys(result, allowed, required) || result.username !== seed
+    || !['list-dialog', 'authenticated-instagram-web'].includes(result.source)
+    || !keys(result.complete, TYPES) || !keys(result.expectedCounts, TYPES) || !keys(result.pages, TYPES) || !keys(result.reasons, TYPES)
+    || (native ? !keys(result.verified, TYPES) : !identity(result.userId) || result.subjectInstagramId !== result.userId)
+    || (result.verified !== undefined && !keys(result.verified, TYPES))) throw new Error('growth-seed-read-invalid');
+  const lists = {};
+  for (const type of TYPES) {
+    const verified = native ? result.verified[type] : result.verified?.[type] ?? true;
+    lists[type] = { owner: seed, listType: type, source: result.source, verified, complete: result.complete[type],
+      capturedAt: result.capturedAt, expectedCount: result.expectedCounts[type], pages: result.pages[type],
+      reason: result.reasons[type], accounts: result[type] };
+  }
+  const read = normalizedRead({ username: seed, source: result.source, startedAt,
+    capturedAt: result.capturedAt, partial, lists }, seed, draft.createdAt, now);
+  if (!read) throw new Error('growth-seed-read-invalid');
+  const previous = draft.results[seed];
+  // An interrupted retry cannot replace an already completed observation.
+  if (partial && previous && !previous.partial && TYPES.every(type => previous.lists[type].verified)) return draft;
+  if (partial && previous?.source === read.source) {
+    for (const type of TYPES) {
+      if (!read.lists[type].verified && previous.lists[type].verified) read.lists[type] = previous.lists[type];
+    }
+  }
+  return freeze({ ...draft, revision: draft.revision + 1, results: { ...draft.results, [seed]: read } });
+}
+
+function stopGrowthReadDraft(value, { now = Date.now() } = {}) {
+  const draft = checkedDraft(value, now);
+  return freeze({ ...draft, status: 'stopped', revision: draft.revision + 1 });
+}
+
+function resumeGrowthReadDraft(value, { now = Date.now() } = {}) {
+  const draft = checkedDraft(value, now);
+  return freeze({ ...draft, status: 'active', revision: draft.revision + 1 });
+}
+
+function growthDraftSeedSources(draft) {
+  return (draft?.seeds || []).flatMap(seed => {
+    const read = draft.results?.[seed];
+    return read && !read.partial && TYPES.every(type => read.lists?.[type]?.verified === true)
+      ? [{ username: seed, followers: read.lists.followers.accounts, following: read.lists.following.accounts }] : [];
+  });
+}
+
+function growthDraftSeedDone(draft, seed) {
+  return growthDraftSeedSources(draft).some(source => source.username === seed);
+}
+
+return Object.freeze({ growthFollowingSnapshot, snapshotDigest, validateGrowthReadDraft, createGrowthReadDraft, recordGrowthSeedRead, stopGrowthReadDraft, resumeGrowthReadDraft, growthDraftSeedSources, growthDraftSeedDone });
+})();
 localModules["extension/presence-growth-panel.js"] = (() => {
 const { createGrowthCampaign, dueGrowthUnfollows, growthUsername, rankGrowthCandidates } = localModules["extension/presence-growth.js"];
+const { createGrowthReadDraft, growthDraftSeedDone, growthDraftSeedSources, growthFollowingSnapshot, recordGrowthSeedRead, resumeGrowthReadDraft, stopGrowthReadDraft, validateGrowthReadDraft } = localModules["extension/presence-growth-draft.js"];
+
 
 const label = (name) => `@${name}`;
+const searchFailure = error => /^growth-/.test(String(error?.message || ''))
+  ? 'This profile read could not be verified. Keep the selected profile open and read it again.'
+  : String(error?.message || 'This profile could not be read. Earlier reads are kept.');
 
 function mountPresenceGrowthPanel({
   container, inspectAccount, readFollowing, readFollowers, scanSeed,
   readCampaigns, writeCampaigns, confirmAction, runBatch,
+  readFollowingSnapshot = () => null, readReadDraft = () => null, writeReadDraft = null,
+  readCurrentProfile = () => '', readSeedNative = null, inspectReadAccount = null,
   canRunBatch = () => true,
   busy = () => false, onStatus = () => {}, document = globalThis.document,
-  now = Date.now,
+  window = globalThis.window, now = Date.now,
 } = {}) {
   if (!container || !document?.createElement || ![inspectAccount, readFollowing, readFollowers,
     scanSeed, readCampaigns, writeCampaigns, confirmAction, runBatch].every((fn) => typeof fn === 'function')) {
@@ -11066,7 +12762,7 @@ function mountPresenceGrowthPanel({
   };
   const root = make('details');
   root.className = 'presence-growth';
-  root.open = true;
+  root.open = false;
   const summary = make('summary', 'Grow through mutuals');
   const note = make('p', 'Choose up to three accounts from your Following list.');
   const seedLabel = make('label', 'Accounts you follow');
@@ -11094,10 +12790,16 @@ function mountPresenceGrowthPanel({
   cancel.className = 'button quiet';
   follow.className = 'button primary';
   due.className = 'button quiet';
-  const progress = make('p', 'Check your Following list in Mutual Checker first.');
+  const progress = make('p', 'Find mutual connections prepares profile links for a read-only search.');
   const candidatesList = make('div');
   candidatesList.className = 'presence-growth-candidates';
   const dueList = make('p');
+  const readSteps = make('div');
+  const readNote = make('p', 'Open each account below, then choose Read current seed. Your read progress is kept in this userscript.');
+  const seedLinks = make('ul');
+  const readCurrent = make('button', 'Read current seed'); readCurrent.type = 'button'; readCurrent.className = 'button primary';
+  const restart = make('button', 'Start a new search'); restart.type = 'button'; restart.className = 'button quiet';
+  readSteps.append(readNote, seedLinks, readCurrent, restart); readSteps.hidden = true;
   const style = make('style', `
     .presence-growth{border-top:1px solid var(--insta-toolbox-line);padding-top:8px;min-width:0}
     .presence-growth>summary{min-height:44px;display:flex;align-items:center;cursor:pointer;font-weight:700;-webkit-text-fill-color:currentColor}
@@ -11107,6 +12809,9 @@ function mountPresenceGrowthPanel({
     .presence-growth label{display:grid;gap:6px;margin:0 0 12px}
     .presence-growth input:not([type=checkbox]),.presence-growth select{box-sizing:border-box;width:100%;min-height:44px;padding:8px 10px;border:1px solid var(--insta-toolbox-line);border-radius:8px;color:var(--insta-toolbox-text);background:var(--insta-toolbox-bg-sunken);font:inherit}
     .presence-growth button{margin:0 8px 8px 0;white-space:normal}
+    .presence-growth ul{padding-left:20px;overflow-wrap:anywhere}
+    .presence-growth li{padding:4px 0}
+    .presence-growth a{display:inline-flex;align-items:center;min-height:44px;color:var(--insta-toolbox-accent,LinkText)}
     .presence-growth-candidates{display:grid;gap:4px;max-height:220px;overflow:auto;margin:8px 0}
     .presence-growth-candidates label{display:flex;align-items:center;min-height:44px;margin:0;padding:6px;border-bottom:1px solid var(--insta-toolbox-line);overflow-wrap:anywhere}
     .presence-growth-candidates input{margin-right:8px;flex:none}
@@ -11115,20 +12820,34 @@ function mountPresenceGrowthPanel({
     @media(forced-colors:active){.presence-growth input,.presence-growth select{border-color:CanvasText}.presence-growth>summary{color:LinkText;-webkit-text-fill-color:LinkText}}
   `);
   root.append(style, summary, note, seedLabel, daysLabel, find, cancel, progress,
-    candidatesList, follow, dueList, due);
+    readSteps, candidatesList, follow, dueList, due);
   container.prepend(root);
 
   let controller = null;
   let candidates = [];
   let selectedSeeds = [];
   let incompleteSeeds = [];
+  let readDraft = null;
+  let persistedDraft = false;
+  let disposed = false;
+  let readGeneration = 0;
+  let readingSeed = '';
+  let readOpening = null;
+  let restorePending = true;
+  let restoreCancelled = false;
+  const preserveNewIntent = () => { restorePending = false; restoreCancelled = true; };
+  const selection = () => [...new Set(seedInput.value.split(/[\s,]+/).map(growthUsername).filter(Boolean))];
   const setProgress = (message) => { progress.textContent = message; onStatus(message); };
   const account = () => {
-    const value = inspectAccount();
+    let value = inspectAccount();
+    if (value?.accountVerified !== true && controller && readingSeed && typeof inspectReadAccount === 'function') {
+      value = inspectReadAccount({ actor: readDraft?.actor, seed: readingSeed });
+    }
     return value?.accountVerified === true && value.usable === true
       ? growthUsername(value.accountId) : '';
   };
   const campaigns = () => {
+    if (readOpening) return [];
     const saved = readCampaigns();
     return (Array.isArray(saved) ? saved : [])
     .filter((item) => item?.schemaVersion === 1 && item.account === account()
@@ -11140,12 +12859,90 @@ function mountPresenceGrowthPanel({
       && item.unfollowed && typeof item.unfollowed === 'object').slice(-100);
   };
 
+  const ordered = value => Array.isArray(value) ? value.map(ordered)
+    : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, ordered(value[key])])) : value;
+  const same = (left, right) => JSON.stringify(ordered(left)) === JSON.stringify(ordered(right));
+  const storedDraft = () => readOpening ? null : readReadDraft(readDraft?.actor || account(), readingSeed);
+  const currentDraft = ({ stored = true, profile = '' } = {}) => {
+    if (readOpening) return null;
+    try {
+      const valid = validateGrowthReadDraft(readDraft, {
+        actor: account(), followingSnapshot: readFollowingSnapshot(), now: now(),
+      });
+      if (!valid || !same(selection(), valid.seeds)
+        || (profile && readCurrentProfile() !== profile)
+        || (stored && persistedDraft && !same(storedDraft(), readDraft))) return null;
+      return valid;
+    } catch { return null; }
+  };
+  const openingDraft = () => {
+    try {
+      if (!readOpening || !controller || controller.signal.aborted || readOpening.generation !== readGeneration
+        || !readingSeed || readOpening.validate() !== true || readCurrentProfile() !== readingSeed) return null;
+      const valid = validateGrowthReadDraft(readDraft, {
+        actor: readDraft?.actor, followingSnapshot: readFollowingSnapshot(), now: now(),
+      });
+      return valid && same(selection(), valid.seeds) ? valid : null;
+    } catch { return null; }
+  };
+  function storeDraft(value, previous = persistedDraft ? readDraft : storedDraft()) {
+    if (readOpening) throw new Error('Wait for Instagram to verify the native list before saving this read.');
+    if (typeof writeReadDraft !== 'function') throw new Error('Your userscript manager could not keep this read. Start a new search after reloading.');
+    if (!same(storedDraft(), previous)) throw new Error('This search changed in another tab. Reopen Grow through mutuals before reading again.');
+    writeReadDraft(value, readDraft?.actor || account(), readingSeed);
+    if (!same(storedDraft(), value)) throw new Error('The read progress could not be saved. No follow was started.');
+    readDraft = value;
+    persistedDraft = Boolean(value);
+  }
+  function clearCandidates() {
+    candidates = []; selectedSeeds = []; incompleteSeeds = [];
+    candidatesList.replaceChildren();
+  }
+  function applyDraftCandidates() {
+    const valid = currentDraft();
+    clearCandidates();
+    if (!valid || valid.status !== 'active' || valid.seeds.some(seed => !growthDraftSeedDone(valid, seed))) {
+      render(); return;
+    }
+    selectedSeeds = growthDraftSeedSources(valid);
+    incompleteSeeds = valid.seeds.filter(seed => ['followers', 'following'].some(type => !valid.results[seed].lists[type].complete));
+    candidates = rankGrowthCandidates({ account: valid.actor, seeds: selectedSeeds,
+      following: valid.followingSnapshot.accounts, followers: valid.followers });
+    renderCandidates();
+    const partial = incompleteSeeds.length
+      ? ` Partial lists: ${incompleteSeeds.map(label).join(', ')}; other connections may be missing.` : '';
+    setProgress(candidates.length
+      ? `${candidates.length} observed mutual connections. Select exact accounts to review.${partial}`
+      : `No observed mutual connections to review.${partial}`);
+  }
+  function renderReadSteps(valid) {
+    readSteps.hidden = !persistedDraft || !valid;
+    seedLinks.replaceChildren();
+    if (!persistedDraft || !valid) return;
+    for (const seed of valid.seeds) {
+      const row = make('li'), link = make('a', `Open ${label(seed)} profile`);
+      link.href = `https://www.instagram.com/${seed}/`;
+      row.append(link, document.createTextNode(growthDraftSeedDone(valid, seed)
+        ? ' · read' : valid.results[seed] ? ' · partly read' : ' · waiting to read'));
+      seedLinks.append(row);
+    }
+    const here = readCurrentProfile();
+    const allRead = valid.seeds.every(seed => growthDraftSeedDone(valid, seed));
+    readCurrent.textContent = allRead && valid.status === 'stopped' ? 'Show read results' : 'Read current seed';
+    readCurrent.hidden = allRead && valid.status === 'active';
+    readCurrent.disabled = Boolean(controller) || busy() || (!allRead && (!valid.seeds.includes(here) || growthDraftSeedDone(valid, here)));
+    restart.disabled = Boolean(controller);
+  }
+
   function render() {
-    const owner = account();
-    const savedCampaigns = campaigns();
+    const owner = readOpening ? '' : account();
+    const savedCampaigns = readOpening ? [] : campaigns();
     const nextDue = savedCampaigns.map((campaign) => ({ campaign,
       targets: dueGrowthUnfollows(campaign, { account: owner, now: now() }) }))
       .find(({ targets }) => targets.length);
+    summary.textContent = nextDue
+      ? 'Grow through mutuals · review unfollows'
+      : 'Grow through mutuals';
     dueList.hidden = savedCampaigns.length === 0;
     due.hidden = !nextDue;
     daysLabel.hidden = candidates.length === 0;
@@ -11154,9 +12951,14 @@ function mountPresenceGrowthPanel({
       ? `${nextDue.targets.length} campaign follow${nextDue.targets.length === 1 ? '' : 's'} due for review.`
       : 'No campaign unfollows due yet. Reopen Instagram after your chosen wait to review them.';
     due.disabled = !nextDue || Boolean(controller) || busy() || !canRunBatch();
-    cancel.hidden = !controller;
+    const valid = readDraft ? readOpening ? openingDraft() : currentDraft() : null;
+    renderReadSteps(valid);
+    if (readDraft && !valid) { clearCandidates(); controller?.abort(); }
+    cancel.hidden = !controller && !(persistedDraft && valid?.status === 'active');
+    seedInput.disabled = Boolean(controller);
+    find.hidden = Boolean(persistedDraft && valid);
     find.disabled = Boolean(controller) || busy();
-    follow.disabled = !candidates.length || Boolean(controller) || busy() || !canRunBatch();
+    follow.disabled = !candidates.length || Boolean(controller) || busy() || !canRunBatch() || !valid || valid.status !== 'active';
   }
 
   function renderCandidates() {
@@ -11175,60 +12977,170 @@ function mountPresenceGrowthPanel({
   }
 
   async function findCandidates() {
+    preserveNewIntent();
     if (controller || busy()) return;
     const owner = account();
     const following = readFollowing();
     const followingNames = new Set((Array.isArray(following) ? following : [])
       .map((entry) => growthUsername(entry?.username || entry)).filter(Boolean));
-    const seeds = [...new Set(seedInput.value.split(/[\s,]+/).map(growthUsername).filter(Boolean))];
+    const seeds = selection();
     if (!owner || !followingNames.size) {
       setProgress('Check your own Following list in Mutual Checker first.'); return;
     }
     if (!seeds.length || seeds.length > 3 || seeds.some((name) => !followingNames.has(name))) {
       setProgress('Enter one to three accounts found in your captured Following list.'); return;
     }
+    const snapshot = growthFollowingSnapshot(readFollowingSnapshot(), { actor: owner, now: now() });
+    if (!snapshot) { setProgress('Read your own Following list again in Mutual Checker, then start this search.'); return; }
+    const fresh = createGrowthReadDraft({ actor: owner, followingSnapshot: snapshot, followers: readFollowers(), seeds,
+      now: now(), id: globalThis.crypto?.randomUUID?.() || `read-${now()}-${Math.random().toString(16).slice(2)}` });
+    if (persistedDraft) storeDraft(null);
+    readDraft = fresh;
+    persistedDraft = false;
+    const storedAtStart = storedDraft();
     const active = new AbortController();
     controller = active;
-    candidates = [];
-    selectedSeeds = [];
-    incompleteSeeds = [];
+    const generation = ++readGeneration;
+    clearCandidates();
     renderCandidates();
+    const assertCurrent = () => {
+      if (disposed || active.signal.aborted || generation !== readGeneration || !currentDraft()) {
+        active.abort(); throw new Error('Search stopped or its account, Following list, or selected seeds changed. Start a new search.');
+      }
+    };
     try {
       for (const [index, seed] of seeds.entries()) {
+        assertCurrent();
         setProgress(`Checking ${label(seed)} (${index + 1} of ${seeds.length})…`);
+        const startedAt = now();
         const result = await scanSeed(seed, active.signal, (update) => {
-          if (active.signal.aborted) return;
+          assertCurrent();
           const part = update?.listType === 'followers' || update?.listType === 'following'
             ? `${update.listType}: ${Math.max(0, Number(update.found) || 0)} read`
             : 'resolving profile';
           setProgress(`Checking ${label(seed)} (${index + 1} of ${seeds.length}) · ${part}`);
         });
-        if (active.signal.aborted || account() !== owner) throw new Error('Search stopped or account changed.');
-        selectedSeeds.push({ username: seed, followers: result.followers, following: result.following });
-        if (result.complete?.followers !== true || result.complete?.following !== true) {
-          incompleteSeeds.push(seed);
-        }
+        assertCurrent();
+        readDraft = recordGrowthSeedRead(readDraft, { seed, result, startedAt, now: now() });
       }
-      candidates = rankGrowthCandidates({ account: owner, seeds: selectedSeeds,
-        following, followers: readFollowers() });
-      renderCandidates();
-      const partial = incompleteSeeds.length
-        ? ` Partial lists: ${incompleteSeeds.map(label).join(', ')}; other connections may be missing.` : '';
-      setProgress(candidates.length
-        ? `${candidates.length} observed mutual connections. Select exact accounts to review.${partial}`
-        : `No observed mutual connections to review.${partial}`);
+      applyDraftCandidates();
     } catch (error) {
-      setProgress(active.signal.aborted ? 'Search stopped.' : String(error?.message || 'Search failed.'));
+      if (error?.lookupRoutesRetired === true && error.code === 'request-failed' && [404, 410].includes(error.httpStatus)
+        && !active.signal.aborted && currentDraft()
+        && typeof readSeedNative === 'function' && typeof writeReadDraft === 'function') {
+        storeDraft(readDraft, storedAtStart);
+        setProgress('Open each selected profile below, then choose Read current seed. Nothing will be followed until you review it.');
+      } else {
+        clearCandidates();
+        setProgress(active.signal.aborted ? 'Search stopped.' : searchFailure(error));
+      }
     } finally {
-      controller = null;
+      if (controller === active) controller = null;
       render();
     }
   }
 
+  async function readCurrentSeed() {
+    preserveNewIntent();
+    if (controller || busy() || disposed || typeof readSeedNative !== 'function') return;
+    const valid = currentDraft(), seed = readCurrentProfile();
+    if (persistedDraft && valid?.status === 'stopped' && valid.seeds.every(name => growthDraftSeedDone(valid, name))) {
+      storeDraft(resumeGrowthReadDraft(valid, { now: now() })); applyDraftCandidates(); return;
+    }
+    if (!persistedDraft || !valid || !valid.seeds.includes(seed) || growthDraftSeedDone(valid, seed)) {
+      clearCandidates(); render();
+      setProgress('Open a selected account using its profile link, then choose Read current seed.'); return;
+    }
+    const active = new AbortController(), generation = ++readGeneration, startedAt = now();
+    if (valid.status === 'stopped') storeDraft(resumeGrowthReadDraft(valid, { now: now() }));
+    controller = active;
+    readingSeed = seed;
+    clearCandidates(); render();
+    const assertCurrent = () => {
+      if (disposed || active.signal.aborted || generation !== readGeneration
+        || !(readOpening ? openingDraft() : currentDraft({ profile: seed }))) {
+        active.abort(); throw new Error('Search stopped or its account, profile, Following list, or selected seeds changed.');
+      }
+    };
+    const monitor = globalThis.setInterval(() => {
+      try { assertCurrent(); } catch { active.abort(); }
+    }, 100);
+    try {
+      assertCurrent();
+      const result = await readSeedNative(seed, active.signal, update => {
+        assertCurrent();
+        setProgress(`Reading ${label(seed)}${update?.listType ? ` · ${update.listType}: ${Math.max(0, Number(update.found) || 0)} read` : '…'}`);
+      }, context => {
+        if (controller !== active || generation !== readGeneration) return;
+        if (context?.phase === 'opening') {
+          if (typeof context.validate !== 'function') throw new Error('The native opening context could not be verified.');
+          // Check the ordinary actor and stored draft before entering the wait,
+          // including before navigating from one completed list to the next.
+          assertCurrent();
+          readOpening = { validate: context.validate, generation };
+          assertCurrent();
+          setProgress('Waiting for Instagram to finish opening this list…');
+        } else {
+          readOpening = null;
+          // Qualification must restore ordinary storage continuity before rows
+          // are observed. Cleanup alone never accesses account-scoped storage.
+          if (context?.phase === 'ready') assertCurrent();
+        }
+      });
+      assertCurrent();
+      storeDraft(recordGrowthSeedRead(readDraft, { seed, result, startedAt, now: now() }));
+      if (readDraft.seeds.every(name => growthDraftSeedDone(readDraft, name))) applyDraftCandidates();
+      else setProgress(`Read ${label(seed)}. Open the next selected profile and choose Read current seed.`);
+    } catch (error) {
+      // Interrupted observations stay read-only and never become follow targets.
+      if (!readOpening && error?.partialResult && currentDraft({ stored: true })) {
+        try {
+          storeDraft(recordGrowthSeedRead(readDraft, { seed, result: error.partialResult, startedAt, now: now(), partial: true }));
+        } catch { /* Keep the previously verified reads if this partial record is invalid. */ }
+      }
+      clearCandidates();
+      setProgress(active.signal.aborted ? 'Search stopped. Earlier reads are kept; choose Read current seed to continue.'
+        : searchFailure(error));
+    } finally {
+      globalThis.clearInterval(monitor);
+      if (controller === active) { controller = null; readOpening = null; }
+      readingSeed = '';
+      render();
+    }
+  }
+
+  function stopSearch() {
+    preserveNewIntent();
+    controller?.abort();
+    readGeneration += 1;
+    clearCandidates();
+    const valid = readOpening ? null : currentDraft();
+    if (persistedDraft && valid) {
+      try { storeDraft(stopGrowthReadDraft(valid, { now: now() })); }
+      catch (error) { setProgress(String(error?.message || 'Search stopped.')); }
+    }
+    setProgress('Search stopped. Earlier reads are kept; choose Read current seed to continue.');
+    render();
+  }
+
+  function discardReadDraft() {
+    preserveNewIntent();
+    controller?.abort(); readGeneration += 1;
+    if (!readOpening && persistedDraft && same(storedDraft(), readDraft)) storeDraft(null);
+    readDraft = null; persistedDraft = false; clearCandidates();
+    setProgress('Choose one to three accounts from your Following list, then find mutual connections.');
+    render();
+  }
+
   async function reviewFollow() {
+    preserveNewIntent();
     const owner = account();
+    const discovery = currentDraft();
     const targets = [...candidatesList.querySelectorAll('input:checked')].map((input) => input.value);
-    if (!owner || busy() || !canRunBatch() || !targets.length || targets.length > 25) {
+    if (!owner || controller || !discovery || discovery.status !== 'active'
+      || discovery.seeds.some(seed => !growthDraftSeedDone(discovery, seed))
+      || busy() || !canRunBatch() || !targets.length || targets.length > 25
+      || targets.some(target => !candidates.some(candidate => candidate.username === target))) {
       setProgress('Select 1 to 25 candidates and stop other runs first.'); return;
     }
     const waitDays = Number(days.value);
@@ -11242,7 +13154,7 @@ function mountPresenceGrowthPanel({
       facts: [{ label: 'Account', value: label(owner) }, { label: 'Targets', value: String(targets.length) }],
       binding });
     const currentTargets = [...candidatesList.querySelectorAll('input:checked')].map((input) => input.value);
-    if (!approval || account() !== owner || busy() || !canRunBatch()
+    if (!approval || controller || account() !== owner || !same(currentDraft(), discovery) || busy() || !canRunBatch()
       || JSON.stringify(currentTargets) !== binding.targets || Number(days.value) !== waitDays
       || Object.keys(binding).some((key) => approval[key] !== binding[key])
       || expiresAt <= now()) return;
@@ -11251,16 +13163,17 @@ function mountPresenceGrowthPanel({
     writeCampaigns([...campaigns(), campaign].slice(-100));
     setProgress(`Following ${targets.length} reviewed accounts. Use Stop in the run bar to end the batch.`);
     await runBatch({ action: 'follow', usernames: targets, growthCampaignId: campaign.id,
-      growthAccount: owner });
+      growthAccount: owner, expiresAt });
     render();
   }
 
   async function reviewDue() {
+    preserveNewIntent();
     const owner = account();
     const entry = campaigns().map((campaign) => ({ campaign,
       targets: dueGrowthUnfollows(campaign, { account: owner, now: now() }) }))
       .find(({ targets }) => targets.length);
-    if (!entry || busy() || !canRunBatch()) return;
+    if (!entry || controller || busy() || !canRunBatch()) return;
     const targets = entry.targets.slice(0, 25);
     const expiresAt = now() + 15 * 60_000;
     const binding = { action: 'presence-growth-unfollow', account: owner,
@@ -11271,27 +13184,91 @@ function mountPresenceGrowthPanel({
       facts: [{ label: 'Account', value: label(owner) }, { label: 'Targets', value: String(targets.length) }],
       binding });
     const fresh = campaigns().find((campaign) => campaign.id === entry.campaign.id);
-    if (!approval || account() !== owner || busy() || !canRunBatch() || !fresh
+    if (!approval || controller || account() !== owner || busy() || !canRunBatch() || !fresh
       || JSON.stringify(dueGrowthUnfollows(fresh, { account: owner, now: now() }).slice(0, 25)) !== binding.targets
       || Object.keys(binding).some((key) => approval[key] !== binding[key])
       || expiresAt <= now()) return;
     setProgress(`Unfollowing ${targets.length} reviewed campaign accounts.`);
     await runBatch({ action: 'unfollow', usernames: targets,
-      growthCampaignId: entry.campaign.id, growthAccount: owner });
+      growthCampaignId: entry.campaign.id, growthAccount: owner, expiresAt });
     render();
   }
 
   const launch = (operation) => {
-    void operation().catch((error) => setProgress(String(error?.message || 'Campaign could not start.')));
+    void operation().catch((error) => setProgress(searchFailure(error)));
   };
   find.addEventListener('click', () => launch(findCandidates));
-  cancel.addEventListener('click', () => controller?.abort());
+  cancel.addEventListener('click', stopSearch);
+  readCurrent.addEventListener('click', () => launch(readCurrentSeed));
+  restart.addEventListener('click', () => launch(async () => discardReadDraft()));
+  const editSeeds = () => {
+    preserveNewIntent();
+    if (readDraft && !same(selection(), readDraft.seeds)) discardReadDraft();
+  };
+  seedInput.addEventListener('input', editSeeds);
+  seedInput.addEventListener('change', editSeeds);
+  days.addEventListener('change', preserveNewIntent);
   follow.addEventListener('click', () => launch(reviewFollow));
   due.addEventListener('click', () => launch(reviewDue));
+  const startupInput = seedInput.value, startupDays = days.value;
+  let startupProfile = '', startupFollowing = null;
+  try {
+    startupProfile = readCurrentProfile();
+    const snapshot = readFollowingSnapshot();
+    startupFollowing = growthFollowingSnapshot(snapshot, { actor: growthUsername(snapshot?.subjectUsername), now: now() });
+  } catch { /* No verified startup snapshot means there is no draft to restore. */ }
+  restorePending = Boolean(startupFollowing);
+  const untouchedStartup = () => !restoreCancelled && !disposed && !controller && !busy() && !readDraft && !persistedDraft
+    && !candidates.length && seedInput.value === startupInput && days.value === startupDays && readCurrentProfile() === startupProfile;
+  function restoreSavedDraft() {
+    if (!restorePending) return false;
+    try {
+      if (!untouchedStartup()) { restorePending = false; return false; }
+      const owner = account();
+      if (!owner) return false;
+      if (owner !== startupFollowing.subjectUsername) { restorePending = false; return false; }
+      const current = growthFollowingSnapshot(readFollowingSnapshot(), { actor: owner, now: now() });
+      if (!current || !same(current, startupFollowing)) { restorePending = false; return false; }
+      // Retry only when the startup actor becomes verified. Once storage can be
+      // read, consume this opportunity even when no valid draft exists.
+      restorePending = false;
+      const saved = readReadDraft(owner);
+      const restored = validateGrowthReadDraft(saved, { actor: account(), followingSnapshot: readFollowingSnapshot(), now: now() });
+      if (!restored || restored.actor !== owner || !untouchedStartup()
+        || !same(growthFollowingSnapshot(readFollowingSnapshot(), { actor: owner, now: now() }), startupFollowing)) return false;
+      readDraft = restored; persistedDraft = true; seedInput.value = restored.seeds.join(', '); root.open = true;
+      setProgress(restored.status === 'stopped' ? 'Search stopped. Choose Read current seed to continue.'
+        : 'Open the next selected profile, then choose Read current seed.');
+      applyDraftCandidates();
+      return true;
+    } catch {
+      restorePending = false;
+      setProgress('Read your Following list in Mutual Checker before starting a new search.');
+      return false;
+    }
+  }
+  restoreSavedDraft();
+  const stopReadingOnPagehide = () => { if (controller) stopSearch(); };
+  window?.addEventListener?.('pagehide', stopReadingOnPagehide);
+  const contextStamp = () => `${readCurrentProfile()}|${account()}|${Boolean(readDraft && readDraft.expiresAt <= now())}`;
+  let lastContext = contextStamp();
+  const routeRefresh = globalThis.setInterval(() => {
+    try {
+      if (restorePending && !untouchedStartup()) preserveNewIntent();
+      const context = contextStamp();
+      if (!disposed && context !== lastContext) {
+        lastContext = context;
+        restoreSavedDraft();
+        if (persistedDraft) render();
+      }
+    } catch { controller?.abort(); }
+  }, 250);
+  routeRefresh.unref?.();
   render();
-  return Object.freeze({ render, findCandidates, reviewFollow, reviewDue,
+  return Object.freeze({ render, findCandidates, readCurrentSeed, stopSearch, discardReadDraft, reviewFollow, reviewDue,
     busy: () => Boolean(controller),
-    dispose() { controller?.abort(); root.remove(); } });
+    dispose() { disposed = true; controller?.abort(); readGeneration += 1; globalThis.clearInterval(routeRefresh);
+      window?.removeEventListener?.('pagehide', stopReadingOnPagehide); root.remove(); } });
 }
 
 return Object.freeze({ mountPresenceGrowthPanel });
@@ -11302,10 +13279,20 @@ const ORIGIN = 'https://www.instagram.com';
 const clean = (value, limit = 160) => String(value ?? '').replace(/\s+/gu, ' ').trim().slice(0, limit);
 const visible = node => Boolean(node?.isConnected && node.getClientRects?.().length
   && !node.closest?.('[hidden], [aria-hidden="true"]'));
+const hasVisibleCarousel = root => [...root.querySelectorAll('[aria-label]')].some(node => visible(node)
+  && /^(?:carousel|slide \d+ of \d+)$/i.test(node.getAttribute('aria-label') || ''));
 const route = href => {
   if (typeof href !== 'string' || !href.trim()) return null;
-  try { const url = new URL(href, ORIGIN); return url.origin === ORIGIN ? url.pathname : null; }
+  try { const url = new URL(href, ORIGIN); return url.origin === ORIGIN && !url.username && !url.password ? url.pathname : null; }
   catch { return null; }
+};
+const RESERVED_PROFILE_PREFIXES = new Set([
+  'accounts', 'about', 'api', 'direct', 'explore', 'p', 'reel', 'reels', 'settings', 'stories', 'web',
+]);
+const postIdentity = path => {
+  const match = String(path || '').match(/^\/(?:([A-Za-z0-9._]{1,30})\/)?(p|reel|reels)\/([\w-]+)\/?$/);
+  if (!match || (match[1] && RESERVED_PROFILE_PREFIXES.has(match[1].toLowerCase()))) return null;
+  return { id: match[3], path };
 };
 
 function summarizeLoadedPosts(observations, { sourceUrl, capturedAt = new Date().toISOString() } = {}) {
@@ -11315,9 +13302,9 @@ function summarizeLoadedPosts(observations, { sourceUrl, capturedAt = new Date()
   const posts = new Map();
   for (const observation of observations) {
     const path = route(observation.url);
-    const match = path?.match(/^\/(p|reel|reels)\/([\w-]+)\/?$/);
-    if (!match) continue;
-    const id = match[2];
+    const identity = postIdentity(path);
+    if (!identity) continue;
+    const id = identity.id;
     const timestamp = Date.parse(observation.publishedAt);
     const hashtags = [...new Set((observation.hashtags || []).map(tag => clean(tag, 100).replace(/^#/, '').toLowerCase())
       .filter(tag => /^[\p{L}\p{M}\p{N}_]+$/u.test(tag)))];
@@ -11352,19 +13339,17 @@ function readLoadedInsights({ document = globalThis.document, location = globalT
     const paths = [...article.querySelectorAll('a[href]')].filter(visible)
       .map(link => route(link.getAttribute('href'))).filter(Boolean);
     const identities = new Map(paths.map(path => {
-      const match = path.match(/^\/(p|reel|reels)\/([\w-]+)\/?$/);
-      return match ? [match[2], path] : null;
+      const identity = postIdentity(path);
+      return identity ? [identity.id, path] : null;
     }).filter(Boolean));
     if (identities.size !== 1) return [];
     const hashtags = paths.filter(path => path.startsWith('/explore/tags/')).flatMap(path => {
       try { return [decodeURIComponent(path.split('/')[3])]; } catch { return []; }
     });
-    const carousel = [...article.querySelectorAll('[aria-label]')].some(node => visible(node)
-      && /^(?:carousel|slide \d+ of \d+)$/i.test(node.getAttribute('aria-label') || ''));
-    const type = carousel ? 'carousel' : article.querySelector('video') ? 'video' : 'unknown';
+    const type = hasVisibleCarousel(article) ? 'carousel' : article.querySelector('video') ? 'video' : 'unknown';
     const times = [...article.querySelectorAll('time[datetime]')].filter(node => {
       const path = route(node.closest('a[href]')?.getAttribute('href'));
-      return path && identities.has(path.match(/^\/(?:p|reel|reels)\/([\w-]+)\/?$/)?.[1]);
+      return path && identities.has(postIdentity(path)?.id);
     }).map(node => node.getAttribute('datetime'));
     return [{ url: `${ORIGIN}${[...identities.values()][0]}`, type, hashtags,
       publishedAt: new Set(times).size === 1 ? times[0] : null }];
@@ -11372,19 +13357,29 @@ function readLoadedInsights({ document = globalThis.document, location = globalT
   for (const link of document.querySelectorAll('main a[href]')) {
     if (!visible(link) || link.closest('article') || observations.length >= 1000) continue;
     const path = route(link.getAttribute('href'));
-    if (!/^\/(p|reel|reels)\/[\w-]+\/?$/.test(path || '')) continue;
-    observations.push({ url: `${ORIGIN}${path}`, type: 'unknown', hashtags: [] });
+    if (!postIdentity(path)) continue;
+    observations.push({ url: `${ORIGIN}${path}`, type: hasVisibleCarousel(link) ? 'carousel' : 'unknown', hashtags: [] });
   }
   const report = summarizeLoadedPosts(observations, { sourceUrl: location.href, capturedAt: now() });
   const username = String(location.pathname).match(/^\/([a-zA-Z0-9_.]{1,30})\/?$/)?.[1];
   report.profile = null;
   if (username) {
+    const ownerPath = `/${username.toLowerCase()}`;
+    const pathOf = node => route(node.getAttribute?.('href'))?.replace(/\/+$/, '').toLowerCase();
+    const counter = (link, list) => {
+      const label = clean(link.textContent);
+      if (!visible(link) || !new RegExp(`^[0-9][0-9., ]*(?:[kmb])? ${list}$`, 'i').test(label)) return false;
+      const path = pathOf(link);
+      return path === `${ownerPath}/${list}` || path === ownerPath;
+    };
     const headers = [...document.querySelectorAll('main header')].filter(visible).filter(header =>
-      [...header.querySelectorAll('a[href]')].some(link => route(link.getAttribute('href')) === `/${username}/followers/`));
+      [...header.querySelectorAll('a[href], h1, h2, [role="heading"]')].filter(visible)
+        .some(node => pathOf(node) === ownerPath || pathOf(node) === `${ownerPath}/followers`
+          || clean(node.textContent).toLowerCase() === username.toLowerCase()));
     if (headers.length === 1) {
       const count = list => {
         const links = [...headers[0].querySelectorAll('a[href]')].filter(visible)
-          .filter(link => route(link.getAttribute('href')) === `/${username}/${list}/`);
+          .filter(link => counter(link, list));
         return links.length === 1 ? clean(links[0].textContent) : null;
       };
       report.profile = { username, followers: count('followers'), following: count('following') };
@@ -11465,6 +13460,7 @@ globalThis.InstaToolboxInboxCheckpoints = Object.freeze({ create: localModules['
 globalThis.InstaToolboxPresenceInputs = Object.freeze({ create: localModules['extension/presence-native-inputs.js'].createPresenceNativeInputs });
 globalThis.InstaToolboxPresenceNativeActions = Object.freeze({ create: localModules['extension/presence-native-actions.js'].createPresenceNativeActions });
 globalThis.InstaToolboxPresenceSession = Object.freeze({ create: localModules['extension/presence-session.js'].createPresenceSession });
+globalThis.InstaToolboxPresenceHistoryJournal = Object.freeze({ create: localModules['extension/presence-history-journal.js'].createPresenceHistoryJournal });
 globalThis.InstaToolboxPresenceSessionPanel = Object.freeze({ mount: localModules['extension/presence-session-panel.js'].mountPresenceSessionPanel });
 globalThis.InstaToolboxPresenceGrowth = Object.freeze({ ...localModules['extension/presence-growth.js'] });
 globalThis.InstaToolboxPresenceGrowthPanel = Object.freeze({ mount: localModules['extension/presence-growth-panel.js'].mountPresenceGrowthPanel });
@@ -11480,6 +13476,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
   const LEGACY_QUEUE_KEY = 'instaToolboxManualQueueV1';
   const TAB_RUN_FIELD = 'instaToolboxAccountRunV1';
   const TAB_CHECKER_FIELD = 'instaToolboxCheckerDraftV1';
+  const TAB_INBOX_DISCOVERY_FIELD = 'instaToolboxInboxDiscoveryV1';
   const ACTIONABLE_STATUSES = new Set(['pending', 'ready', 'failed', 'paused']);
   const RESERVED = new Set([
     'accounts', 'about', 'api', 'developer', 'direct', 'emails', 'explore',
@@ -11659,10 +13656,15 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
       .map(normalizeUsername)
       .filter(Boolean))].slice(0, 250);
     const capabilityId = safeText(value.capabilityId);
+    const accountUsername = normalizeUsername(value.accountUsername);
     if (!capabilityId
+      || !accountUsername
+      || (safeText(value.growthCampaignId) && normalizeUsername(value.growthAccount) !== accountUsername)
       || !approvedTargets.length
       || queue.some((username) => !approvedTargets.includes(username))
       || safeText(value.capabilityDigest) !== accountCapabilityDigest(action, approvedTargets)) return null;
+    const pendingTarget = normalizeUsername(value.pendingTarget);
+    if (value.pendingTarget && (!pendingTarget || !approvedTargets.includes(pendingTarget))) return null;
     const boundedCount = (candidate) => Math.max(0, Math.min(250, Math.round(Number(candidate) || 0)));
     return {
       status: 'running',
@@ -11673,12 +13675,15 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
       completed: boundedCount(value.completed),
       skipped: boundedCount(value.skipped),
       failed: boundedCount(value.failed),
+      uncertain: boundedCount(value.uncertain),
       current: safeText(value.current),
       stopReason: null,
       approvedTargets,
       capabilityDigest: accountCapabilityDigest(action, approvedTargets),
       capabilityExpiresAt,
       capabilityId,
+      accountUsername,
+      pendingTarget,
       growthCampaignId: safeText(value.growthCampaignId),
       growthAccount: normalizeUsername(value.growthAccount),
       nextAt: Number(value.nextAt) > Date.now() ? Number(value.nextAt) : null,
@@ -11869,6 +13874,10 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
     GM_setValue(PREFERENCES_KEY, preferences);
     applyLayout();
     renderShellState();
+    if (Object.prototype.hasOwnProperty.call(patch, 'view')) {
+      clearContextStatus();
+      renderContext();
+    }
   }
 
   function currentQueueItem() {
@@ -12304,7 +14313,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
       .run-bar { overflow: hidden; height: 5px; margin: 8px 0 6px; border-radius: 999px; background: var(--insta-toolbox-line, #d8ddd4); }
       .run-bar span { display: block; width: 0%; height: 100%; border-radius: 999px; background: var(--insta-toolbox-accent, #b83d67); transition: width var(--insta-toolbox-motion-base, 180ms) var(--insta-toolbox-ease, ease); }
       .run-panel .list { max-height: 118px; overflow-y: auto; }
-      .button.danger { background: var(--insta-toolbox-danger, #b42318); color: var(--insta-toolbox-on-danger, #fff); }
+      .button.danger { background: var(--insta-toolbox-danger-fill, #b42331); color: var(--insta-toolbox-on-danger, #fff); }
       .button.primary { background: var(--insta-toolbox-accent, #b83d67); color: var(--insta-toolbox-on-accent, #fff); border: 0; font-weight: 600; }
       .button.primary:hover { filter: brightness(1.08); }
       .button.big { width: 100%; padding: 10px 12px; font-size: var(--system-14-font-size, 14px); line-height: var(--system-14-line-height, 18px); border-radius: 8px; }
@@ -12379,7 +14388,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
       </nav>
       <div class="scroll">
         <section id="insta-toolbox-panel-checker" class="view" role="tabpanel" aria-labelledby="insta-toolbox-tab-checker" data-panel="checker" hidden><section class="card" aria-labelledby="insta-toolbox-checker-account-title"><h2 id="insta-toolbox-checker-account-title">Check mutuals</h2><p>Read-only. Uses the Instagram session in this tab.</p><div class="field"><label for="insta-toolbox-checker-username">Instagram username</label><input id="insta-toolbox-checker-username" type="text" inputmode="text" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="your_username" data-role="checker-username"></div><div class="toolbar"><button class="button primary" type="button" data-action="check-account-relationships" data-role="checker-run">Check mutuals</button></div></section>
-          <div class="scan-progress" data-role="scan-progress" hidden><div class="run-bar" data-role="scan-bar" role="progressbar" aria-label="Mutual check progress" aria-describedby="insta-toolbox-scan-detail" aria-valuemin="0" aria-valuemax="100"><span data-role="scan-fill"></span></div><p id="insta-toolbox-scan-detail" class="lead" data-role="scan-detail"></p></div>
+          <div class="scan-progress" data-role="scan-progress" hidden><div class="run-bar" data-role="scan-bar" role="progressbar" aria-label="Mutual check progress" aria-describedby="insta-toolbox-scan-detail" aria-valuemin="0" aria-valuemax="100"><span data-role="scan-fill"></span></div><p id="insta-toolbox-scan-detail" class="lead" data-role="scan-detail"></p><button class="button danger" type="button" data-action="stop-list-scan" data-role="list-scan-stop" hidden>Stop scan</button><a class="button quiet" data-role="checker-open-profile" hidden>Open profile</a><button class="button quiet" type="button" data-action="download-partial-scan" data-role="partial-scan-download" hidden>Download partial scan</button></div>
           <div class="card" data-role="comparison"></div>
           <div data-role="loaded-insights"></div>
           <section class="card comparison-browser" data-role="comparison-browser" aria-labelledby="insta-toolbox-comparison-browser-title" hidden><h2 id="insta-toolbox-comparison-browser-title">Comparison list</h2><div class="comparison-controls"><div class="field"><label for="insta-toolbox-comparison-category">Show accounts</label><select id="insta-toolbox-comparison-category" data-role="comparison-category" aria-controls="insta-toolbox-comparison-list"><option value="not-following-me-back">Don't follow you back</option><option value="i-do-not-follow-back">You don't follow back</option><option value="mutuals">Mutuals</option></select></div><div class="field"><label for="insta-toolbox-filter">Find a username</label><input id="insta-toolbox-filter" type="search" inputmode="search" autocomplete="off" spellcheck="false" placeholder="Search usernames" data-role="result-filter" aria-controls="insta-toolbox-comparison-list"></div></div><p id="insta-toolbox-comparison-count" class="comparison-count" data-role="comparison-count" tabindex="-1"></p><ul id="insta-toolbox-comparison-list" class="list comparison-list" data-role="comparison-list" aria-describedby="insta-toolbox-comparison-count"></ul><button class="button quiet comparison-more" type="button" data-action="show-more-comparison" data-role="comparison-more" hidden>Show more</button></section>
@@ -12441,10 +14450,16 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
   const queryAll = (selector) => [...shadow.querySelectorAll(selector)];
   const setText = (role, value) => {
     const element = query(`[data-role="${role}"]`);
-    if (element) element.textContent = String(value ?? '');
+    const text = String(value ?? '');
+    if (element && element.textContent !== text) element.textContent = text;
   };
   let contextStatus = null;
   let contextStatusTimer = null;
+  function clearContextStatus() {
+    contextStatus = null;
+    clearTimeout(contextStatusTimer);
+    contextStatusTimer = null;
+  }
   const statusTone = (message) => {
     const text = safeText(message).toLocaleLowerCase();
     if (/blocked|could not|disabled|error|expired|failed|rate limit|security check|signed out|unclear|unavailable|wrong thread/.test(text)) return 'blocked';
@@ -12864,7 +14879,9 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
     renderMessages();
     syncTabs(preferences.view);
     renderCheckerSteps();
+    renderListScanControls();
     renderDmSummary();
+    presencePanel?.refreshLog();
     renderContext();
     renderRun();
     renderLimits();
@@ -12887,7 +14904,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
     panel.hidden = !run;
     if (!run) return;
 
-    const done = (run.completed || 0) + (run.skipped || 0) + (run.failed || 0);
+    const done = (run.completed || 0) + (run.skipped || 0) + (run.failed || 0) + (run.uncertain || 0);
     const total = run.total || 0;
     const title = query('[data-role="run-title"]');
     if (title) {
@@ -12906,6 +14923,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
       const parts = [`${done}/${total} processed`, `${run.completed || 0} done`];
       if (run.skipped) parts.push(`${run.skipped} skipped`);
       if (run.failed) parts.push(`${run.failed} failed`);
+      if (run.uncertain) parts.push(`${run.uncertain} unconfirmed`);
       detail.textContent = parts.join(' · ');
     }
     const fill = query('[data-role="run-fill"]');
@@ -12986,8 +15004,11 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
   // same exact-target checks the extension gets.
 
   let batchAbort = false;
+  let accountActionController = null;
   let accountRunDraft = null;
   let relationshipController = null;
+  let relationshipPartialResult = null;
+  let manualScanController = null;
   let relationshipProgress = null;
   let dmThreadPreview = null;
   let dmRunnerSnapshot = null;
@@ -12999,11 +15020,12 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
   let presencePanel = null;
   let presenceGrowthPanel = null;
   let presenceSession = null;
+  let presenceContextRunId = null;
   let presenceCapture = null;
 
   const engine = globalThis.InstaToolboxInstagramInspector;
   const presenceInputs = globalThis.InstaToolboxPresenceInputs?.create({
-    fetchFollowerComparison: options => engine.fetchFollowerComparison(options),
+    fetchFollowerComparison: options => engine.fetchFollowerComparison({ ...options, allowNativeListFallback: true }),
     inspectViewer: () => globalThis.InstaToolboxInstagramViewer.inspect({ document, location }),
   });
   const invalidatePresence = () => {
@@ -13029,6 +15051,15 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
   const stopPresenceSession = () => {
     presenceSession?.stop();
   };
+
+  function onPresenceUpdate(next) {
+    if (next.runId && next.runId !== presenceContextRunId) {
+      presenceContextRunId = next.runId;
+      clearContextStatus();
+    }
+    presencePanel?.render(next);
+    renderContext();
+  }
   const dmRunner = globalThis.InstaToolboxDmThreadUnsender;
   if (dmRunner) {
     dmRunnerSnapshot = dmRunner.snapshot();
@@ -13063,6 +15094,8 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
   function runCapabilityValid(run = state.run) {
     return Boolean(
       run?.status === 'running'
+      && normalizeUsername(run.accountUsername)
+      && (!run.growthCampaignId || run.growthAccount === run.accountUsername)
       && safeText(run.capabilityId)
       && Number(run.capabilityExpiresAt) > Date.now()
       && Array.isArray(run.approvedTargets)
@@ -13229,7 +15262,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
     return run.queue.every((target) => due.includes(target));
   }
 
-  async function runOneAccount(username, action) {
+  async function runOneAccount(username, action, run = state.run) {
     const observation = engine.inspectProfile(username);
     const stop = sessionStop(observation);
     if (stop) return { status: 'stopped', reason: stop, fatal: true };
@@ -13249,19 +15282,94 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
         fatal: false,
       };
     }
-    const result = await engine.performReviewedProfileAction({
-      action,
-      expectedRelationship: expected,
-      resolutionToken: observation.resolutionToken,
-      username,
-    });
+    const controller = new AbortController();
+    accountActionController = controller;
+    let result;
+    let enteredEngine = false;
+    let checkpointing = false;
+    let laneProblem = null;
+    const locks = globalThis.navigator?.locks;
+    const accountKey = globalThis.InstaToolboxInstagramViewer?.accountKey?.(run?.accountUsername);
+    const lockName = `insta-toolbox:account-activity:${accountKey}`;
+    try {
+      if (typeof locks?.request !== 'function' || !/^[A-Za-z0-9_-]{1,128}$/.test(accountKey || '')) {
+        return { status: 'stopped', fatal: true,
+          reason: 'This browser cannot coordinate account actions safely. No profile action was sent.' };
+      }
+      result = await locks.request(lockName, { mode: 'exclusive', ifAvailable: true }, async (lock) => {
+        if (!lock || lock.name !== lockName || lock.mode !== 'exclusive') {
+          laneProblem = 'Another Presence, Ghost Mode, or account run is active for this account. Stop it before continuing.';
+          return null;
+        }
+        checkpointing = true;
+        await persistAccountRunCheckpoint({ pendingTarget: username });
+        checkpointing = false;
+        enteredEngine = true;
+        return engine.performReviewedProfileAction({
+          action,
+          expectedRelationship: expected,
+          resolutionToken: observation.resolutionToken,
+          username,
+        }, {
+          signal: controller.signal,
+          assertAuthorized: () => !batchAbort && state.run?.capabilityId === run?.capabilityId
+            && runCapabilityValid(state.run),
+          assertContext: () => Boolean(run?.accountUsername)
+            && normalizeUsername(engine.detectAuthenticatedUsername?.()) === run.accountUsername,
+        });
+      });
+    } catch {
+      return enteredEngine
+        ? { status: 'uncertain', fatal: true,
+          reason: 'The profile action ended without a reliable result. Check this profile before trying again.' }
+        : checkpointing ? { status: 'stopped', fatal: true,
+          reason: 'The next profile action could not be checkpointed. No action was sent. Check local storage before trying again.' }
+        : { status: 'stopped', fatal: true,
+          reason: 'This browser could not coordinate account actions. No profile action was sent.' };
+    } finally {
+      if (accountActionController === controller) accountActionController = null;
+    }
+    if (laneProblem) return { status: 'stopped', fatal: true, reason: laneProblem };
+    if (result?.uncertain) {
+      return { status: 'uncertain', fatal: true,
+        reason: 'The action was sent, but its result could not be verified. Check this profile before trying again.' };
+    }
     const resultStop = sessionStop(result);
     if (resultStop) return { status: 'stopped', reason: resultStop, fatal: true };
     if (!result?.result || result.ambiguous || result.unexpectedUi) {
-      return { status: 'failed', reason: result?.reason || 'not confirmed', fatal: false };
+      return { status: result?.needsAttention ? 'stopped' : 'failed',
+        reason: result?.reason || 'not confirmed', fatal: result?.needsAttention === true };
     }
-    recordAction('actions');
-    return { status: 'completed', reason: String(result.result), fatal: false };
+    try { recordAction('actions'); } catch {
+      return { status: 'completed', reason: String(result.result), fatal: true,
+        stopReason: 'Action verified, but its local activity record could not be saved. Check this profile before continuing.' };
+    }
+    return { status: 'completed', reason: String(result.result), fatal: result.needsAttention === true };
+  }
+
+  async function persistAccountRunCheckpoint(patch) {
+    if (!managerTabStorageAvailable || typeof GM_saveTab !== 'function') {
+      throw new Error('account-run-checkpoint-unavailable');
+    }
+    setRun(patch);
+    const resumable = normalizeResumableAccountRun(state.run);
+    managerTab = { ...managerTab };
+    if (resumable) managerTab[TAB_RUN_FIELD] = resumable;
+    else delete managerTab[TAB_RUN_FIELD];
+    // saveState also writes this record, but its general-purpose path tolerates
+    // manager errors. A native dispatch requires an acknowledged checkpoint.
+    await GM_saveTab(managerTab);
+    const stored = await readManagerTab();
+    if (!stored) throw new Error('account-run-checkpoint-unreadable');
+    const savedRun = stored[TAB_RUN_FIELD];
+    if (resumable) {
+      const fields = ['capabilityId', 'accountUsername', 'pendingTarget', 'capabilityDigest',
+        'capabilityExpiresAt', 'queue', 'completed', 'skipped', 'failed', 'uncertain'];
+      if (!savedRun || JSON.stringify(fields.map(field => savedRun[field]))
+        !== JSON.stringify(fields.map(field => resumable[field]))) {
+        throw new Error('account-run-checkpoint-not-confirmed');
+      }
+    } else if (savedRun) throw new Error('account-run-checkpoint-not-cleared');
   }
 
   // An account run has to visit each target's profile, and navigating tears this
@@ -13283,16 +15391,28 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
       stopForExpiredCapability();
       return;
     }
-    if (run.growthCampaignId
-      && normalizeUsername(engine.detectAuthenticatedUsername?.()) !== run.growthAccount) {
+    if (normalizeUsername(engine.detectAuthenticatedUsername?.()) !== run.accountUsername) {
       setRun({ status: 'stopped', stopReason: 'signed-in account changed', current: '', queue: [] });
-      status('Campaign stopped because the signed-in account could not be verified.');
+      status('Run stopped because the signed-in account changed or could not be verified. Review it again for this account.');
       return;
     }
     if (run.growthCampaignId && !growthRunStillApproved(run)) {
       setRun({ status: 'stopped', stopReason: 'campaign targets changed', current: '', queue: [] });
       status('Campaign targets changed. Review them again before any further action.');
       return;
+    }
+    if (run.pendingTarget) {
+      setRun({ status: 'stopped', current: '', queue: [], nextAt: null,
+        stopReason: 'A previous profile action was interrupted before its result was saved. Check that profile and review a new run.' });
+      status(`Check @${run.pendingTarget} before continuing. Its previous action has no saved outcome, so this run will not resume automatically.`);
+      return;
+    }
+    if (Number(run.nextAt) > Date.now()) {
+      await sleep(Number(run.nextAt) - Date.now());
+      if (batchAbort || state.run?.status !== 'running'
+        || state.run.capabilityId !== run.capabilityId) return;
+      setRun({ nextAt: null });
+      return continueAccountRun();
     }
     const username = run.queue[0];
     const onTarget = engine.normalizeUsername(location.pathname) === username;
@@ -13307,9 +15427,10 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
     setRun({ current: `@${username}` });
     let outcome;
     try {
-      outcome = await runOneAccount(username, run.action);
+      outcome = await runOneAccount(username, run.action, run);
     } catch (error) {
-      outcome = { status: 'failed', reason: error.message, fatal: false };
+      outcome = { status: 'uncertain', fatal: true,
+        reason: 'The profile action ended without a reliable result. Check this profile before trying again.' };
     }
 
     if (outcome.status === 'completed' && run.growthCampaignId
@@ -13322,25 +15443,47 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
     }
 
     const current = state.run || {};
+    if (current.capabilityId !== run.capabilityId) return;
     const patch = {
       queue: (current.queue || []).slice(1),
+      pendingTarget: '',
       results: [{ label: `@${username}`, status: outcome.status, reason: outcome.reason },
         ...(current.results || [])].slice(0, 40),
     };
     if (outcome.status === 'completed') patch.completed = (current.completed || 0) + 1;
     else if (outcome.status === 'skipped') patch.skipped = (current.skipped || 0) + 1;
+    else if (outcome.status === 'uncertain') patch.uncertain = (current.uncertain || 0) + 1;
     else patch.failed = (current.failed || 0) + 1;
-    setRun(patch);
+    if (outcome.fatal && !batchAbort && current.status === 'running') {
+      Object.assign(patch, { status: 'stopped', stopReason: outcome.stopReason || outcome.reason,
+        current: '', queue: [], nextAt: null });
+    }
+    try { await persistAccountRunCheckpoint(patch); } catch {
+      batchAbort = true;
+      state.run = { ...current, ...patch, status: 'stopped', current: '', queue: [], nextAt: null,
+        stopReason: 'The action result is retained in this tab, but local storage failed.' };
+      // Shared storage can fail before saveState reaches manager-tab storage.
+      // Invalidate that resume record independently, preserving other tab data.
+      if (managerTabStorageAvailable) {
+        managerTab = { ...managerTab };
+        delete managerTab[TAB_RUN_FIELD];
+        try { GM_saveTab(managerTab); } catch { /* Keep the local run stopped even if both stores fail. */ }
+      }
+      renderAll();
+      status('Run stopped because its result could not be saved. Keep this tab open and check the affected profile before reloading or trying again.');
+      return;
+    }
 
-    if (outcome.fatal) {
-      setRun({ status: 'stopped', stopReason: outcome.reason, current: '', queue: [] });
-      status(`Stopped: ${outcome.reason}. Nothing further was attempted.`);
+    // A click already sent still needs its result recorded. Settling that result
+    // must never turn a stopped run back into a completed or running one.
+    if (batchAbort || state.run?.status !== 'running') {
+      if (patch.status === 'stopped') status(`Stopped: ${patch.stopReason}. Nothing further was attempted.`);
       return;
     }
     if (!(state.run?.queue || []).length) {
       const done = state.run || {};
       setRun({ status: 'completed', current: '', nextAt: null });
-      status(`Run finished: ${done.completed || 0} done, ${done.skipped || 0} skipped, ${done.failed || 0} failed.`);
+      status(`Run finished: ${done.completed || 0} done, ${done.skipped || 0} skipped, ${done.failed || 0} failed, ${done.uncertain || 0} unconfirmed.`);
       return;
     }
 
@@ -13350,18 +15493,27 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
       + Math.floor(Math.random() * (Math.max(bounds.maxDelayMs, bounds.minDelayMs) - bounds.minDelayMs + 1));
     if (processed % REST_EVERY === 0) wait += REST_MS;
     setRun({ nextAt: Date.now() + wait });
-    await sleep(wait);
-    if (batchAbort || state.run?.status !== 'running') return;
     await continueAccountRun();
   }
 
-  async function startAccountRun({ action, usernames, growthCampaignId = '', growthAccount = '' }) {
-    if (growthCampaignId && normalizeUsername(engine.detectAuthenticatedUsername?.()) !== growthAccount) {
-      status('Campaign account changed. No account action started.');
+  async function startAccountRun({ action, usernames, growthCampaignId = '', growthAccount = '', expiresAt = null }) {
+    if (manualScanController) { status('Stop the list scan before starting account actions.'); return; }
+    const accountUsername = normalizeUsername(engine.detectAuthenticatedUsername?.());
+    if (!accountUsername || (growthCampaignId && accountUsername !== growthAccount)) {
+      status('Verify the signed-in account before starting. No account action started.');
+      return;
+    }
+    const approvedExpiry = Number(expiresAt);
+    if (growthCampaignId && (!Number.isFinite(approvedExpiry) || approvedExpiry <= Date.now())) {
+      status('The campaign review expired. Review these accounts again before starting.');
       return;
     }
     if (!managerTabStorageAvailable) {
       status('This userscript manager cannot keep a run active while opening profiles. Account batches are unavailable; scans and no-click checks still work.');
+      return;
+    }
+    if (accountActionController) {
+      status('The last account action is still being checked. Wait for its result before starting another run.');
       return;
     }
     if (state.run?.status === 'running') {
@@ -13381,16 +15533,33 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
       completed: 0,
       skipped: 0,
       failed: 0,
+      uncertain: 0,
       current: '',
       stopReason: null,
       approvedTargets: [...queue],
       capabilityDigest: accountCapabilityDigest(action, queue),
-      capabilityExpiresAt: Date.now() + RUN_CAPABILITY_MS,
+      capabilityExpiresAt: Math.min(Date.now() + RUN_CAPABILITY_MS,
+        approvedExpiry > 0 ? approvedExpiry : Infinity),
       capabilityId,
+      accountUsername,
+      pendingTarget: '',
       growthCampaignId,
       growthAccount,
       results: [],
     });
+    await continueAccountRun();
+  }
+
+  async function resumeApprovedAccountRun() {
+    const run = resumableAccountRun();
+    if (!run) return;
+    // Keep hidden manual queues retired. Only a still-reviewed, account-bound
+    // growth campaign may continue across the profile navigation it requested.
+    if (!run.growthCampaignId) {
+      setRun({ status: 'stopped', stopReason: 'legacy account run retired', current: '', queue: [] });
+      status('An older manual account run was stopped. Presence does not resume past approvals.');
+      return;
+    }
     await continueAccountRun();
   }
 
@@ -13455,13 +15624,16 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
         view: 'account',
       };
     }
-    if (preferences.view === 'account' && inspectPresenceAccount().accountVerified) {
-      return { tone: 'ready', title: 'Presence ready',
-        detail: 'Choose activities and start. Presence can move between Instagram pages.', view: 'account' };
+    if (preferences.view === 'account') {
+      return inspectPresenceAccount().accountVerified
+        ? { tone: 'ready', title: 'Presence ready',
+          detail: 'Choose activities and a run style, then review and start.', view: 'account' }
+        : { tone: 'warning', title: 'Verify your signed-in account',
+          detail: 'Open Home, then try again after Instagram loads.', view: 'account' };
     }
 
     const path = location.pathname.toLowerCase();
-    if (path.startsWith('/direct/t/')) {
+    if (preferences.view === 'messages' && path.startsWith('/direct/t/')) {
       return {
         tone: 'ready',
         title: 'Conversation open',
@@ -13469,8 +15641,12 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
         view: 'messages',
       };
     }
-    if (path.startsWith('/direct')) {
+    if (preferences.view === 'messages' && path.startsWith('/direct')) {
       return { tone: 'ready', title: 'Inbox open', detail: 'Use Ghost Mode for multiple conversations, or open a chat to use Unsend.' };
+    }
+    if (preferences.view === 'messages') {
+      return { tone: 'warning', title: 'Open a conversation for Unsend',
+        detail: 'Open a chat for Unsend. Ghost Mode asks for a separate review.', view: 'messages' };
     }
     const followerList = openFollowerListContext();
     if (followerList) {
@@ -13493,7 +15669,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
     return {
       tone: 'ready',
       title: 'Instagram open',
-      detail: 'Use Presence here, or open your profile to check mutuals.',
+      detail: 'Enter a username to compare Followers and Following. This check does not change the account.',
     };
   }
 
@@ -13563,6 +15739,37 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
     };
   }
 
+  function renderListScanControls() {
+    const partialDownload = query('[data-role="partial-scan-download"]');
+    if (partialDownload) partialDownload.hidden = !relationshipPartialResult;
+    const stop = query('[data-role="list-scan-stop"]');
+    if (stop) {
+      stop.hidden = !manualScanController;
+      stop.disabled = manualScanController?.signal.aborted === true;
+      stop.textContent = stop.disabled ? 'Stopping scan…' : 'Stop scan';
+    }
+    const readBusy = Boolean(manualScanController || relationshipController);
+    for (const action of ['scan-following', 'scan-followers', 'scan-list', 'capture', 'clear-capture']) {
+      for (const control of shadow.querySelectorAll(`[data-action="${action}"]`)) control.disabled = readBusy;
+    }
+    const listType = query('[data-role="list-type"]');
+    if (listType) listType.disabled = readBusy;
+    const check = query('[data-role="checker-run"]');
+    if (check) check.disabled = Boolean(manualScanController);
+  }
+
+  function assertManualScanAvailable() {
+    if (inboxPanel?.busy()) throw new Error('Stop inbox cleanup before scanning a list.');
+    if (manualScanController) throw new Error('A list scan is already running. Use Stop scan first.');
+    if (relationshipController) throw new Error('Stop the mutual check before scanning a list.');
+    if (presencePanel?.busy() || presenceGrowthPanel?.busy()) throw new Error('Stop Presence before scanning a list.');
+    const dm = dmRunner?.snapshot();
+    if (accountActionController || dmCleanupController || dm?.canStop
+      || ['preparing', 'running', 'waiting', 'stopping'].includes(dm?.status) || state.run?.status === 'running') {
+      throw new Error('Stop the current run before scanning a list.');
+    }
+  }
+
   function scanProgressPercent(found, expectedCounts, complete = false) {
     const types = ['followers', 'following'];
     const knownTypes = types.filter((type) => Number.isSafeInteger(expectedCounts?.[type]));
@@ -13584,6 +15791,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
     settled = false,
     expectedCount = null,
     expectedCounts = null,
+    { kind = 'mutual', stopped = false } = {},
   ) {
     const panel = query('[data-role="scan-progress"]');
     if (!panel) return;
@@ -13614,13 +15822,16 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
     );
     if (fill) fill.style.width = percent === null ? '100%' : `${percent}%`;
     if (bar) {
+      const task = kind === 'list' ? 'List scan' : 'Mutual check';
+      bar.setAttribute('aria-label', `${task} progress`);
       bar.dataset.indeterminate = String(percent === null);
       if (percent === null) bar.removeAttribute('aria-valuenow');
       else bar.setAttribute('aria-valuenow', String(percent));
       bar.setAttribute(
         'aria-valuetext',
         settled
-          ? complete ? 'Mutual check complete' : 'Mutual check finished with a partial result'
+          ? stopped ? `${task} stopped with a partial result`
+            : complete ? `${task} complete` : `${task} finished with a partial result`
           : percent === null
             ? `Scanning ${listType || 'accounts'}; total unknown`
             : `${percent}% of the expected accounts read`,
@@ -13639,12 +15850,15 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
   }
 
   function failedRelationshipScanDetail(error) {
-    if (error?.code === 'stopped') return 'Mutual check stopped. Saved comparison unchanged.';
+    const partial = error?.partialResult;
+    const retained = partial
+      ? ` ${formatCount(partial.followers?.length)} followers and ${formatCount(partial.following?.length)} following retained as a partial scan; download it before starting again or reloading.` : '';
+    if (error?.code === 'stopped') return `Mutual check stopped. Saved comparison unchanged.${retained}`;
     const message = safeText(error?.message, 'Instagram did not return readable relationship data.');
-    return `Mutual check failed: ${message} Saved comparison unchanged.`;
+    return `Mutual check failed: ${message} Saved comparison unchanged.${retained}`;
   }
 
-  function settleFailedRelationshipProgress(error) {
+  function settleFailedRelationshipProgress(error, { kind = 'mutual' } = {}) {
     const bar = query('[data-role="scan-bar"]');
     const fill = query('[data-role="scan-fill"]');
     if (fill) fill.style.width = '0%';
@@ -13653,17 +15867,23 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
     bar.removeAttribute('aria-valuenow');
     bar.setAttribute(
       'aria-valuetext',
-      error?.code === 'stopped' ? 'Mutual check stopped' : 'Mutual check failed',
+      `${kind === 'list' ? 'List scan' : 'Mutual check'} ${error?.code === 'stopped' ? 'stopped' : 'failed'}`,
     );
   }
 
   async function scanInto(listType) {
     if (inboxPanel?.busy()) throw new Error('Stop inbox cleanup before scanning a list.');
+    assertManualScanAvailable();
     const select = query('[data-role="list-type"]');
     if (select) select.value = listType;
-    resetRelationshipProgress();
-    showScanProgress(listType, 0, false);
-    const outcome = await actions['scan-list']();
+    let outcome;
+    try { outcome = await actions['scan-list'](); }
+    catch (error) {
+      if (error?.code === 'stale-list-scan') return;
+      settleFailedRelationshipProgress(error, { kind: 'list' });
+      setText('scan-detail', `List scan failed: ${safeText(error?.message, 'Instagram did not return readable rows.')}`);
+      throw error;
+    }
     if (!outcome?.applied) {
       const detail = safeText(outcome?.detail, `The ${listType} scan did not start.`);
       const bar = query('[data-role="scan-bar"]');
@@ -13684,26 +15904,35 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
       outcome.complete,
       true,
       outcome.expectedCount,
+      null,
+      { kind: 'list', stopped: outcome.stopped === true },
     );
+    if (outcome.detail) setText('scan-detail', outcome.detail);
     renderAll();
   }
 
   async function checkAccountRelationships() {
-    if (inboxPanel?.busy()) { status('Stop inbox cleanup before checking mutuals.'); return; }
-    if (presencePanel?.busy()) { status('Pause or stop Presence before checking mutuals.'); return; }
     if (relationshipController) {
       relationshipController.abort();
       status('Stopping the mutual check. Saved comparison data was not changed.');
       return;
+    }
+    if (manualScanController) { status('Stop the list scan before checking mutuals.'); return; }
+    if (inboxPanel?.busy()) { status('Stop inbox cleanup before checking mutuals.'); return; }
+    if (presencePanel?.busy() || presenceGrowthPanel?.busy()) { status('Stop Presence before checking mutuals.'); return; }
+    const dm = dmRunner?.snapshot();
+    if (accountActionController || dmCleanupController || dm?.canStop
+      || ['preparing', 'running', 'waiting', 'stopping'].includes(dm?.status) || state.run?.status === 'running') {
+      status('Stop the current run before checking mutuals.'); return;
     }
     if (typeof engine?.fetchFollowerComparison !== 'function') {
       status('Reload Instagram to activate Mutual Checker.');
       return;
     }
     const input = query('[data-role="checker-username"]');
-    const username = engine.normalizeUsername(input?.value)
-      || engine.detectAuthenticatedUsername?.()
-      || '';
+    const suppliedUsername = String(input?.value || '').trim();
+    const username = suppliedUsername ? engine.normalizeUsername(suppliedUsername)
+      : engine.detectAuthenticatedUsername?.() || '';
     if (!username) {
       status('Enter the Instagram username whose Followers and Following should be checked.');
       input?.focus();
@@ -13711,7 +15940,11 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
     }
     if (input) input.value = username;
     const controller = new AbortController();
+    const originalCapture = state.capture;
     relationshipController = controller;
+    relationshipPartialResult = null;
+    const openProfile = query('[data-role="checker-open-profile"]');
+    if (openProfile) openProfile.hidden = true;
     invalidatePresence();
     resetRelationshipProgress();
     renderAll();
@@ -13720,12 +15953,17 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
     try {
       const result = await (presenceInputs
         ? options => presenceInputs.captureComparison(options)
-        : options => engine.fetchFollowerComparison(options))({
+        : options => engine.fetchFollowerComparison({ ...options, allowNativeListFallback: true }))({
         username,
         retryRateLimits: true,
         signal: controller.signal,
         onProgress(progress) {
           if (relationshipController !== controller) return;
+          if (progress.phase === 'native-lists') {
+            showScanProgress(null, 0, false, false, null, progress.expectedCounts);
+            setText('scan-detail', `Reading @${username}'s native Followers and Following lists. Stop mutual check cancels this read.`);
+            return;
+          }
           if (progress.phase === 'cooldown') {
             const seconds = Math.ceil(progress.remainingMs / 1000);
             const clock = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
@@ -13780,6 +16018,9 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
           }
         },
       });
+      if (relationshipController !== controller || state.capture !== originalCapture) return;
+      if (controller.signal.aborted) throw Object.assign(new Error('Mutual check stopped.'), { code: 'stopped' });
+      const nativeLists = result.source === 'list-dialog';
       const previousCapture = state.capture;
       const nextCapture = {
         ...stateDefaults().capture,
@@ -13790,8 +16031,9 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
         following: normalizeAccounts(result.following),
         capturedAt: { followers: result.capturedAt, following: result.capturedAt },
         complete: { ...result.complete },
-        verified: { followers: true, following: true },
-        source: { followers: 'authenticated-web', following: 'authenticated-web' },
+        verified: { followers: !nativeLists || result.verified?.followers === true,
+          following: !nativeLists || result.verified?.following === true },
+        source: { followers: nativeLists ? 'list-dialog' : 'authenticated-web', following: nativeLists ? 'list-dialog' : 'authenticated-web' },
         ...engine.normalizeFollowerDiagnostics(result),
       };
       state.capture = nextCapture;
@@ -13801,7 +16043,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
         state.capture = previousCapture;
         throw error;
       }
-      if (!controller.signal.aborted) presenceCapture = result;
+      if (!nativeLists && !controller.signal.aborted) presenceCapture = result;
       const partialDetails = [];
       for (const [listType, accounts] of [
         ['followers', result.followers],
@@ -13818,11 +16060,15 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
           const difference = expected - accounts.length;
           partialDetails.push(difference > 0
             ? `${label}: Instagram returned ${accounts.length.toLocaleString('en-US')} of ${expected.toLocaleString('en-US')}; ${difference.toLocaleString('en-US')} were not returned.`
-            : `${label}: the API returned ${accounts.length.toLocaleString('en-US')} unique accounts while the profile shows ${expected.toLocaleString('en-US')}.`);
+            : `${label}: the ${nativeLists ? 'native list' : 'API'} returned ${accounts.length.toLocaleString('en-US')} unique accounts while the profile shows ${expected.toLocaleString('en-US')}.`);
         } else if (reason === 'count-changed') {
           partialDetails.push(`${label}: the profile total changed during the check.`);
         } else if (reason === 'profile-count-disagreement') {
           partialDetails.push(`${label}: Instagram's profile counters disagreed.`);
+        } else if (reason === 'count-unverified') {
+          partialDetails.push(`${label}: a fresh exact profile total could not be verified.`);
+        } else if (reason === 'native-list-truncated') {
+          partialDetails.push(`${label}: the native list could not be read completely.`);
         }
       }
       const mismatch = ` ${partialDetails.join(' ') || 'A bounded read limit was reached.'}`;
@@ -13841,6 +16087,16 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
       );
       setText('scan-detail', completedRelationshipScanDetail(result));
     } catch (error) {
+      if (relationshipController !== controller || state.capture !== originalCapture) return;
+      if (error?.partialResult?.source === 'list-dialog'
+        && (error.partialResult.followers?.length || error.partialResult.following?.length)) {
+        relationshipPartialResult = error.partialResult;
+      }
+      if (error?.code === 'native-profile-required' && openProfile) {
+        openProfile.href = `https://www.instagram.com/${username}/`;
+        openProfile.textContent = `Open @${username} profile`;
+        openProfile.hidden = false;
+      }
       const detail = failedRelationshipScanDetail(error);
       settleFailedRelationshipProgress(error);
       setText('scan-detail', detail);
@@ -14127,6 +16383,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
 
   async function scanSentConversation() {
     if (inboxPanel?.busy()) throw new Error('Stop inbox cleanup before checking the conversation.');
+    if (manualScanController) throw new Error('Stop the list scan before checking the conversation.');
     if (dmCleanupController) throw new Error('Stop cleanup before checking the conversation.');
     if (!dmRunner) throw new Error('Reload Instagram to load the DM Unsend runner.');
     status('Checking this conversation for messages you sent. Nothing will be removed.');
@@ -14167,6 +16424,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
   }
 
   async function runReactionsOnly() {
+    if (manualScanController) { status('Stop the list scan before removing reactions.'); return; }
     if (inboxPanel?.busy() || (typeof presencePanel !== 'undefined' && presencePanel?.busy())) {
       status('Stop the current run before removing reactions.'); return;
     }
@@ -14216,6 +16474,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
   }
 
   async function runDmUnsend() {
+    if (manualScanController) { status('Stop the list scan before using DM Unsend.'); return; }
     if (inboxPanel?.busy()) { inboxPanel.stop(); return; }
     if (typeof presencePanel !== 'undefined' && presencePanel?.busy()) {
       status('Pause or stop Presence before using DM Unsend.');
@@ -14422,6 +16681,19 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
     'check-account-relationships': () => checkAccountRelationships(),
     'scan-following': () => scanInto('following'),
     'scan-followers': () => scanInto('followers'),
+    'stop-list-scan': () => {
+      if (!manualScanController || manualScanController.signal.aborted) return;
+      const restoreFocus = shadow.activeElement === query('[data-role="list-scan-stop"]');
+      manualScanController.abort();
+      renderListScanControls();
+      const detail = query('[data-role="scan-detail"]');
+      if (restoreFocus && preferences.view === 'checker' && preferences.open
+        && detail?.getClientRects?.().length && !detail.closest?.('[hidden]')) {
+        detail.tabIndex = -1;
+        detail.focus({ preventScroll: true });
+      }
+      status('Stopping the list scan. Read rows will be kept as a partial capture.');
+    },
     'context-cta': () => {
       const cta = query('[data-role="context-cta"]');
       const target = cta?.dataset.ctaAction;
@@ -14447,6 +16719,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
         return;
       }
       batchAbort = true;
+      accountActionController?.abort('Stopped by you');
       // Clearing the queue is what actually stops a resumable account run; the
       // in-memory flag alone would not survive the next page load.
       setRun({
@@ -14455,58 +16728,94 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
       status('Run stopped. It will not resume.');
     },
     'scan-list': async () => {
-      if (inboxPanel?.busy()) throw new Error('Stop inbox cleanup before scanning a list.');
+      assertManualScanAvailable();
       const listType = query('[data-role="list-type"]').value === 'followers' ? 'followers' : 'following';
-      status(`Scanning the open ${listType} list. Keep the dialog open.`);
-      const outcome = await engine.collectAccountList({ listType });
-      const stopReason = sessionStop(outcome);
-      if (stopReason) {
-        const detail = `Stopped: ${stopReason}.`;
-        status(detail);
-        return { applied: false, detail };
-      }
-      const accounts = outcome?.accounts || [];
-      if (outcome?.listType !== listType) {
-        const detail = `No verified ${listType} dialog was open. Open that exact list and scan again.`;
-        status(detail);
-        return { applied: false, detail };
-      }
-      if (!accounts.length) {
-        const detail = `No rows were readable. Open your ${listType} list first.`;
-        status(detail);
-        return { applied: false, detail };
-      }
       const subjectUsername = currentProfileCaptureSubject();
-      prepareCaptureWorkspace(subjectUsername);
-      state.capture[listType] = reconciledRelationshipAccounts(
-        verifiedCapture(listType),
-        accounts,
-        outcome.complete === true,
-      );
-      state.capture.capturedAt[listType] = nowIso();
-      state.capture.complete = { ...(state.capture.complete || {}), [listType]: outcome.complete === true };
-      state.capture.verified = { ...(state.capture.verified || {}), [listType]: true };
-      state.capture.source = { ...(state.capture.source || {}), [listType]: 'list-dialog' };
-      state.capture.subjectUsername = subjectUsername;
-      saveState();
-      renderAll();
-      const mismatch = outcome?.reason === 'list-count-mismatch'
-        && Number.isSafeInteger(outcome.expectedCount);
-      status(
-        `Scanned ${accounts.length} ${listType} rows.${outcome.complete
-          ? ''
-          : mismatch
-            ? ` Instagram reports ${outcome.expectedCount}, so this capture stays incomplete.`
-            : outcome?.reason === 'list-count-changed'
-              ? ' The profile count changed during the scan, so this capture stays incomplete.'
-              : ' The list did not reach its end, so some may be missing.'}`,
-      );
-      return {
-        applied: true,
-        complete: outcome.complete === true,
-        expectedCount: outcome.expectedCount,
-        found: state.capture[listType].length,
-      };
+      if (!subjectUsername) throw new Error('Open the profile whose list you want to scan first.');
+      const profilePath = location.pathname;
+      const workspaceAtStart = state.capture;
+      const controller = new AbortController();
+      manualScanController = controller;
+      try {
+        invalidatePresence();
+        resetRelationshipProgress();
+        showScanProgress(listType, 0, false, false, null, null, { kind: 'list' });
+        renderAll();
+        status(`Scanning the open ${listType} list. Keep the dialog open.`);
+        const outcome = await engine.collectAccountList({
+          listType, signal: controller.signal,
+          onProgress(progress) {
+            if (manualScanController !== controller || controller.signal.aborted
+              || state.capture !== workspaceAtStart || location.pathname !== profilePath) return;
+            showScanProgress(listType, progress.found, false, false, progress.expectedCount,
+              null, { kind: 'list' });
+          },
+        });
+        if (manualScanController !== controller) {
+          const error = new Error('A newer list scan owns this context.');
+          error.code = 'stale-list-scan';
+          throw error;
+        }
+        if (state.capture !== workspaceAtStart) {
+          throw new Error('The saved capture changed during the scan. Its result was not overwritten.');
+        }
+        const accounts = outcome?.accounts || [];
+        const stopReason = sessionStop(outcome);
+        if (stopReason && !accounts.length) {
+          const detail = `Stopped: ${stopReason}.`;
+          status(detail);
+          return { applied: false, detail };
+        }
+        if (outcome?.listType !== listType || (outcome.profilePath && outcome.profilePath !== profilePath)) {
+          const detail = `No verified ${listType} dialog was open. Open that exact list and scan again.`;
+          status(detail);
+          return { applied: false, detail };
+        }
+        const stopped = controller.signal.aborted || outcome.reason === 'stopped';
+        const profileChanged = location.pathname !== profilePath || outcome.reason === 'profile-changed';
+        const listChanged = ['list-closed', 'list-changed'].includes(outcome.reason);
+        const complete = outcome.complete === true && !stopped && !profileChanged && !listChanged && !stopReason;
+        const existing = state.capture.subjectUsername === subjectUsername ? verifiedCapture(listType) : [];
+        if (!accounts.length && !(complete && outcome.expectedCount === 0)
+          && !((stopped || profileChanged) && existing.length
+            && state.capture.source?.[listType] === 'list-dialog')) {
+          const detail = stopped ? 'List scan stopped before any rows were read. Saved capture unchanged.'
+            : `No rows were readable. Open your ${listType} list first.`;
+          status(detail);
+          return { applied: false, detail };
+        }
+        prepareCaptureWorkspace(subjectUsername);
+        state.capture[listType] = reconciledRelationshipAccounts(
+          verifiedCapture(listType), accounts, complete,
+        );
+        state.capture.capturedAt[listType] = nowIso();
+        state.capture.complete = { ...(state.capture.complete || {}), [listType]: complete };
+        state.capture.verified = { ...(state.capture.verified || {}), [listType]: true };
+        state.capture.source = { ...(state.capture.source || {}), [listType]: 'list-dialog' };
+        state.capture.subjectUsername = subjectUsername;
+        saveState();
+        const mismatch = outcome?.reason === 'list-count-mismatch' && Number.isSafeInteger(outcome.expectedCount);
+        const interruption = stopped ? 'List scan stopped.'
+          : profileChanged ? 'The profile changed; list scan stopped.'
+            : outcome.reason === 'list-closed' ? 'The list closed before the scan finished.'
+              : outcome.reason === 'list-changed' ? 'The open list changed; scan stopped.'
+                : stopReason ? `Stopped: ${stopReason}.` : '';
+        const detail = interruption
+          ? `${interruption} ${accounts.length} ${listType} read; ${state.capture[listType].length} stored for @${subjectUsername} as a partial capture.`
+          : `Scanned ${accounts.length} ${listType} rows.${complete
+            ? ''
+            : mismatch
+              ? ` Instagram reports ${outcome.expectedCount}, so this capture stays incomplete.`
+              : outcome.reason === 'list-count-changed'
+                ? ' The profile count changed during the scan, so this capture stays incomplete.'
+                : ' The list did not reach its end, so some may be missing.'}`;
+        status(detail);
+        return { applied: true, complete, expectedCount: outcome.expectedCount,
+          found: accounts.length, stored: state.capture[listType].length, stopped, detail };
+      } finally {
+        if (manualScanController === controller) manualScanController = null;
+        renderAll();
+      }
     },
     'scan-sent': () => scanSentConversation(),
     'run-accounts': async () => {
@@ -14599,6 +16908,8 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
       capabilities: cleanupSettings.capabilities('userscript'),
     }),
     capture: () => {
+      if (manualScanController) { status('Stop the list scan before capturing visible rows.'); return; }
+      if (relationshipController) { status('Stop the mutual check before capturing visible rows.'); return; }
       const listType = query('[data-role="list-type"]').value === 'followers' ? 'followers' : 'following';
       const visible = captureVisibleAccounts(listType);
       if (!visible.length) {
@@ -14622,6 +16933,9 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
       status(`Captured ${visible.length} rendered ${listType} rows; ${state.capture[listType].length - before} were new.`);
     },
     'clear-capture': () => {
+      if (manualScanController) { status('Stop the list scan before clearing the checker.'); return; }
+      if (relationshipController) { status('Stop the mutual check before clearing the checker.'); return; }
+      relationshipPartialResult = null;
       invalidatePresence();
       state.capture = stateDefaults().capture;
       checkerResultKey = '';
@@ -14668,6 +16982,14 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
         note: method === 'authenticated-web'
           ? 'Read from bounded authenticated Instagram pagination. No follow, unfollow, message, or click action was performed.'
           : 'Only rows rendered in Instagram were captured. Scroll manually and capture again to merge more rows.',
+      });
+    },
+    'download-partial-scan': () => {
+      if (!relationshipPartialResult) return;
+      downloadJson(`insta-toolbox-partial-native-scan-${Date.now()}.json`, {
+        kind: 'insta-toolbox-partial-native-scan', schemaVersion: 1, partial: true,
+        note: 'Interrupted native read. This is separate from the saved comparison; missing accounts are unknown.',
+        ...relationshipPartialResult,
       });
     },
     'download-comparison-json': () => {
@@ -15042,7 +17364,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
     presenceSession = globalThis.InstaToolboxPresenceSession.create({
       nativeActions,
       locks: globalThis.navigator?.locks || null,
-      onUpdate: next => { presencePanel?.render(next); renderContext(); },
+      onUpdate: onPresenceUpdate,
     });
     presencePanel = globalThis.InstaToolboxPresenceSessionPanel.mount({
       container: query('[data-role="presence-routine"]'), document, window,
@@ -15051,34 +17373,100 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
       confirmAction: confirmRun,
       readPreferences: () => GM_getValue('instaToolboxPresenceSessionV1', null),
       writePreferences: value => GM_setValue('instaToolboxPresenceSessionV1', value),
-      readLog: () => {
-        const account = nativeActions.inspectContext();
-        return account.accountKey
-          ? GM_getValue(`instaToolboxPresenceActivityLogV1:${account.accountKey}`, null)
-          : null;
+      createHistoryStore: accountKey => {
+        if (typeof accountKey !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(accountKey)) throw new Error('presence-log-account-unverified');
+        const manager = typeof GM === 'undefined' ? null : GM;
+        if (!manager || ['getValue', 'setValue', 'listValues', 'deleteValue'].some(name => typeof manager[name] !== 'function')
+          || typeof GM_addValueChangeListener !== 'function' || typeof GM_removeValueChangeListener !== 'function'
+          || typeof globalThis.InstaToolboxPresenceHistoryJournal?.create !== 'function') {
+          throw new Error('presence-history-private-storage-unavailable');
+        }
+        return globalThis.InstaToolboxPresenceHistoryJournal.create({ accountKey,
+          readLegacy: () => manager.getValue(`instaToolboxPresenceActivityLogV1:${accountKey}`, null),
+          storage: {
+            getValue: (key, fallback) => manager.getValue(key, fallback),
+            setValue: (key, value) => manager.setValue(key, value),
+            listValues: () => manager.listValues(),
+            deleteValue: key => manager.deleteValue(key),
+            listen: (key, callback) => GM_addValueChangeListener(key, (_key, _old, value) => callback(value)),
+            unlisten: id => GM_removeValueChangeListener(id),
+          },
+        });
       },
-      writeLog: value => {
-        const account = nativeActions.inspectContext();
-        if (!account.accountKey) throw new Error('presence-log-account-unverified');
-        return GM_setValue(`instaToolboxPresenceActivityLogV1:${account.accountKey}`, value);
+      onAccountReady: () => {
+        const dm = dmRunner?.snapshot();
+        if (preferences.view !== 'account'
+          || query('[data-role="context-title"]')?.textContent !== 'Verify your signed-in account'
+          || presencePanel?.busy() || presenceGrowthPanel?.busy() || inboxPanel?.busy()
+          || relationshipController || manualScanController || dmCleanupController || accountActionController
+          || dm?.canStop || ['preparing', 'running', 'waiting', 'stopping'].includes(dm?.status)
+          || state.run?.status === 'running') return;
+        renderContext();
       },
       busy: () => Boolean(dmCleanupController || dmRunner?.snapshot().canStop
-        || relationshipController || state.run?.status === 'running' || inboxPanel?.busy()
+        || relationshipController || manualScanController || state.run?.status === 'running' || inboxPanel?.busy()
         || presenceGrowthPanel?.busy()),
       onStatus: status,
     });
     if (globalThis.InstaToolboxPresenceGrowthPanel && globalThis.InstaToolboxPresenceGrowth) {
       try {
+        const inspectGrowthReadAccount = ({ actor = '', seed = '' } = {}) => {
+          const ordinary = inspectPresenceAccount();
+          if (ordinary.accountVerified || ordinary.restriction || !actor || !seed) return ordinary;
+          // Native lists hide the app backdrop from accessibility while keeping
+          // its account controls mounted. Re-prove that exact context each time.
+          const proven = [];
+          for (const dialog of document.querySelectorAll('[role="dialog"]')) {
+            for (const profileHeader of document.querySelectorAll('main header')) {
+              for (const listType of ['followers', 'following']) {
+                const value = globalThis.InstaToolboxInstagramViewer?.inspect?.({ document, location,
+                  session: engine.inspectSession?.() || {},
+                  nativeListDialog: { dialog, profileHeader, username: seed, listType } });
+                if (value?.accountVerified === true && value.accountId === actor && !value.restriction) proven.push(value);
+              }
+            }
+          }
+          return proven.length === 1 ? { ...proven[0], usable: location.origin === 'https://www.instagram.com' } : ordinary;
+        };
         presenceGrowthPanel = globalThis.InstaToolboxPresenceGrowthPanel.mount({
         container: query('[data-role="presence-routine"]'), document,
         inspectAccount: inspectPresenceAccount,
+        inspectReadAccount: inspectGrowthReadAccount,
         readFollowing: () => state.capture.subjectUsername === inspectPresenceAccount().accountId
           && state.capture.verified?.following === true ? state.capture.following : [],
         readFollowers: () => state.capture.subjectUsername === inspectPresenceAccount().accountId
           && state.capture.verified?.followers === true ? state.capture.followers : [],
+        readFollowingSnapshot: () => ({
+          subjectUsername: state.capture.subjectUsername,
+          listType: 'following', verified: state.capture.verified?.following === true,
+          source: state.capture.source?.following,
+          capturedAt: state.capture.capturedAt?.following,
+          complete: state.capture.complete?.following === true,
+          accounts: state.capture.following,
+        }),
+        readReadDraft: (actor, seed) => {
+          const value = inspectGrowthReadAccount({ actor, seed });
+          const owner = value.accountVerified && value.usable && (!actor || value.accountId === actor) ? value.accountId : '';
+          return owner ? GM_getValue(`instaToolboxGrowthReadDraftV1:${owner}`, null) : null;
+        },
+        writeReadDraft: (value, owner, seed) => {
+          const actor = inspectGrowthReadAccount({ actor: owner, seed });
+          if (!actor.accountVerified || !actor.usable || !actor.accountId || actor.accountId !== owner
+            || (value !== null && value?.actor !== actor.accountId)) throw new Error('The signed-in account changed. Start a new search.');
+          GM_setValue(`instaToolboxGrowthReadDraftV1:${actor.accountId}`, value);
+        },
+        readCurrentProfile: () => {
+          const match = String(location.pathname).match(/^\/([A-Za-z0-9._]{1,30})\/?$/);
+          return match ? engine.normalizeUsername(match[1]) : '';
+        },
         scanSeed: (username, signal, onProgress) => engine.fetchFollowerComparison({
           username, signal, onProgress, maxAccounts: 2_000,
           maxDurationMs: 4 * 60_000, retryRateLimits: false,
+        }),
+        readSeedNative: (username, signal, onProgress, onNativeReadContext) => engine.fetchFollowerComparison({
+          username, signal, onProgress, maxAccounts: 2_000,
+          maxDurationMs: 4 * 60_000, retryRateLimits: false, allowNativeListFallback: true,
+          onNativeReadContext,
         }),
         readCampaigns: () => readGrowthCampaigns(inspectPresenceAccount().accountId),
         writeCampaigns: (campaigns) => writeGrowthCampaigns(inspectPresenceAccount().accountId, campaigns),
@@ -15086,7 +17474,7 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
         runBatch: startAccountRun,
         canRunBatch: () => managerTabStorageAvailable,
         busy: () => Boolean(presencePanel?.busy() || inboxPanel?.busy()
-          || relationshipController || dmCleanupController || state.run?.status === 'running'),
+          || relationshipController || manualScanController || dmCleanupController || state.run?.status === 'running'),
         onStatus: status,
         });
       } catch {
@@ -15123,6 +17511,19 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
       cancelConfirmation: () => confirmationController?.cancel(),
       load: () => inspectInboxAccount().accountVerified ? inboxCheckpoints.load() : null,
       save: checkpoint => inboxCheckpoints.save(checkpoint),
+      discoveryCheckpointStorage: managerTabStorageAvailable ? {
+        read: () => managerTab?.[TAB_INBOX_DISCOVERY_FIELD] || null,
+        write: async value => {
+          managerTab = { ...managerTab };
+          if (value === null) delete managerTab[TAB_INBOX_DISCOVERY_FIELD];
+          else managerTab[TAB_INBOX_DISCOVERY_FIELD] = value;
+          await GM_saveTab(managerTab);
+          const saved = await readManagerTab();
+          if (!saved || JSON.stringify(saved[TAB_INBOX_DISCOVERY_FIELD] ?? null) !== JSON.stringify(value)) {
+            throw new Error('inbox-discovery-save-failed');
+          }
+        },
+      } : null,
       workerTransport: typeof GM_openInTab === 'function'
         && typeof GM_addValueChangeListener === 'function'
         && typeof GM_removeValueChangeListener === 'function' ? {
@@ -15146,18 +17547,13 @@ globalThis.InstaToolboxInsights = Object.freeze({ mount: localModules['extension
       },
       openWorkersInBackground: cleanupSettings.effective(cleanupPreferences, 'userscript').execution === 'background',
       busy: () => Boolean(dmCleanupController || dmRunner?.snapshot().canStop
-        || relationshipController || state.run?.status === 'running' || presencePanel?.busy()),
+        || relationshipController || manualScanController || state.run?.status === 'running' || presencePanel?.busy()),
       onStatus: status,
     });
   }
   renderAll();
 
-  // Presence replaces the old persisted manual account runner. Never resume a
-  // hidden legacy queue after an update or navigation.
-  if (resumableAccountRun()) {
-    setRun({ status: 'stopped', stopReason: 'legacy account run retired', current: '', queue: [] });
-    status('An older manual account run was stopped. Presence does not resume past approvals.');
-  }
+  await resumeApprovedAccountRun();
 })();
 
 })();

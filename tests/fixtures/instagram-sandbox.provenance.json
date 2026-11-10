@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "observedDate": "2026-11-09",
+  "observationContext": "Read-only structural inspection in an existing signed-in Chrome tab; account and content values omitted.",
+  "currentObservedContracts": {
+    "feed": {
+      "postContainer": "ARTICLE",
+      "nativePostControls": "DIV role=button, commonly named by a nested SVG aria-label, under SPAN/DIV and a SECTION with display:grid",
+      "controlNames": ["Like", "Comment", "Repost", "Share", "Save", "More options"],
+      "storyTray": "DIV role=button with an account-specific Story by ... not seen aria-label and nested image/profile link"
+    },
+    "profile": {
+      "counterLinks": "A role=link; both follower and following counters can link to the current profile path; visible text distinguishes the list",
+      "postGrid": "A containing IMG; profile-prefixed /<synthetic-profile>/p/<synthetic-post>/ paths"
+    },
+    "relationshipDialog": {
+      "root": "DIV role=dialog aria-label=Followers or Following; heading text may be a SPAN",
+      "scrollOwner": "Nested DIV with overflow-y:scroll and no role",
+      "accountRows": "Duplicate profile anchors for avatar and username; mixed DIV role=button Remove and BUTTON Follow controls"
+    },
+    "inbox": {
+      "rail": "DIV role=navigation aria-label=Thread list",
+      "threadRows": "DIV role=button tabindex=0 with one image and multiple spans, without an aria-label or direct-thread anchor",
+      "scrollOwner": "Nested DIV with overflow-y:auto"
+    },
+    "theme": {
+      "customPropertyFormat": "Comma-separated RGB values",
+      "primaryBackground": "12,16,20",
+      "primaryText": "245,245,245",
+      "secondaryText": "168,168,168"
+    }
+  },
+  "clientCodeInspection": "Public served client resources were inspected read-only. Inbox module names included IGDInboxClickedThreadContextProvider, IGDThreadlineContext, IGDThreadListMultiSelectManager and PolarisHSnapScrollView. No client code is included in this fixture.",
+  "retainedOrSyntheticContracts": [
+    "Native direct-message body and menu structures; no real conversation was opened for current inspection",
+    "Full story viewer and its reaction controls; no real story was viewed",
+    "Worker redirect, cross-tab persistence and completion behaviors from retained regression fixtures",
+    "Account inventories, message ownership/content, mutation results, delays and server behavior"
+  ],
+  "liveNativeActionsPerformed": false,
+  "privateContentStored": false,
+  "instagramSourceReused": false,
+  "backendParityClaimed": false
+}

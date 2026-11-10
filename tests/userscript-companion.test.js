@@ -43,6 +43,19 @@ test('the userscript carries the metadata Tampermonkey needs to install and auto
   assert.match(metadataBlock, /@sandbox\s+DOM/);
   assert.match(metadataBlock, /@grant\s+GM_getTab/);
   assert.match(metadataBlock, /@grant\s+GM_saveTab/);
+  assert.deepEqual([...metadataBlock.matchAll(/^\/\/ @grant\s+(\S+)\s*$/gm)].map(match => match[1]).sort(), [
+    'GM.getValue', 'GM.setValue', 'GM.listValues', 'GM.deleteValue',
+    'GM_getTab', 'GM_getValue', 'GM_addValueChangeListener', 'GM_openInTab',
+    'GM_removeValueChangeListener', 'GM_saveTab', 'GM_setValue',
+  ].sort(), 'history adds only its four private manager-storage grants');
+});
+
+test('the userscript bundles the private history backend after its normalizer and before the panel', () => {
+  const normalizer = source.indexOf('localModules["extension/presence-activity-log.js"] =');
+  const journal = source.indexOf('localModules["extension/presence-history-journal.js"] =');
+  const panel = source.indexOf('localModules["extension/presence-session-panel.js"] =');
+  assert.ok(normalizer >= 0 && normalizer < journal && journal < panel);
+  assert.match(source, /InstaToolboxPresenceHistoryJournal = Object\.freeze\(\{ create: localModules\['extension\/presence-history-journal\.js'\]\.createPresenceHistoryJournal \}\)/);
 });
 
 test('the bundle ships the extension engine itself rather than a second copy of it', () => {
@@ -94,7 +107,7 @@ test('each mutation uses one exact transient capability without a global unlock'
   assert.match(shell, /DM_PLAN_CAPABILITY_MS = 15 \* 60 \* 1_000/);
   assert.doesNotMatch(shell, /ENABLE LIVE ACTIONS|LIVE_AUTHORIZATION_PHRASE|setLiveActionsUnlocked|InstaToolboxUserscriptLiveAuthority/);
   assert.match(shell, /function accountCapabilityDigest\(action, usernames\)/);
-  assert.match(shell, /capabilityExpiresAt: Date\.now\(\) \+ RUN_CAPABILITY_MS/);
+  assert.match(shell, /capabilityExpiresAt: Math\.min\(Date\.now\(\) \+ RUN_CAPABILITY_MS,/);
   assert.match(shell, /approvedTargets: \[\.\.\.queue\]/);
   assert.match(shell, /const confirmation = await confirmRun\(\{/);
   assert.match(source, /data-role="action-confirmation"/);
@@ -136,7 +149,7 @@ test('a run stops itself on any Instagram interruption and can be aborted', () =
   assert.match(shell, /observation\?\.challenge/);
   assert.match(shell, /observation\?\.actionBlocked/);
   assert.match(shell, /observation\?\.sessionExpired/);
-  assert.match(shell, /if \(outcome\.fatal\)/);
+  assert.match(shell, /if \(outcome\.fatal && !batchAbort && current\.status === 'running'\)/);
   assert.match(source, /while \(!signal\.aborted && processed < maxMessages/);
   assert.match(source, /activeController\.abort\('Stopped by user'\)/);
   assert.match(source, /data-action="stop-run"/);

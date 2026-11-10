@@ -2,6 +2,146 @@
 
 This project uses [Semantic Versioning](https://semver.org/).
 
+## 4.3.10 - 2026-11-10 (development)
+
+- Preserve bounded conversation observations in private tab storage before
+  opening the next chat. Instagram page reloads can no longer silently erase
+  all earlier discoveries. Restoring is explicit, partial and time limited.
+- Discard selections and approvals on reload. Recovered names are historical;
+  cleanup requires a new exact review and managed tabs that reverify the
+  current account, thread and message ownership. No cleanup resumes itself.
+- Cancel pending restoration when Stop is pressed, including after a previous
+  cleanup. Add replacement-document, expiry, account-change and Stop coverage.
+- Retain the verified 4.3.9 list, Presence, export and one-message results under
+  their original version. Installed recovery and Ghost execution acceptance
+  remain required. Official publication remains held.
+
+## 4.3.9 - 2026-11-10 (development)
+
+- Avoid repeatedly searching native-list profile avatars for account navigation.
+  Reject dialog rows before geometry and ancestor scans while retaining actual
+  navigation and scoped backdrop validation.
+- Add large-list regressions for visible and hidden navigation and qualified
+  native-list account proof. Both new cases and 222 neighboring checks pass;
+  installed retesting must resolve the observed list stalls.
+- Preserve the version-labelled 4.3.8 timed Presence and history results. Its
+  377 verified activities and passing local/CI checks do not establish complete
+  native-list acceptance. Official release remains held.
+
+## 4.3.8 - 2026-11-10 (development)
+
+- Replace cached history snapshots with independent private changes and
+  acknowledged writes. Preserve same-account events across tabs and retain
+  actor/run isolation. Async history controls wait for initial readiness,
+  retry on reopening, report write state quietly and confirm Clear only after
+  acknowledgement. The history component passed 85 checks and review.
+- Keep discovered views explicitly partial across tabs. Clear fences older or
+  concurrent waiting history when discovered; retain the private legacy backup
+  and quarantine later import after Clear. Keep 500 visible/export entries and
+  bounded cleanup without global freshness or physical-erasure promises.
+- Add four private manager-storage grants and no network, cookie or domain
+  permission. Preserve legacy grants, identity and held release safeguards.
+- Permit one native empty-skeleton to typed-dialog handoff inside the same
+  newly opened portal. Retain fresh account controls, exact counts, Stop and
+  deadlines; accept rows only after full scoped validation. Native review and
+  209 focused checks passed. Keep routine history updates quiet.
+- Generate the development candidate and pass all required local source,
+  package, native, sandbox, background and rendered gates. All eight candidate
+  CI checks and installed activation passed. The timed Presence run completed
+  377 activities and retained all prior history; native list stalls keep full
+  acceptance and official release held.
+
+## 4.3.7 - 2026-11-10 (development)
+
+- Repair Presence history loading when startup account verification arrives
+  after the panel mounts. Bind each logger and reviewed run to its verified
+  history scope, including queued writes and late outcomes.
+- Wait through the exact native list's loading and fade using fresh read-only
+  context proof. Preserve strict account controls and dialog identity, ignore
+  non-rendered SVG titles, and accept rows or saved results only after full
+  visible scoped validation and stored-draft continuity checks.
+- Keep opening and row readiness within the existing shared deadline, with
+  Stop and drift guards intact. Preserve storage keys, history schema, grants
+  and action authority. Both functional reviews and focused checks passed;
+  generation, the local matrix and all eight candidate CI checks passed.
+  Installed activation and cold history retention passed; known multi-tab and
+  native-handoff failures keep full acceptance on hold. No official release
+  is recorded.
+
+## 4.3.6 - 2026-11-10 (development)
+
+- Ignore nested music/audio routes when identifying a post for Live like me.
+  Match only full canonical post and reel paths so a music link cannot create
+  a second content identity and cause a valid post to be skipped.
+- Keep audio-only articles, conflicting canonical post IDs and duplicate Like
+  controls ineligible. Account, review and verified-outcome guards remain
+  unchanged.
+- Restore a saved read-only Growth seed draft when account verification becomes
+  available after page startup. Retry once through the existing context
+  observer only while the original route, account and fresh Following basis
+  still match. Edits, new work, busy state or evidence drift cancel the retry;
+  restoration never reads seeds or restores action approval.
+
+## 4.3.5 - 2026-11-09 (development)
+
+- Start native list collection when verified rows and their actual scroll
+  container are available, even while a trailing pagination loader is mounted.
+- Check loader visibility against CSS, the dialog, clipping containers and the
+  viewport. A clipped loader cannot stall startup; a visible loader still
+  prevents an unproven end from being called complete.
+- Retain native loading timeouts as partial Growth draft evidence without
+  creating candidates or action authority. Keep exact empty-list safeguards,
+  fresh ending totals, Stop and manual scan defaults unchanged.
+
+## 4.3.4 - 2026-11-09 (development)
+
+- Wait for native profile lists to finish their initial loading before scanning
+  rows. A mounted dialog alone does not establish readiness or an empty list.
+- Keep Stop responsive during the bounded readiness wait. If initial loading
+  times out, preserve observed rows separately, keep the saved comparison and
+  leave the current list open with retry guidance instead of advancing.
+- Ignore hidden loading indicators and keep exact owner, dialog and fresh
+  ending-count checks. Manual list scans retain their existing default timing.
+
+## 4.3.3 - 2026-11-09 (development)
+
+- Read the exact open profile's native Followers and Following lists when both
+  existing account lookup routes are unavailable. Keep fresh owner, count,
+  account and dialog checks throughout the read.
+- Preserve the saved comparison on interruption and offer a separate download
+  for the partial native read.
+- Collect selected Growth seed lists through explicit profile visits when
+  account lookups are unavailable. Retain an expiring read-only draft across
+  navigation, including each seed's source and completeness. Follow and later
+  Unfollow actions still need their own fresh review.
+- Verify account navigation behind the exact native list backdrop without
+  restoring cached identity or broadening ordinary account detection.
+
+## 4.3.2 - 2026-11-09 (development)
+
+- Identify the signed-in account from verified navigation instead of unrelated
+  feed and story avatars.
+- Resolve an exact account through the existing profile lookup when Instagram's
+  search route returns 404 or 410. Keep identity, restriction and rate-limit
+  checks in place without adding another endpoint.
+- Show incremental manual-list progress and a dedicated Stop control. Retain
+  captured rows on cancellation, and require a fresh, owner-bound final count
+  before labelling a list complete.
+- Preserve Live like me activity, duration and break choices. Keep verified
+  progress visible while Pause or Stop settles an in-flight result.
+- Bind reviewed growth actions to the current account, exact targets and original
+  expiry; retain uncertain outcomes for reconciliation before another action.
+- Recognize current profile counters and profile-prefixed post links. Read
+  visible carousel markers inside each post link while keeping unproven media
+  and dates unknown. Keep sampled insights and partial comparisons distinct.
+- Improve narrow layouts, empty-state guidance and text/control contrast.
+- Show every selected thread in the Ghost Mode confirmation before cleanup.
+- Patch build dependencies and update macOS CI to a supported Intel runner.
+  Retain reviewed screenshot provenance and exact pixel checks across versions.
+- Publish future updates through Tampermonkey only; keep all other public
+  downloads pinned to 4.3.1 and preserve their package checks. Gate Pages
+  deployment so later web artifacts do not replace the held PWA.
+
 ## 4.3.1 - 2026-10-05
 
 - Make Tampermonkey the active update channel. Mark extension, desktop and

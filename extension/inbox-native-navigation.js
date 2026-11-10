@@ -21,7 +21,7 @@ export function createNativeInboxDiscovery({
   sections = ['primary'], expiresAt, now = Date.now, signal,
   maxThreads = 1_000, maxSamples = 1_000, maxVisits = 20_000,
   routeTimeoutMs = 8_000, settleMs = 400, paginationTimeoutMs = routeTimeoutMs,
-  proveTerminal = null, resolveSection = null, onProgress = null,
+  proveTerminal = null, resolveSection = null, onProgress = null, onCheckpoint = null,
   targetThreadId = null,
 } = {}) {
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(accountId || '') || typeof resolveAccount !== 'function') throw new Error('account-identity-required');
@@ -33,6 +33,7 @@ export function createNativeInboxDiscovery({
   if (proveTerminal !== null && typeof proveTerminal !== 'function') throw new Error('terminal-adapter-invalid');
   if (resolveSection !== null && typeof resolveSection !== 'function') throw new Error('section-adapter-invalid');
   if (onProgress !== null && typeof onProgress !== 'function') throw new Error('progress-adapter-invalid');
+  if (onCheckpoint !== null && typeof onCheckpoint !== 'function') throw new Error('checkpoint-adapter-invalid');
   if (targetThreadId !== null && !/^[A-Za-z0-9_-]{1,128}$/.test(targetThreadId)) throw new Error('thread-identity-invalid');
   const sectionState = [...new Set(sections)].map((section) => ({ section, samples: 0, complete: false, reason: 'not-scanned' }));
   const inventory = new Map();
@@ -353,7 +354,16 @@ export function createNativeInboxDiscovery({
           displayLabels.delete(threadId);
           if (threadId === targetThreadId || error.message !== 'navigation-timeout') throw error;
         }
-        windowIds.push(threadId); publish();
+        windowIds.push(threadId);
+        if (onCheckpoint) {
+          // Read-only observations must survive a document replacement before
+          // another native click. Navigation evidence and approval stay local.
+          const labels = [...displayLabels].map(([id, label]) => ({ threadId: id, ...label }));
+          try { await onCheckpoint(snapshot(), labels); }
+          catch { throw new Error('inbox-discovery-save-failed'); }
+          guard();
+        }
+        publish();
         // A worker only needs to find its assigned conversation. Do not make
         // every worker rescan the entire inbox before it can begin.
         if (threadId === targetThreadId) return;

@@ -10,6 +10,7 @@ const viewerSource = await readFile(new URL('../extension/instagram-viewer.js', 
 const viewerContext = vm.createContext({ URL });
 vm.runInContext(viewerSource, viewerContext);
 const accountKey = viewerContext.InstaToolboxInstagramViewer.accountKey;
+const reviewedThreadIds = confirmation => confirmation.items.map(value => /^Thread ([0-9]+)/.exec(value)?.[1]);
 const deferred = () => {
   let resolve;
   const promise = new Promise(value => { resolve = value; });
@@ -169,7 +170,8 @@ function fixture(options = {}) {
   const container = document.createElement('section');
   const panel = mountUserscriptInboxPanel({ container, document, window, viewer, runner,
     workerTransport: options.workerTransport, defaultWorkerCount: options.defaultWorkerCount,
-    discoveryTiming: { routeTimeoutMs: 100, settleMs: 1 },
+    discoveryCheckpointStorage: options.discoveryCheckpointStorage, messageOptions: options.messageOptions,
+    discoveryTiming: { routeTimeoutMs: 100, settleMs: 1, now: options.now },
     confirmAction: async value => { confirmations.push(value); return options.confirm ? options.confirm(value) : null; },
     cancelConfirmation: () => options.onCancelConfirmation?.(),
     load: options.load,
@@ -230,7 +232,8 @@ test('confirmation names the exact selection and discloses messages sent during 
   assert.match(confirmation.detail, /Messages you send while cleanup is running may also be removed/);
   assert.match(confirmation.detail, /Keep this Instagram tab loaded/);
   assert.equal(confirmation.facts.find(item => item.label === 'Account').value, '@fixture.owner');
-  assert.equal(confirmation.facts.find(item => item.label === 'Conversations').value, '202');
+  assert.equal(confirmation.facts.find(item => item.label === 'Conversations').value, '1');
+  assert.deepEqual(reviewedThreadIds(confirmation), ['202']);
   assert.match(confirmation.facts.find(item => item.label === 'Messages').value, /one conversation at a time/);
   assert.equal(confirmation.binding.action, 'inbox-unsend');
   assert.equal(typeof confirmation.binding.reviewKey, 'string');
@@ -376,7 +379,8 @@ test('Start Ghost Mode discovers all sections and confirms the frozen inventory 
   assert.equal(start.parentElement, f.container, 'primary action is not buried in a disclosure');
   await start.click();
   assert.equal(f.confirmations.length, 1);
-  assert.equal(f.confirmations[0].facts.find(item => item.label === 'Conversations').value, '101, 202');
+  assert.equal(f.confirmations[0].facts.find(item => item.label === 'Conversations').value, '2');
+  assert.deepEqual(reviewedThreadIds(f.confirmations[0]), ['101', '202']);
   assert.deepEqual(f.dispatches, []);
   assert.equal(f.panel.busy(), false);
   assert.equal(f.selection().children.length, 2, 'Cancel preserves the found inventory');
@@ -459,7 +463,8 @@ test('replacing interrupted history requires acknowledgment plus a new exact con
   assert.deepEqual(f.starts, []); assert.deepEqual(f.dispatches, []); assert.deepEqual(f.checkpoints, []);
   accept = true; review = f.button('Review 1 conversation'); await review.click();
   assert.equal(f.confirmations.length, 2);
-  assert.equal(f.confirmations[1].facts.find(item => item.label === 'Conversations').value, '202');
+  assert.equal(f.confirmations[1].facts.find(item => item.label === 'Conversations').value, '1');
+  assert.deepEqual(reviewedThreadIds(f.confirmations[1]), ['202']);
   assert.deepEqual(f.starts.map(plan => plan.threadId), ['202']); assert.deepEqual(f.dispatches, ['202']);
   const final = f.panel.snapshot();
   assert.equal(final.status, 'completed'); assert.deepEqual(final.review.threadIds, ['202']);
@@ -498,7 +503,8 @@ test('resume reviews only unfinished discovered threads and never restores old a
   const resume = f.button('Review 1 remaining to resume');
   assert.equal(resume.hidden, false); assert.equal(resume.disabled, false);
   await resume.click();
-  assert.equal(f.confirmations[0].facts.find(item => item.label === 'Conversations').value, '202');
+  assert.equal(f.confirmations[0].facts.find(item => item.label === 'Conversations').value, '1');
+  assert.deepEqual(reviewedThreadIds(f.confirmations[0]), ['202']);
   assert.deepEqual(f.starts, []); assert.deepEqual(f.panel.snapshot(), saved, 'Cancel preserves prior verified counts');
   accept = true; await resume.click();
   assert.equal(f.confirmations.length, 2);
@@ -570,7 +576,8 @@ test('native chat names and verified handles filter explicit selections without 
   filter.value = '@alex'; await filter.fire('input');
   assert.match(f.visibleText(), /1 selected outside this filter/);
   await f.button('Review 2 conversations').click();
-  assert.equal(f.confirmations[0].facts.find(item => item.label === 'Conversations').value, '101, 202');
+  assert.equal(f.confirmations[0].facts.find(item => item.label === 'Conversations').value, '2');
+  assert.deepEqual(reviewedThreadIds(f.confirmations[0]), ['101', '202']);
   assert.deepEqual(f.starts, []); assert.deepEqual(f.checkpoints, [], 'Cancel stores neither labels nor authority');
   filter.value = '@not.exposed'; await filter.fire('input');
   assert.ok(labels.every(label => label.hidden));
@@ -590,4 +597,161 @@ test('review labels render as text and are not saved in cleanup checkpoints', { 
   assert.equal(JSON.stringify(f.checkpoints).includes('Named chat'), false);
   assert.equal(JSON.stringify(f.checkpoints).includes('fixture.friend'), false);
   assert.deepEqual(f.panel.snapshot().review.threadIds, ['101']);
+});
+
+for (const mode of ['workers', 'single-tab']) {
+  test(`${mode} review names every selected thread, including filtered-out targets, and Cancel dispatches nothing`, { timeout: 15_000 }, async t => {
+    const threadIds = ['101', '202', '303', '404'];
+    const opened = [], workerWrites = [];
+    const workerTransport = mode === 'workers' ? {
+      storage: { get: async () => null, set: async (...args) => { workerWrites.push(args); },
+        listen: () => 1, unlisten: () => {} },
+      openTab: async (...args) => { opened.push(args); throw new Error('Cancel must not open workers'); },
+    } : undefined;
+    const f = fixture({ workerTransport, threadIds, labels: {
+      '101': { title: '<img src=invalid> Exact chat', username: 'fixture.friend' },
+      '202': { title: 'Duplicate title' }, '303': { title: 'Duplicate title', username: 'second.friend' },
+    } });
+    t.after(() => f.dispose()); await f.find();
+    for (let index = 0; index < threadIds.length; index += 1) await f.select(index);
+    const filter = f.container.all().find(node => node.getAttribute('aria-label') === 'Filter conversations');
+    filter.value = '@fixture'; await filter.fire('input');
+    assert.match(f.visibleText(), /3 selected outside this filter/);
+    await f.button('Review 4 conversations').click();
+    assert.equal(f.confirmations.length, 1);
+    const request = f.confirmations[0];
+    assert.equal(request.itemLimit, 1_000);
+    assert.equal(request.facts.find(item => item.label === 'Conversations').value, '4');
+    assert.deepEqual(reviewedThreadIds(request), JSON.parse(request.binding.reviewKey).threadIds);
+    assert.deepEqual(request.items, [
+      'Thread 101 — <img src=invalid> Exact chat · @fixture.friend',
+      'Thread 202 — Duplicate title', 'Thread 303 — Duplicate title · @second.friend', 'Thread 404',
+    ]);
+    assert.deepEqual(f.starts, []); assert.deepEqual(f.dispatches, []);
+    assert.deepEqual(f.checkpoints, []); assert.deepEqual(opened, []); assert.deepEqual(workerWrites, []);
+    assert.equal(f.panel.busy(), false);
+  });
+}
+
+test('the exact review target payload retains all 1000 thread IDs before optional display labels', async () => {
+  const panelSource = await readFile(new URL('../extension/inbox-userscript-panel.js', import.meta.url), 'utf8');
+  const helper = panelSource.match(/function inboxReviewTargets\([\s\S]*?\n\}/)?.[0];
+  assert.ok(helper);
+  const targets = vm.runInNewContext(`${helper}\ninboxReviewTargets`);
+  const ids = Array.from({ length: 1_000 }, (_, index) => String(10n ** 29n + BigInt(index)));
+  const labels = ids.map(threadId => ({ threadId, title: 'A'.repeat(160), username: 'fixture.friend' }));
+  const items = targets(ids, labels);
+  assert.equal(items.length, ids.length);
+  assert.deepEqual(Array.from(items, value => /^Thread ([0-9]+)/.exec(value)[1]), ids);
+  assert.ok(items.every(value => value.length < 1_000));
+  assert.equal(items.at(-1), `Thread ${ids.at(-1)} — ${'A'.repeat(120)} · @fixture.friend`);
+});
+
+
+function readOnlyDiscoveryStore() {
+  let saved = null;
+  const writes = [];
+  return { writes,
+    read: async () => saved && structuredClone(saved),
+    write: async value => { saved = value && structuredClone(value); writes.push(structuredClone(value)); },
+  };
+}
+function unopenedWorkerTransport() {
+  const writes = [], opened = [];
+  return { writes, opened,
+    storage: { get: async () => null, set: async (...args) => { writes.push(args); }, listen: () => 1, unlisten: () => {} },
+    openTab: async (...args) => { opened.push(args); throw new Error('Unapproved recovery must not open workers'); },
+  };
+}
+
+test('replacement document restores only partial observations and requires a fresh exact worker review', { timeout: 10_000 }, async t => {
+  const store = readOnlyDiscoveryStore();
+  const before = fixture({ discoveryCheckpointStorage: store,
+    labels: { '101': { title: 'Earlier observed chat', username: 'fixture.friend' } } });
+  t.after(() => before.dispose()); await before.find(); await before.select(0);
+  before.fire('pagehide'); before.dispose();
+  const transport = unopenedWorkerTransport();
+  const after = fixture({ discoveryCheckpointStorage: store, workerTransport: transport,
+    messageOptions: () => ({ scope: 'newest', limit: 1 }) });
+  t.after(() => after.dispose()); await after.panel.ready;
+  assert.equal(after.button('Restore found conversations').hidden, false);
+  assert.equal(after.selection().children.length, 0, 'nothing is restored or selected automatically');
+  await after.button('Restore found conversations').click();
+  assert.deepEqual(after.navigation, [], 'restoration does not click native inbox rows');
+  assert.equal(after.selection().children.length, 2);
+  assert.match(after.visibleText(), /Partial inventory; names may have changed/);
+  assert.match(after.visibleText(), /Earlier observed chat/);
+  assert.equal(after.selection().all().filter(node => node.tagName === 'INPUT' && node.checked).length, 0);
+  await after.select(0); await after.button('Review 1 conversation').click();
+  const review = after.confirmations[0];
+  assert.deepEqual(reviewedThreadIds(review), ['101']);
+  assert.match(review.detail, /interrupted partial discovery.*Names may have changed/);
+  assert.equal(review.facts.find(item => item.label === 'Messages').value, 'Newest 1 in each conversation');
+  assert.equal(review.binding.action, 'inbox-unsend-workers');
+  assert.deepEqual(transport.writes, []); assert.deepEqual(transport.opened, []);
+  assert.deepEqual(after.starts, []); assert.deepEqual(after.dispatches, []);
+  assert.equal(after.panel.snapshot(), null);
+  const persisted = JSON.stringify(store.writes);
+  assert.equal(/approval|reviewKey|selected|token|pendingMutation/.test(persisted), false);
+});
+
+test('recovered observations cannot enable the single-tab runner without fresh native evidence', { timeout: 10_000 }, async t => {
+  const store = readOnlyDiscoveryStore();
+  const before = fixture({ discoveryCheckpointStorage: store });
+  t.after(() => before.dispose()); await before.find(); before.dispose();
+  const after = fixture({ discoveryCheckpointStorage: store });
+  t.after(() => after.dispose()); await after.panel.ready;
+  await after.button('Restore found conversations').click(); await after.select(0);
+  assert.equal(after.button('Review 1 conversation').disabled, true);
+  assert.match(after.visibleText(), /Managed worker tabs are required for recovered results/);
+  await after.button('Review 1 conversation').fire('click');
+  assert.deepEqual(after.confirmations, []); assert.deepEqual(after.starts, []); assert.deepEqual(after.dispatches, []);
+  assert.match(after.statuses.at(-1), /require managed worker tabs/);
+});
+
+for (const invalidation of ['expiry', 'account change', 'Stop']) {
+  test('recovery '+invalidation+' during confirmation prevents worker startup and authority writes', { timeout: 10_000 }, async t => {
+    const store = readOnlyDiscoveryStore();
+    const before = fixture({ discoveryCheckpointStorage: store });
+    t.after(() => before.dispose()); await before.find(); before.dispose();
+    const gate = deferred(), transport = unopenedWorkerTransport();
+    let observedNow = Date.now();
+    const after = fixture({ discoveryCheckpointStorage: store, workerTransport: transport, now: () => observedNow,
+      confirm: async value => { await gate.promise; return { ...value.binding }; } });
+    t.after(() => after.dispose()); await after.panel.ready;
+    await after.button('Restore found conversations').click(); await after.select(1);
+    const pending = after.button('Review 1 conversation').click();
+    assert.equal(after.confirmations.length, 1);
+    if (invalidation === 'expiry') {
+      observedNow += 21 * 60_000;
+    } else if (invalidation === 'account change') {
+      const original = after.viewer.inspect;
+      after.viewer.inspect = () => ({ ...original(), accountId: 'another.owner', accountKey: accountKey('another.owner') });
+    } else await after.button('Stop all').click();
+    gate.resolve(); await pending;
+    assert.deepEqual(transport.writes, []); assert.deepEqual(transport.opened, []);
+    assert.deepEqual(after.starts, []); assert.deepEqual(after.dispatches, []);
+    assert.equal(after.panel.snapshot(), null); assert.equal(after.panel.busy(), false);
+    assert.match(after.statuses.at(-1), invalidation === 'expiry' ? /expired/ : invalidation === 'account change' ? /account changed/ : /Canceled/);
+  });
+}
+
+
+test('Stop cancels a deferred restore even after an earlier cleanup created a controller', { timeout: 10_000 }, async t => {
+  const store = readOnlyDiscoveryStore();
+  const before = fixture({ discoveryCheckpointStorage: store });
+  t.after(() => before.dispose()); await before.find(); before.dispose();
+  const gate = deferred(); let delayRead = false;
+  const storage = { write: store.write, read: async () => { if (delayRead) await gate.promise; return store.read(); } };
+  const f = fixture({ discoveryCheckpointStorage: storage, confirm: value => ({ ...value.binding }) });
+  t.after(() => f.dispose()); await f.find(); await f.select(0);
+  await f.button('Review 1 conversation').click();
+  assert.equal(f.panel.snapshot().status, 'completed');
+  const priorDispatches = [...f.dispatches]; delayRead = true;
+  const restoring = f.button('Restore found conversations').click();
+  assert.equal(f.panel.busy(), true);
+  await f.button('Stop all').click(); gate.resolve(); await restoring;
+  assert.equal(f.selection().children.length, 0, 'stopped restoration cannot publish a late inventory');
+  assert.deepEqual(f.dispatches, priorDispatches);
+  assert.equal(f.panel.busy(), false);
 });

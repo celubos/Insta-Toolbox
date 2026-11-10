@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Instagram interaction sandbox · synthetic data</title>
+  <style>
+    :root{--ig-primary-background:12,16,20;--ig-elevated-background:12,16,20;--ig-secondary-background:12,16,20;--ig-primary-text:245,245,245;--ig-secondary-text:168,168,168;--ig-separator:54,54,54;--ig-primary-button:0,149,246;color-scheme:dark}
+    *{box-sizing:border-box}body{margin:0;background:#fafafa;color:#181818;font:14px/1.45 system-ui,sans-serif}button,a{font:inherit}button,[role=button]{cursor:pointer}button{min-height:36px;padding:7px 12px;background:#efefef;border:1px solid #ddd;border-radius:7px}a{color:inherit;text-decoration:none}nav{position:fixed;inset:0 auto 0 0;width:160px;padding:24px 16px;border-right:1px solid #ddd;background:white;display:flex;flex-direction:column;gap:22px}nav img{border-radius:50%}nav a{display:flex;align-items:center;gap:8px;min-height:36px}main{margin:28px 24px 80px 190px;max-width:780px}header{padding:20px 0}header h1{font-size:22px}header a{margin-right:22px}article{background:white;border:1px solid #ddd;margin:16px 0;padding:18px;max-width:520px}article .media{display:block;width:100%;height:180px;background:#e0e9e8;object-fit:cover}article footer{margin-top:12px;display:flex;gap:12px;align-items:center}aside[data-sandbox-note]{margin:0 0 18px;color:#555;font-size:12px}[data-sandbox-suggestions]{display:flex;flex-wrap:wrap;gap:10px}[data-sandbox-suggestions]>section{display:flex;align-items:center;gap:10px;padding:12px;border:1px solid #ddd;background:white}[data-sandbox-modal]{position:fixed;left:210px;top:90px;width:350px;background:white;border:1px solid #ccc;border-radius:12px;padding:16px;z-index:3}[data-sandbox-list]{height:264px;overflow-y:auto;position:relative}[data-sandbox-list] a{display:flex;align-items:center;gap:12px;height:44px;padding:6px 8px}[data-sandbox-list] img{width:28px;height:28px;border-radius:50%}[data-sandbox-window]{position:absolute;left:0;right:0}[aria-label="Thread list"]{height:340px;overflow-y:auto;width:280px;border-right:1px solid #ddd}[data-sandbox-thread]{padding:12px;display:flex;align-items:center;gap:12px;min-height:60px}[data-sandbox-thread][aria-pressed=true]{background:#eee}[data-pagelet="IGDMessagesList"]{max-width:600px}[data-pagelet="IGDMessagesList"] [dir=auto]{max-width:410px;border-radius:15px;padding:12px;background:#e9e9ed}[data-sandbox-story] img{height:400px;width:270px;object-fit:cover}[data-sandbox-story]{max-width:350px;background:#222;color:white;padding:20px}[data-sandbox-story] button{margin:5px}[data-sandbox-error]{background:#fee;padding:18px;margin:16px 0}@media(max-width:700px){nav{width:74px;padding:12px 8px}nav span{display:none}main{margin:20px 12px 70px 90px}[data-sandbox-modal]{left:90px;width:calc(100vw - 105px)}[aria-label="Thread list"]{width:200px}}
+  </style>
+  <style>
+    body,nav,article,[data-sandbox-suggestions]>section,[data-sandbox-modal]{background:rgb(var(--ig-primary-background));color:rgb(var(--ig-primary-text))}nav,article,[data-sandbox-suggestions]>section,[data-sandbox-modal]{border-color:#363a3e}button{background:#25292d;color:inherit;border-color:#363a3e}aside[data-sandbox-note]{color:rgb(var(--ig-secondary-text))}[data-native-control]{display:inline-flex;align-items:center;justify-content:center;min-width:44px;min-height:44px;padding:8px;border-radius:5px}[data-native-control]:focus-visible{outline:2px solid #79afff;outline-offset:2px}[data-native-control]svg{display:block;width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:1.5}[data-sandbox-post-actions]{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin-top:12px}[data-sandbox-post-actions]>span{display:inline-flex}[data-sandbox-story-tray]{display:flex;align-items:center;gap:10px;width:max-content}[data-sandbox-story-tray]img{border-radius:50%}[data-sandbox-profile-grid]{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px}[data-sandbox-profile-grid]img{display:block;width:100%;height:200px;object-fit:cover}
+  </style>
+</head>
+<body>
+  <nav aria-label="Instagram navigation"></nav>
+  <main></main>
+  <script src="/sandbox/instagram-sandbox.js"></script>
+  <script src="/userscripts/insta-toolbox.user.js"></script>
+</body>
+</html>

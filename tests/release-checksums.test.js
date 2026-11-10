@@ -23,13 +23,13 @@ import { webRuntimeFiles } from '../scripts/web-package-files.mjs';
 const packageMetadata = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
 const version = packageMetadata.version;
 
-test('package and download docs expose the current release artifacts', async () => {
+test('package and download docs preserve the held 4.3.1 release artifacts', async () => {
   assert.equal(packageMetadata.scripts['release:checksums'], 'node scripts/generate-release-checksums.mjs');
   const documents = await Promise.all([
     readFile(new URL('../README.md', import.meta.url), 'utf8'),
     readFile(new URL('../docs/INSTALLATION.md', import.meta.url), 'utf8'),
   ]);
-  const escapedVersion = version.replaceAll('.', '\\.');
+  const escapedVersion = '4.3.1'.replaceAll('.', '\\.');
   for (const document of documents) {
     assert.match(document, new RegExp(`Insta-Toolbox-Setup-${escapedVersion}\\.exe`));
     assert.match(document, new RegExp(`Insta-Toolbox-${escapedVersion}-universal\\.dmg`));

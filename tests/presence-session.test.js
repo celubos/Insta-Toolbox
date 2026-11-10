@@ -320,3 +320,73 @@ test('restriction or account loss before dispatch stops the session', async () =
   await assert.rejects(original.start(review), /context-changed/);
   assert.equal(inspections, 0);
 });
+
+test('an exhausted session explains why it stopped before its reviewed action limit', async () => {
+  const f = fixture();
+  const review = f.session.createReview({ accountId: 'viewer',
+    options: { maxActions: 10, actions: { likePosts: true } } });
+  const result = await f.session.start(review);
+  assert.equal(result.status, 'completed');
+  assert.equal(result.reason, 'presence-no-activities');
+  assert.equal(result.completed, 0);
+  assert.equal(result.expiresAt, review.expiresAt);
+});
+
+test('a Live like me retry exposes its next check without claiming discovery is active', async () => {
+  let session;
+  const snapshots = [];
+  session = createPresenceSession({
+    nativeActions: {
+      inspectContext: () => ({ accountVerified: true, usable: true, accountId: 'viewer', accountKey: 'viewer' }),
+      find: async () => null,
+      execute: async () => assert.fail('No target may execute'),
+    },
+    locks: lockManager(), now: () => NOW,
+    wait: async () => { session.stop(); },
+    onUpdate: value => snapshots.push(value),
+  });
+  const review = session.createReview({ accountId: 'viewer',
+    options: { mode: 'live', actions: { likePosts: true } } });
+  await session.start(review);
+  const retry = snapshots.find(value => value.waitingReason === 'no-activities');
+  assert.equal(retry?.status, 'waiting');
+  assert.equal(retry.nextActionAt, NOW + 2_000);
+  assert.equal(retry.expiresAt, review.expiresAt);
+});
+
+test('Resume after the reviewed deadline expires instead of searching with stale authority', async () => {
+  let waiting = false;
+  let release;
+  const f = fixture({ candidates: { likePosts: [candidate('likePosts', 'post:1'), candidate('likePosts', 'post:2')] },
+    wait: () => new Promise(resolve => { waiting = true; release = resolve; }),
+  });
+  const review = f.session.createReview({ accountId: 'viewer',
+    options: { maxActions: 2, actions: { likePosts: true } }, expiresAt: NOW + 60_000 });
+  const running = f.session.start(review);
+  while (!waiting) await new Promise(resolve => setTimeout(resolve, 0));
+  f.session.pause();
+  release();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  f.setClock(review.expiresAt);
+  assert.equal(f.session.resume(), false);
+  const result = await running;
+  assert.equal(result.status, 'expired');
+  assert.equal(f.calls.filter(([kind]) => kind === 'execute').length, 1);
+  assert.equal(f.locks.held.size, 0);
+});
+
+test('a paused session releases its account lane when its review expires without a Resume click', { timeout: 2_000 }, async () => {
+  let session;
+  let clock = Date.now();
+  const locks = lockManager();
+  session = createPresenceSession({ nativeActions: {
+    inspectContext: () => ({ accountVerified: true, usable: true, accountId: 'viewer', accountKey: 'viewer' }),
+    find: async () => { session.pause(); return null; },
+    execute: async () => assert.fail('Paused session may not dispatch'),
+  }, locks, now: () => clock });
+  const review = session.createReview({ accountId: 'viewer', options: { actions: { likePosts: true } },
+    expiresAt: clock + 40 });
+  const result = await session.start(review);
+  assert.equal(result.status, 'expired');
+  assert.equal(locks.held.size, 0);
+});
