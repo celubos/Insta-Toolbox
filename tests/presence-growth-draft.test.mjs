@@ -151,6 +151,65 @@ test('an interrupted retry cannot erase an already finished seed observation', (
   assert.equal(retained.revision, draft.revision);
 });
 
+test('native loading timeouts retain verified partial rows across reload without candidate or action authority', () => {
+  const timeout = native('seed_a', NOW + 10, {
+    followers: [row('observed_a'), row('observed_b'), row('observed_c')], following: [],
+    verified: { followers: true, following: false }, complete: { followers: false, following: false },
+    expectedCounts: { followers: 10, following: 6 },
+    reasons: { followers: 'native-list-loading-timeout', following: 'native-list-loading-timeout' },
+  });
+  let draft = record(create(), 'seed_a', timeout, { partial: true });
+  draft = stopGrowthReadDraft(draft, { now: NOW + 11 });
+  const loaded = validate(copy(draft));
+  assert.ok(loaded);
+  assert.equal(loaded.status, 'stopped');
+  assert.equal(loaded.results.seed_a.partial, true);
+  for (const type of ['followers', 'following']) {
+    const list = loaded.results.seed_a.lists[type];
+    assert.equal(list.reason, 'native-list-loading-timeout');
+    assert.equal(list.owner, 'seed_a');
+    assert.equal(list.source, 'list-dialog');
+    assert.equal(list.complete, false);
+    assert.equal(list.capturedAt, iso(NOW + 10));
+  }
+  assert.deepEqual(loaded.results.seed_a.lists.followers.accounts.map(account => account.username),
+    ['observed_a', 'observed_b', 'observed_c']);
+  assert.equal(loaded.results.seed_a.lists.followers.verified, true);
+  assert.equal(loaded.results.seed_a.lists.following.verified, false);
+  assert.deepEqual(loaded.results.seed_a.lists.following.accounts, []);
+  assert.equal(growthDraftSeedDone(loaded, 'seed_a'), false);
+  assert.deepEqual(growthDraftSeedSources(loaded), []);
+  assert.doesNotMatch(JSON.stringify(loaded), /instagramId|approvedTargets|capabilityId|approval|growthCampaignId|actionToken/);
+  const promoted = copy(loaded); promoted.results.seed_a.partial = false;
+  assert.equal(validate(promoted), null, 'timeout evidence cannot be relabeled as a finished seed read');
+  assert.equal(validate(copy(loaded), { actor: 'other' }), null);
+  assert.equal(validate(copy(loaded), { now: loaded.expiresAt }), null);
+  const malformed = copy(loaded); malformed.results.seed_a.lists.followers.accounts[0].instagramId = '123';
+  assert.equal(validate(malformed), null);
+  assert.throws(() => record(create(), 'seed_a', timeout), /growth-seed-read-invalid/);
+  const apiTimeout = { ...timeout, source: 'authenticated-instagram-web', userId: '77', subjectInstagramId: '77',
+    followers: timeout.followers.map(account => ({ ...account, source: 'authenticated-instagram-web' })),
+    pages: { followers: 1, following: 0 } };
+  assert.throws(() => record(create(), 'seed_a', apiTimeout, { partial: true }), /growth-seed-read-invalid/);
+});
+
+test('normalized native workspace rows remain valid in a fresh partial Following snapshot', () => {
+  const partial = { ...snapshot(['seed_a', 'seed_b']), complete: false, capturedAt: iso(NOW), accounts: [
+    row('seed_a', 'extension-scrolled-dom', { displayName: 'Synthetic display name' }),
+    row('seed_b', 'tampermonkey-visible-dom', { instagramIdAmbiguous: true }),
+  ] };
+  const normalized = growthFollowingSnapshot(partial, { actor: 'owner', now: NOW });
+  assert.ok(normalized, 'partial completeness is allowed for observed Following membership');
+  assert.equal(normalized.complete, false);
+  const draft = create(['seed_a'], { followingSnapshot: partial });
+  assert.ok(validate(copy(draft), { followingSnapshot: partial }));
+  assert.equal(growthFollowingSnapshot({ ...partial, verified: false }, { actor: 'owner', now: NOW }), null);
+  assert.equal(growthFollowingSnapshot({ ...partial, subjectUsername: 'other' }, { actor: 'owner', now: NOW }), null);
+  assert.equal(growthFollowingSnapshot({ ...partial, capturedAt: iso(NOW - 30 * 60_000) }, { actor: 'owner', now: NOW }), null);
+  const extraField = copy(partial); extraField.accounts[0].untrustedMetadata = true;
+  assert.equal(growthFollowingSnapshot(extraField, { actor: 'owner', now: NOW }), null);
+});
+
 test('seed records reject wrong owner, timestamps, provenance, IDs and malformed diagnostics', () => {
   const draft = create();
   for (const mutate of [

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta Toolbox
 // @namespace    https://github.com/slaveofsolace/Insta-Toolbox
-// @version      4.3.4
+// @version      4.3.5
 // @description  Mutual Checker, Presence, and DM Unsend on Instagram.
 // @author       @slaveofsolace
 // @homepageURL  https://github.com/slaveofsolace/Insta-Toolbox
@@ -5749,7 +5749,7 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
     };
     const settle = (ms) => sleep(ms, signal);
     const readinessMs = Math.max(0, Math.min(RELATIONSHIP_REQUEST_TIMEOUT_MS, Math.trunc(Number(initialReadinessMs) || 0)));
-    const initialLoading = () => {
+    const visibleLoading = () => {
       const indicators = [...root.querySelectorAll('[role="progressbar"], svg[aria-label*="Loading" i], [aria-busy="true"]')];
       if (root.getAttribute('aria-busy') === 'true') indicators.push(root);
       return indicators.some(node => {
@@ -5759,6 +5759,32 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
           if (current.hidden || current.getAttribute?.('aria-hidden') === 'true' || style.display === 'none'
             || ['hidden', 'collapse'].includes(style.visibility)
             || (style.opacity !== undefined && style.opacity !== '' && Number(style.opacity) === 0)) return false;
+        }
+        const rect = element => {
+          const box = element?.getBoundingClientRect?.();
+          return box && ['top', 'bottom', 'left', 'right'].every(key => Number.isFinite(box[key])) ? box : null;
+        };
+        const box = rect(node);
+        if (box) {
+          let top = box.top, bottom = box.bottom, left = box.left, right = box.right;
+          const clip = (bounds, vertical = true, horizontal = true) => {
+            if (!bounds) return;
+            if (vertical) { top = Math.max(top, bounds.top); bottom = Math.min(bottom, bounds.bottom); }
+            if (horizontal) { left = Math.max(left, bounds.left); right = Math.min(right, bounds.right); }
+          };
+          clip(rect(root));
+          for (let parent = node.parentElement; parent && parent !== root; parent = parent.parentElement) {
+            const style = getComputedStyle(parent);
+            clip(rect(parent), /^(auto|scroll|hidden|clip)$/.test(style.overflowY || style.overflow || ''),
+              /^(auto|scroll|hidden|clip)$/.test(style.overflowX || style.overflow || ''));
+          }
+          if (Number.isFinite(globalThis.innerHeight) && globalThis.innerHeight > 0) {
+            top = Math.max(0, top); bottom = Math.min(globalThis.innerHeight, bottom);
+          }
+          if (Number.isFinite(globalThis.innerWidth) && globalThis.innerWidth > 0) {
+            left = Math.max(0, left); right = Math.min(globalThis.innerWidth, right);
+          }
+          if (bottom <= top || right <= left) return false;
         }
         return true;
       });
@@ -5772,14 +5798,17 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
         if (context.dialog !== root) { stopReason = 'list-changed'; return false; }
         scroller = scrollableWithin(root);
         if (!harvest() || !currentContext()) return false;
-        const loading = initialLoading();
+        // Real rows and a scroll owner can be read while a trailing lazy-load
+        // sentinel is mounted. This starts collection; it does not prove an end.
+        if (accounts.size > 0 && scroller) return true;
+        const loading = visibleLoading();
         const empty = !loading && expectedCountAtStart === 0 && accounts.size === 0;
         if (!empty) emptySince = null;
         else emptySince ??= Date.now();
         // A mounted dialog can precede both rows and its scrolling owner.
         // Exact small lists need no scroller; an exact zero must survive a
         // rendering turn without a visible loader. Neither changes end proof.
-        if (!loading && (accounts.size > 0 && (scroller || accounts.size === expectedCountAtStart)
+        if (!loading && (accounts.size > 0 && accounts.size === expectedCountAtStart
           || emptySince !== null && Date.now() - emptySince >= 100)) return true;
         if (Date.now() >= deadline) { stopReason = 'list-loading-timeout'; return false; }
         await settle(Math.min(100, deadline - Date.now()));
@@ -5844,7 +5873,8 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
           const context = currentContext();
           if (!context) return;
           if (context.dialog !== root || scrollableWithin(root) !== scroller) break;
-          loading = Boolean(root.querySelector('[role="progressbar"], svg[aria-label*="Loading" i]'));
+          loading = readinessMs ? visibleLoading()
+            : Boolean(root.querySelector('[role="progressbar"], svg[aria-label*="Loading" i]'));
           if (!loading) break;
           await settle(250);
         }
@@ -11557,7 +11587,7 @@ const TYPES = ['followers', 'following'];
 const NATIVE_ROW_SOURCES = ['extension-scrolled-dom', 'extension-visible-dom', 'tampermonkey-visible-dom'];
 const REASONS = new Set(['pagination-complete', 'instagram-limited-list', 'cursor-missing', 'count-mismatch',
   'count-unverified', 'count-changed', 'profile-count-disagreement', 'account-limit', 'page-limit',
-  'native-list-complete', 'native-list-truncated', 'stopped', 'native-context-changed']);
+  'native-list-complete', 'native-list-truncated', 'stopped', 'native-context-changed', 'native-list-loading-timeout']);
 const freeze = value => {
   if (value && typeof value === 'object') { Object.values(value).forEach(freeze); Object.freeze(value); }
   return value;
@@ -11645,6 +11675,7 @@ function normalizedRead(value, seed, createdAt, now) {
       || timestamp(list.capturedAt) === null || timestamp(list.capturedAt) < createdAt || timestamp(list.capturedAt) > observedAt
       || (list.expectedCount !== null && !integer(list.expectedCount))
       || (native ? list.pages !== null : !integer(list.pages) || list.pages > 1_000)
+      || (list.reason === 'native-list-loading-timeout' && (!native || value.partial !== true))
       || !REASONS.has(list.reason) || (list.complete && (!list.verified
         || list.reason !== (native ? 'native-list-complete' : 'pagination-complete')))) return null;
     const accounts = rows(list.accounts, { max: 2_000, source: native ? 'list-dialog' : 'authenticated-web', nativeIds: !native, seedRead: true });

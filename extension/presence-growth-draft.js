@@ -5,7 +5,7 @@ const TYPES = ['followers', 'following'];
 const NATIVE_ROW_SOURCES = ['extension-scrolled-dom', 'extension-visible-dom', 'tampermonkey-visible-dom'];
 const REASONS = new Set(['pagination-complete', 'instagram-limited-list', 'cursor-missing', 'count-mismatch',
   'count-unverified', 'count-changed', 'profile-count-disagreement', 'account-limit', 'page-limit',
-  'native-list-complete', 'native-list-truncated', 'stopped', 'native-context-changed']);
+  'native-list-complete', 'native-list-truncated', 'stopped', 'native-context-changed', 'native-list-loading-timeout']);
 const freeze = value => {
   if (value && typeof value === 'object') { Object.values(value).forEach(freeze); Object.freeze(value); }
   return value;
@@ -93,6 +93,7 @@ function normalizedRead(value, seed, createdAt, now) {
       || timestamp(list.capturedAt) === null || timestamp(list.capturedAt) < createdAt || timestamp(list.capturedAt) > observedAt
       || (list.expectedCount !== null && !integer(list.expectedCount))
       || (native ? list.pages !== null : !integer(list.pages) || list.pages > 1_000)
+      || (list.reason === 'native-list-loading-timeout' && (!native || value.partial !== true))
       || !REASONS.has(list.reason) || (list.complete && (!list.verified
         || list.reason !== (native ? 'native-list-complete' : 'pagination-complete')))) return null;
     const accounts = rows(list.accounts, { max: 2_000, source: native ? 'list-dialog' : 'authenticated-web', nativeIds: !native, seedRead: true });

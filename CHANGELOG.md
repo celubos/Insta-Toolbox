@@ -2,6 +2,17 @@
 
 This project uses [Semantic Versioning](https://semver.org/).
 
+## 4.3.5 - 2026-11-09 (development)
+
+- Start native list collection when verified rows and their actual scroll
+  container are available, even while a trailing pagination loader is mounted.
+- Check loader visibility against CSS, the dialog, clipping containers and the
+  viewport. A clipped loader cannot stall startup; a visible loader still
+  prevents an unproven end from being called complete.
+- Retain native loading timeouts as partial Growth draft evidence without
+  creating candidates or action authority. Keep exact empty-list safeguards,
+  fresh ending totals, Stop and manual scan defaults unchanged.
+
 ## 4.3.4 - 2026-11-09 (development)
 
 - Wait for native profile lists to finish their initial loading before scanning

@@ -311,3 +311,110 @@ test('Stop and native context drift during initial loading preserve rows without
     } finally { clearTimeout(mutation); }
   }
 });
+
+test('native read starts with real rows and scrolling despite a mounted offscreen pagination sentinel', async () => {
+  const names = Array.from({ length: 17 }, (_, index) => `sentinel_fixture_${index}`);
+  let timer, rowsReady = false, sentinelReads = 0;
+  const f = fixture({ counts: { followers: 17, following: 1 }, rows: { followers: names, following: [names[0]] },
+    recycled: true, fastSettle: true, fakeClock: true,
+    onOpen(type, api) {
+      if (type !== 'followers') return;
+      const modal = api.modal, original = modal.querySelectorAll, scroller = original('div, ul, section')[0];
+      modal.getBoundingClientRect = () => ({ top: 0, bottom: 300, left: 0, right: 400, width: 400, height: 300 });
+      scroller.parentElement = modal;
+      scroller.getBoundingClientRect = () => ({ top: 100, bottom: 200, left: 0, right: 400, width: 400, height: 100 });
+      const loader = { isConnected: true, parentElement: scroller, getAttribute: () => null, getClientRects: () => [{}],
+        getBoundingClientRect() { const top = 100 + scroller.scrollHeight - scroller.scrollTop + 25;
+          return { top, bottom: top + 32, left: 150, right: 182, width: 32, height: 32 }; } };
+      modal.querySelectorAll = selector => selector.includes('[role="progressbar"]') ? (sentinelReads += 1, [loader])
+        : selector === 'a[href^="/"]' && !rowsReady ? [] : original(selector);
+      modal.querySelector = selector => selector.includes('[role="progressbar"]') ? loader : null;
+      timer = setTimeout(() => { rowsReady = true; }, 15);
+    } });
+  try {
+    const result = await f.run();
+    assert.equal(result.followers.length, 17); assert.equal(result.complete.followers, true);
+    assert.equal(result.complete.following, true); assert.ok(sentinelReads > 1, 'mounted sentinel remains present through the scan');
+    assert.ok(f.progress.some(event => event.listType === 'followers' && event.found === 3));
+    assert.deepEqual(f.calls, ['open:followers', 'close:followers', 'open:following', 'close:following']);
+  } finally { clearTimeout(timer); }
+});
+
+function lazyPaginationFixture({ onVisibleLoader = null } = {}) {
+  const names = Array.from({ length: 6 }, (_, index) => `lazy_spinner_fixture_${index}`);
+  let timer, loaded = 3, resolved = false, visibleReads = 0;
+  const f = fixture({ counts: { followers: 6, following: 1 }, rows: { followers: names, following: [names[0]] },
+    recycled: true, fastSettle: true, fakeClock: true,
+    onOpen(type, api) {
+      if (type !== 'followers') return;
+      const modal = api.modal, original = modal.querySelectorAll, scroller = original('div, ul, section')[0];
+      const scrolling = Object.getOwnPropertyDescriptor(scroller, 'scrollTop');
+      scroller.scrollHeight = 170; scroller.parentElement = modal;
+      modal.getBoundingClientRect = () => ({ top: 0, bottom: 300, left: 0, right: 400, width: 400, height: 300 });
+      scroller.getBoundingClientRect = () => ({ top: 100, bottom: 200, left: 0, right: 400, width: 400, height: 100 });
+      Object.defineProperty(scroller, 'scrollTop', { configurable: true,
+        get() { return scrolling.get.call(this); },
+        set(value) {
+          scrolling.set.call(this, value);
+          if (!timer && loaded === 3 && this.scrollTop + this.clientHeight >= this.scrollHeight - 8) {
+            timer = setTimeout(() => { loaded = 6; resolved = true; scroller.scrollHeight = 320; }, 30);
+          }
+        } });
+      const loader = { isConnected: true, parentElement: scroller, getAttribute: () => null, getClientRects: () => [{}],
+        getBoundingClientRect() {
+          const top = 100 + loaded * 50 - scroller.scrollTop;
+          if (top < 200 && top + 20 > 100) { visibleReads += 1; onVisibleLoader?.(); }
+          return { top, bottom: top + 20, left: 150, right: 170, width: 20, height: 20 };
+        } };
+      modal.querySelectorAll = selector => selector.includes('[role="progressbar"]') ? loaded < 6 ? [loader] : []
+        : selector === 'a[href^="/"]' ? original(selector).filter(node => names.indexOf(node.textContent) < loaded) : original(selector);
+      modal.querySelector = selector => selector.includes('[role="progressbar"]') && loaded < 6 ? loader : null;
+    },
+    onClose(type) { if (type === 'followers') assert.equal(resolved, true, 'completion cannot precede the pending native page'); } });
+  f.pageResolved = () => resolved;
+  f.visibleLoaderReads = () => visibleReads;
+  f.disposePage = () => clearTimeout(timer);
+  return f;
+}
+
+test('a visible native pagination loader blocks completion until its asynchronous next page arrives', async () => {
+  const f = lazyPaginationFixture();
+  try {
+    const result = await f.run();
+    assert.equal(f.pageResolved(), true); assert.ok(f.visibleLoaderReads() > 0);
+    assert.equal(result.followers.length, 6); assert.equal(result.complete.followers, true); assert.equal(result.complete.following, true);
+    assert.deepEqual(f.calls, ['open:followers', 'close:followers', 'open:following', 'close:following']);
+  } finally { f.disposePage(); }
+});
+
+test('Stop during a visible native pagination wait preserves the original page without later clicks', async () => {
+  const controller = new AbortController();
+  const f = lazyPaginationFixture({ onVisibleLoader: () => controller.abort() });
+  try {
+    await assert.rejects(f.run({ signal: controller.signal }), error => {
+      assert.equal(error.code, 'stopped'); assert.equal(error.partialResult.followers.length, 3);
+      assert.equal(error.partialResult.complete.followers, false); assert.equal(error.partialResult.following.length, 0);
+      return true;
+    });
+    assert.ok(f.visibleLoaderReads() > 0); assert.equal(f.pageResolved(), false);
+    assert.deepEqual(f.calls, ['open:followers']);
+  } finally { f.disposePage(); }
+});
+
+test('an actually visible initial loader still blocks exact fixed and zero lists with real geometry', async () => {
+  for (const empty of [false, true]) {
+    const f = initialLoadingFixture({ ...(empty ? { counts: { followers: 0, following: 0 }, rows: { followers: [], following: [] } } : {}),
+      onOpen(api) {
+        const modal = api.modal;
+        modal.getBoundingClientRect = () => ({ top: 0, bottom: 300, left: 0, right: 400 });
+        const [loader] = modal.querySelectorAll('[role="progressbar"]');
+        loader.parentElement = modal;
+        loader.getBoundingClientRect = () => ({ top: 80, bottom: 112, left: 150, right: 182 });
+      } });
+    const pending = f.run();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.deepEqual(f.calls, ['open:followers']);
+    f.finishLoading(); const result = await pending;
+    assert.equal(result.followers.length, empty ? 0 : 2); assert.equal(result.complete.followers, true);
+  }
+});
