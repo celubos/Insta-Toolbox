@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
+import vm from 'node:vm';
 
 import { assertPngDimensions, readPngDimensions } from '../scripts/png-dimensions.mjs';
 
@@ -120,17 +121,60 @@ test('every tracked PWA baseline PNG matches its manifest viewport', async () =>
   }
 });
 
-test('browser QA manifests bind captures to the current product version and release timestamp', () => {
+test('browser QA binds candidate metadata while retaining reviewed capture identities', () => {
   assert.match(harness, /readFile\(path\.join\(repositoryRoot, 'package\.json'\), 'utf8'\)/);
   assert.match(harness, /readFile\(path\.join\(repositoryRoot, 'CHANGELOG\.md'\), 'utf8'\)/);
   assert.match(harness, /captureTimestamp: `\$\{releaseDate\}T00:00:00\.000Z`/);
   assert.match(harness, /schemaVersion: 2/);
-  assert.match(harness, /baseline product version changed/);
-  assert.match(harness, /baseline capture timestamp changed/);
+  assert.match(harness, /required: await readProductEvidenceMetadata\(\), candidate: manifest, baseline: expected/);
   for (const manifest of [pwaBaseline, pwaCiBaseline]) {
     assert.equal(manifest.schemaVersion, 2);
     assert.equal(manifest.kind, 'insta-toolbox-pwa-screenshot-baseline');
-    assert.equal(manifest.productVersion, packageJson.version);
+    assert.equal(manifest.productVersion, '4.3.1');
     assert.equal(manifest.captureTimestamp, '2026-10-05T00:00:00.000Z');
   }
+});
+
+test('candidate version and timestamp stay pinned without relabeling historical captures', () => {
+  const context = vm.createContext({ assert, Object, String });
+  vm.runInContext(harness.slice(harness.indexOf('function productEvidence('),
+    harness.indexOf('async function readProductEvidenceMetadata(')), context);
+  const required = { productVersion: packageJson.version, captureTimestamp: '2026-11-09T00:00:00.000Z' };
+  const baseline = { productVersion: '4.3.1', captureTimestamp: '2026-10-05T00:00:00.000Z' };
+  const original = JSON.stringify(baseline);
+  const evidence = context.productEvidence({ required, candidate: { ...required }, baseline });
+  assert.equal(evidence.candidate.productVersion, packageJson.version);
+  assert.equal(evidence.baseline.productVersion, '4.3.1');
+  assert.equal(evidence.baseline.captureTimestamp, baseline.captureTimestamp);
+  assert.equal(JSON.stringify(baseline), original, 'validation must not relabel capture provenance');
+  assert.throws(() => context.productEvidence({ required,
+    candidate: { ...required, productVersion: '0.0.0' }, baseline }), /candidate product version/);
+  assert.throws(() => context.productEvidence({ required,
+    candidate: { ...required, captureTimestamp: baseline.captureTimestamp }, baseline }), /candidate capture timestamp/);
+  assert.throws(() => context.productEvidence({ required, candidate: { ...required },
+    baseline: { ...baseline, productVersion: '' } }), /capture identity/);
+  assert.throws(() => context.productEvidence({ required, candidate: { ...required },
+    baseline: { ...baseline, captureTimestamp: '' } }), /baseline capture timestamp/);
+});
+
+test('patched candidate runtime and historical Electron capture provenance stay separate', () => {
+  const context = vm.createContext({ assert, Object, String });
+  vm.runInContext(harness.slice(harness.indexOf('function electronEvidence('),
+    harness.indexOf('async function readProductEvidenceMetadata(')), context);
+  const versions = { required: '44.9.1', runtime: '44.9.1', captured: '44.5.1' };
+  const evidence = context.electronEvidence(versions);
+  assert.equal(evidence.runtime, '44.9.1');
+  assert.equal(evidence.captured, '44.5.1');
+  assert.equal(versions.captured, '44.5.1', 'validation must not relabel capture provenance');
+  assert.throws(() => context.electronEvidence({ ...versions, runtime: '44.5.1' }), /candidate Electron runtime/);
+  assert.throws(() => context.electronEvidence({ ...versions, required: '^44.9.1' }), /must be pinned/);
+  assert.throws(() => context.electronEvidence({ ...versions, captured: '' }), /capture identity/);
+  for (const manifest of [pwaBaseline, pwaCiBaseline]) {
+    assert.equal(manifest.electron, '44.5.1');
+    assert.ok(manifest.capturedProductVersion);
+    assert.ok(manifest.originalCaptureTimestamp);
+  }
+  assert.match(harness, /manifestSha256: sha256\(expectedBytes\)/);
+  assert.match(harness, /baseline hash is corrupt/);
+  assert.match(harness, /capture\.sha256, expectedCapture\.sha256/);
 });

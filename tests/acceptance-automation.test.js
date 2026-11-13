@@ -218,7 +218,7 @@ test('desktop CI builds and exercises confined packaged lifecycles without relea
   assert.match(macVerifier, /await rm\(installedApp/);
   assert.match(macVerifier, /insta-toolbox-macos-package-/);
   assert.match(workflow, /package-macos:/);
-  assert.match(workflow, /runs-on: macos-14/);
+  assert.match(workflow, /runs-on: macos-15-intel/);
   assert.match(workflow, /CSC_IDENTITY_AUTO_DISCOVERY: "false"/);
   assert.match(workflow, /CSC_FOR_PULL_REQUEST: "true"/);
   assert.match(workflow, /ExtractAssociatedIcon\(\$installedExecutable\)/);
