@@ -1,6 +1,8 @@
 # GitHub repository settings
 
-Use these public settings for the 4.3.1 release.
+Latest development version: **4.3.10**. Latest published stable release: **4.3.1**.
+
+Keep the stable userscript URL on the published release channel. Link the pinned development build and its validation separately; do not label an unreleased candidate as the latest stable release.
 
 ## Description
 
@@ -22,6 +24,10 @@ Use these public settings for the 4.3.1 release.
 - `local-first`
 - `privacy`
 - `relationship-analysis`
+
+## Version information
+
+[4.3.10 development build, checksum and validation](DEVELOPMENT_RELEASE.md).
 
 ## Stable userscript
 

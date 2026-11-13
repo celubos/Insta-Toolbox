@@ -1,6 +1,12 @@
 # Insta Toolbox
 
-**[Install Insta Toolbox with Tampermonkey](https://github.com/slaveofsolace/Insta-Toolbox/releases/latest/download/insta-toolbox.user.js)**
+## Latest version
+
+**4.3.10 is the latest development build.** [Install the 4.3.10 test build](https://raw.githubusercontent.com/celubos/Insta-Toolbox/80e0d56c56b9dfc158327576ed9163c75c85e22b/userscripts/insta-toolbox.user.js) or read its [changes, checksums and validation status](docs/DEVELOPMENT_RELEASE.md).
+
+The latest published stable release is **[4.3.1](https://github.com/celubos/Insta-Toolbox/releases/tag/v4.3.1)**. Version 4.3.10 passes the automated checks; installed recovery and remaining live action checks are still pending. The stable install button below continues to use the published release channel.
+
+**[Install the stable version with Tampermonkey](https://github.com/slaveofsolace/Insta-Toolbox/releases/latest/download/insta-toolbox.user.js)**
 
 Instagram utilities that run locally in your browser. Check mutuals, review follow or unfollow targets, and unsend your own messages from the conversation you have open.
 ## Install in about a minute
