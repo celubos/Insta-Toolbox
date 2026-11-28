@@ -302,6 +302,9 @@ partial. Missing from a partial list is never treated as a non-mutual.
 
 ## 4.3.10 discovery recovery boundary
 
+Withdrawn in 4.3.11: inbox, DM, reaction and Ghost sources are restored to
+4.3.9 and no discovery observations are written to tab storage.
+
 Only bounded thread observations and sanitized historical labels are written
 to existing private tab storage. Account scope and the original discovery
 deadline are rechecked after asynchronous reads and after confirmation. No

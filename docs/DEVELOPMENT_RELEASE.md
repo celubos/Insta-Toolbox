@@ -11,9 +11,9 @@ to the stable release channel.
 2. Open the [commit-pinned 4.3.11 userscript](https://raw.githubusercontent.com/celubos/Insta-Toolbox/a7a27b9fa5ad6550c6382c4234d96e814e773375/userscripts/insta-toolbox.user.js). Choose **Install**, or **Update** if Insta Toolbox is already installed.
 3. Reload Instagram and open **IT**. Keep one Insta Toolbox copy enabled.
 
-The pinned file is **888,493 bytes**, SHA-256:
+The pinned file is **875,564 bytes**, SHA-256:
 
-`f2536b3b2533c7900c63cc859bcd3ed6de1136d75cff4fad46386d0bdc35ed1b`
+`4a141be512e60413b908403e4bb981bcd0afa5374b6da0f0001f7c6ee4c87740`
 
 Tampermonkey checks the stable release URL for updates. A development build
 does not update itself to a later development build; reopen this page instead.
@@ -31,13 +31,13 @@ Extension, desktop and web/PWA downloads remain on their held 4.3.1 channel.
   partial and say so. Other accounts still use their open profile.
 - **Signed-out tabs:** report that no signed-in account is shown instead of an
   account change.
+- **DM Unsend:** restored to the exact 4.3.9 code (last verified live removal);
+  the 4.3.10 Restore found conversations change is withdrawn.
 
 ## Changes since 4.3.1
 
 - **Presence history:** retain account-scoped activity across tabs and acknowledge storage writes. Discovered history stays explicitly partial.
 - **Native lists:** avoid repeatedly searching list avatars for account navigation, and preserve partial-result labels when native counts disagree.
-- **Ghost recovery:** save bounded conversation observations before opening the next chat. After a page reload, **Restore found conversations** recovers a partial list for the same verified account. Select exact threads and review again; previous selections, approvals and native message evidence are discarded.
-- **Stop and expiry:** cancel pending recovery and reject expired or changed-account reviews.
 
 See the [changelog](../CHANGELOG.md), [4.3.11 acceptance](acceptance/4.3.11.md)
 and [4.3.11 compatibility](compatibility/4.3.11.md).

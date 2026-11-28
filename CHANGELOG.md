@@ -15,6 +15,9 @@ This project uses [Semantic Versioning](https://semver.org/).
   results stay partial and ask for a rerun from the profile.
 - Report a tab with no signed-in account instead of an account change. Other
   accounts keep the native-profile path. No grants, endpoints or storage change.
+- Restore DM Unsend, reaction cleanup and Ghost Mode to the exact 4.3.9 code,
+  the last version with a verified live removal. Withdraw the 4.3.10
+  discovery-recovery checkpoint and its tab-storage write.
 
 ## 4.3.10 - 2026-11-10 (development)
 

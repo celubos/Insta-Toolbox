@@ -184,11 +184,8 @@ Version 4.3.11 checks your own followers and following again after Instagram
 retired the account lookups Mutual Checker used. Run it from your profile to
 confirm the totals. Other accounts are read from their open profile.
 
-Version 4.3.10 retains partial conversation discoveries when Instagram reloads.
-Choose Restore found conversations, select exact threads and review again.
-Names came from earlier observations and may have changed. Restore never
-resumes cleanup. Recovered results require managed worker tabs and expire at
-the original discovery deadline. No new permissions are requested.
+DM Unsend and Ghost Mode run the 4.3.9 code. The 4.3.10 Restore found
+conversations change was withdrawn in 4.3.11. No new permissions are requested.
 
 Installed 4.3.9 verified native list scans, Presence controls, history retention,
 Insights and an approved one-message Unsend. Ghost discovery lost its inventory
