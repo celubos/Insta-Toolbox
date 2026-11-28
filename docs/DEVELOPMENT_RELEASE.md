@@ -8,7 +8,7 @@ to the stable release channel.
 ## Install or update
 
 1. Install [Tampermonkey](https://www.tampermonkey.net/). In Chrome 138 or newer, enable **Allow User Scripts** in Tampermonkey's extension details; older Chrome and Edge use Developer Mode.
-2. Open the [commit-pinned 4.5.0 userscript](https://raw.githubusercontent.com/celubos/Insta-Toolbox/a867987fff8e96ba08b6edc5da7a99ba4c6f5caa/userscripts/insta-toolbox.user.js). Choose **Install**, or **Update** if Insta Toolbox is already installed.
+2. Open the [commit-pinned 4.5.0 userscript](https://raw.githubusercontent.com/celubos/Insta-Toolbox/638789f22bbd787a92f37984ae2abf1b9420b88a/userscripts/insta-toolbox.user.js). Choose **Install**, or **Update** if Insta Toolbox is already installed.
 3. Reload Instagram and open **IT**. Keep one Insta Toolbox copy enabled.
 
 The pinned file is **876,308 bytes**, SHA-256:

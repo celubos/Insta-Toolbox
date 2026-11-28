@@ -4,7 +4,7 @@
 
 The latest published stable release is **4.3.1**. The install steps below use the stable channel.
 
-For the latest development build, [install the 4.5.0 release candidate](https://raw.githubusercontent.com/celubos/Insta-Toolbox/a867987fff8e96ba08b6edc5da7a99ba4c6f5caa/userscripts/insta-toolbox.user.js). It is a development candidate; installed live acceptance is pending. See [4.5.0 changes, checksum and validation](DEVELOPMENT_RELEASE.md) before choosing it. If Insta Toolbox is already installed, Tampermonkey offers **Update** instead of **Install**. Reload Instagram afterward.
+For the latest development build, [install the 4.5.0 release candidate](https://raw.githubusercontent.com/celubos/Insta-Toolbox/638789f22bbd787a92f37984ae2abf1b9420b88a/userscripts/insta-toolbox.user.js). It is a development candidate; installed live acceptance is pending. See [4.5.0 changes, checksum and validation](DEVELOPMENT_RELEASE.md) before choosing it. If Insta Toolbox is already installed, Tampermonkey offers **Update** instead of **Install**. Reload Instagram afterward.
 
 **Tampermonkey is the active update channel.** Chrome extension, Windows/macOS desktop and web/PWA packages are **On hold after 4.3.1**. Existing downloads and local data remain available.
 
