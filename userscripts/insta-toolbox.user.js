@@ -1350,6 +1350,19 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
     );
   }
 
+  // Message lanes report ownership through horizontal justification. Older
+  // Instagram builds computed flex-end / flex-start. On 2026-11-27 Chrome
+  // computed flow-end for every signed-in sender's message and flow-start for
+  // every other participant's, matching Instagram's own "message from <name>"
+  // labels. Unknown values stay neutral, exactly as before.
+  function laneAlignment(style) {
+    if (style?.justifyContent === 'flex-end') return 'end';
+    const value = String(style?.justifyContent || '').trim().toLowerCase();
+    if (value === 'flow-end' || value === 'end') return 'end';
+    if (value === 'flex-start' || value === 'flow-start' || value === 'start') return 'start';
+    return '';
+  }
+
   function sentByCurrentUser(row, view = globalThis) {
     const explicit = String(row?.getAttribute?.('data-sent-by-me') || '').toLowerCase();
     if (explicit === 'false') return false;
@@ -1374,7 +1387,7 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
       for (let ancestor = outerGroups[0].parentElement; ancestor; ancestor = ancestor.parentElement) {
         const style = view.getComputedStyle?.(ancestor);
         if (['flex', 'inline-flex'].includes(style?.display)
-          && style.flexDirection === 'row' && style.justifyContent === 'flex-start') return false;
+          && style.flexDirection === 'row' && laneAlignment(style) === 'start') return false;
         if (ancestor === row) break;
       }
       const group = outerGroups[0];
@@ -1389,8 +1402,9 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
           .some((element) => !actions.contains?.(element));
         if (payload && ['flex', 'inline-flex'].includes(style?.display)
           && style.flexDirection === 'row' && style.direction !== 'rtl') {
-          if (style.justifyContent === 'flex-start') return false;
-          if (style.justifyContent === 'flex-end') nativeAligned = true;
+          const alignment = laneAlignment(style);
+          if (alignment === 'start') return false;
+          if (alignment === 'end') nativeAligned = true;
         }
         if (lane === group) break;
       }
@@ -1404,8 +1418,9 @@ ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2
       const horizontal = !style?.flexDirection || style.flexDirection === 'row';
       const flexLayout = !style?.display || ['flex', 'inline-flex'].includes(style.display);
       if (horizontal && flexLayout && style?.direction !== 'rtl') {
-        if (style?.justifyContent === 'flex-start') return false;
-        if (style?.justifyContent === 'flex-end') aligned = true;
+        const alignment = laneAlignment(style);
+        if (alignment === 'start') return false;
+        if (alignment === 'end') aligned = true;
       }
       const children = [...element.children || []].filter((child) => !(
         child.getAttribute?.('aria-hidden') === 'true'
