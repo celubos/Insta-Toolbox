@@ -4,7 +4,7 @@
 
 The latest published stable release is **4.3.1**. The install steps below use the stable channel.
 
-For the latest development build, [install the 4.3.10 test userscript](https://raw.githubusercontent.com/celubos/Insta-Toolbox/80e0d56c56b9dfc158327576ed9163c75c85e22b/userscripts/insta-toolbox.user.js). It is a development candidate with passing automated checks; remaining live acceptance is pending. See [4.3.10 changes, checksum and validation](DEVELOPMENT_RELEASE.md) before choosing it. If Insta Toolbox is already installed, Tampermonkey offers **Update** instead of **Install**. Reload Instagram afterward.
+For the latest development build, [install the 4.3.11 test userscript](https://raw.githubusercontent.com/celubos/Insta-Toolbox/PINNED_COMMIT/userscripts/insta-toolbox.user.js). It is a development candidate; installed live acceptance is pending. See [4.3.11 changes, checksum and validation](DEVELOPMENT_RELEASE.md) before choosing it. If Insta Toolbox is already installed, Tampermonkey offers **Update** instead of **Install**. Reload Instagram afterward.
 
 **Tampermonkey is the active update channel.** Chrome extension, Windows/macOS desktop and web/PWA packages are **On hold after 4.3.1**. Existing downloads and local data remain available.
 
@@ -180,6 +180,10 @@ Read the reason shown in the active tool. Challenge, rate-limit, wrong-thread, c
 
 ## Acceptance and support
 
+Version 4.3.11 checks your own followers and following again after Instagram
+retired the account lookups Mutual Checker used. Run it from your profile to
+confirm the totals. Other accounts are read from their open profile.
+
 Version 4.3.10 retains partial conversation discoveries when Instagram reloads.
 Choose Restore found conversations, select exact threads and review again.
 Names came from earlier observations and may have changed. Restore never
@@ -196,6 +200,8 @@ private history storage. The 500-entry display/export limit is not a global
 physical-storage cap. Identity, author and stable installation URLs remain
 unchanged.
 
+- [4.3.11 userscript candidate acceptance](acceptance/4.3.11.md)
+- [4.3.11 userscript compatibility](compatibility/4.3.11.md)
 - [4.3.10 userscript candidate acceptance](acceptance/4.3.10.md)
 - [4.3.10 userscript compatibility](compatibility/4.3.10.md)
 - [4.3.1 acceptance record](acceptance/4.3.1.md)

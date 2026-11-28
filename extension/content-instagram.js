@@ -102,6 +102,71 @@
     return candidates.size === 1 ? [...candidates][0] : '';
   }
 
+  // Since November 2026 both lookup GETs answer HTTP 404 for signed-in and
+  // signed-out tabs alike, while the friendships list GET still works. The
+  // signed-in viewer's own numeric ID is bound only when Instagram's
+  // server-rendered viewer record (username and ID together), its separate
+  // rendered app identity, and the visible navigation proof of the viewer
+  // username all agree. Nothing here reads session storage or headers.
+  const RENDERED_VIEWER_SCAN_LIMIT = 200_000;
+
+  function renderedViewerIdentity() {
+    const viewers = new Map();
+    const scopedIds = new Set();
+    let rendered = 0;
+    for (const script of document.querySelectorAll?.('script[type="application/json"]') || []) {
+      rendered += 1;
+      const text = String(script?.textContent || '');
+      for (const match of text.matchAll(/"appScopedIdentity"\s*:\s*"([^"]{0,40})"/g)) scopedIds.add(match[1]);
+      if (!text.includes('"PolarisViewer"')) continue;
+      let data;
+      try { data = JSON.parse(text); } catch { continue; }
+      const stack = [data];
+      let visited = 0;
+      while (stack.length && visited < RENDERED_VIEWER_SCAN_LIMIT) {
+        const node = stack.pop();
+        visited += 1;
+        if (!node || typeof node !== 'object') continue;
+        if (Array.isArray(node) && node[0] === 'PolarisViewer' && Array.isArray(node[1])) {
+          const record = node[2]?.data;
+          const id = normalizeObservedInstagramId(record?.id);
+          const name = typeof record?.username === 'string' ? normalizeUsername(record.username) : '';
+          viewers.set(`${id}:${name}`, { id, username: name });
+        }
+        for (const child of Array.isArray(node) ? node : Object.values(node)) {
+          if (child && typeof child === 'object') stack.push(child);
+        }
+      }
+    }
+    const valid = [...viewers.values()].filter(viewer => viewer.id && viewer.username);
+    const [scopedId] = scopedIds;
+    const viewer = viewers.size === 1 && valid.length === 1 && scopedIds.size === 1
+      && normalizeObservedInstagramId(scopedId) === valid[0].id ? Object.freeze(valid[0]) : null;
+    // `anyViewer` separates "Instagram rendered no signed-in viewer" from an
+    // unreadable or ambiguous record; only the former may be called signed out.
+    return Object.freeze({ rendered: rendered > 0, anyViewer: valid.length > 0, viewer });
+  }
+
+  function sessionActorRelationshipBinding(username) {
+    const viewer = detectAuthenticatedUsername();
+    const page = renderedViewerIdentity();
+    if (!viewer && page.rendered && !page.anyViewer) return Object.freeze({ state: 'signed-out' });
+    if (!viewer || viewer !== username || !page.viewer || page.viewer.username !== viewer) {
+      return Object.freeze({ state: 'unbound' });
+    }
+    return Object.freeze({ state: 'bound', userId: page.viewer.id });
+  }
+
+  function assertSessionActorUnchanged(username, userId) {
+    const actor = sessionActorRelationshipBinding(username);
+    if (actor.state !== 'bound' || actor.userId !== userId) {
+      throw relationshipError(
+        'profile-mismatch',
+        'The signed-in account changed or could not be re-verified during the check.',
+      );
+    }
+  }
+
   function relationshipError(code, message) {
     const error = new Error(message);
     error.code = code;
@@ -757,36 +822,62 @@
           ...common, found: 0, listType: null, pages: 0, username,
         });
       } catch (error) {
-        if (allowNativeListFallback !== true || error?.lookupRoutesRetired !== true) throw error;
-        return await collectNativeFollowerComparison({ ...common, username });
+        if (error?.lookupRoutesRetired !== true) throw error;
+        // Retired lookups cannot distinguish signed-out tabs: both answer 404.
+        const actor = sessionActorRelationshipBinding(username);
+        if (actor.state === 'signed-out') {
+          throw Object.assign(relationshipError(
+            'session-expired',
+            'Instagram shows no signed-in account in this tab. Sign in to Instagram, then run the check again.',
+          ), { httpStatus: error.httpStatus });
+        }
+        if (actor.state === 'bound') {
+          resolution = Object.freeze({ userId: actor.userId, subjectInstagramId: actor.userId, identitySource: 'session-actor' });
+        } else {
+          if (allowNativeListFallback !== true) throw error;
+          return await collectNativeFollowerComparison({ ...common, username });
+        }
       }
       const { userId } = resolution;
+      const sessionBound = resolution.identitySource === 'session-actor';
+      // The retired profile GET cannot supply totals for a session-bound
+      // check; only the exact open profile header can. Without it the lists
+      // are read but never called complete.
+      const countsFromProfileRoute = !openProfileCounts && !sessionBound;
       onProgress?.(Object.freeze({ found: 0, listType: null, pages: 0, phase: 'verifying-profile', username }));
-      const profileCountsAtStart = openProfileCounts || await resolveRelationshipProfileCounts(username, userId, {
-        ...common,
-        found: 0,
-        listType: null,
-        pages: 0,
-        username,
-      }, resolution.profile);
-      onProgress?.(Object.freeze({
-        expectedCounts: profileCountsAtStart,
-        found: 0,
-        listType: null,
-        pages: 0,
-        phase: 'counts-ready',
-        username,
-      }));
-      const countDisagreementAtStart = exactProfileCountDisagreement(username, profileCountsAtStart);
+      const profileCountsAtStart = openProfileCounts || (countsFromProfileRoute
+        ? await resolveRelationshipProfileCounts(username, userId, {
+          ...common,
+          found: 0,
+          listType: null,
+          pages: 0,
+          username,
+        }, resolution.profile)
+        : null);
+      if (profileCountsAtStart) {
+        onProgress?.(Object.freeze({
+          expectedCounts: profileCountsAtStart,
+          found: 0,
+          listType: null,
+          pages: 0,
+          phase: 'counts-ready',
+          username,
+        }));
+      }
+      const noDisagreement = Object.freeze({ followers: false, following: false });
+      const countDisagreementAtStart = profileCountsAtStart
+        ? exactProfileCountDisagreement(username, profileCountsAtStart) : noDisagreement;
       const followersTraversal = await fetchRelationshipList('followers', userId, username, {
         ...common,
-        expectedCount: profileCountsAtStart.followers,
+        expectedCount: profileCountsAtStart?.followers ?? null,
       });
+      if (sessionBound) assertSessionActorUnchanged(username, userId);
       const followingTraversal = await fetchRelationshipList('following', userId, username, {
         ...common,
-        expectedCount: profileCountsAtStart.following,
+        expectedCount: profileCountsAtStart?.following ?? null,
       });
       assertRelationshipRunActive(runSignal, startedAt, now, boundedDuration);
+      if (sessionBound) assertSessionActorUnchanged(username, userId);
       onProgress?.(Object.freeze({
         found: followersTraversal.accounts.length + followingTraversal.accounts.length,
         listType: null,
@@ -796,30 +887,29 @@
       }));
       const profileCountsAtEnd = openProfileCounts
         ? openProfileRelationshipCounts(username)
-        : await resolveRelationshipProfileCounts(username, userId, {
-          ...common,
-          found: followersTraversal.accounts.length + followingTraversal.accounts.length,
-          listType: null,
-          pages: followersTraversal.pages + followingTraversal.pages,
-          username,
-        });
-      if (!profileCountsAtEnd) {
+        : countsFromProfileRoute
+          ? await resolveRelationshipProfileCounts(username, userId, {
+            ...common,
+            found: followersTraversal.accounts.length + followingTraversal.accounts.length,
+            listType: null,
+            pages: followersTraversal.pages + followingTraversal.pages,
+            username,
+          })
+          : null;
+      if (!profileCountsAtEnd && profileCountsAtStart) {
         throw relationshipError('profile-count-unavailable', 'Keep the checked profile open until the comparison finishes. The previous comparison is unchanged.');
       }
-      const countDisagreementAtEnd = exactProfileCountDisagreement(username, profileCountsAtEnd);
+      const countDisagreementAtEnd = profileCountsAtEnd
+        ? exactProfileCountDisagreement(username, profileCountsAtEnd) : noDisagreement;
       const followers = finalizeRelationshipList(followersTraversal, {
-        countChanged: profileCountsAtStart.followers !== profileCountsAtEnd.followers,
+        countChanged: profileCountsAtStart?.followers !== profileCountsAtEnd?.followers,
         countDisagreed: countDisagreementAtStart.followers || countDisagreementAtEnd.followers,
-        expectedCount: profileCountsAtEnd.followers,
+        expectedCount: profileCountsAtEnd?.followers ?? null,
       });
       const following = finalizeRelationshipList(followingTraversal, {
-        countChanged: profileCountsAtStart.following !== profileCountsAtEnd.following,
+        countChanged: profileCountsAtStart?.following !== profileCountsAtEnd?.following,
         countDisagreed: countDisagreementAtStart.following || countDisagreementAtEnd.following,
-        expectedCount: profileCountsAtEnd.following,
-      });
-      const expectedCounts = Object.freeze({
-        followers: profileCountsAtEnd.followers,
-        following: profileCountsAtEnd.following,
+        expectedCount: profileCountsAtEnd?.following ?? null,
       });
       const capturedAt = new Date(now()).toISOString();
       const result = Object.freeze({
@@ -833,6 +923,7 @@
         source: 'authenticated-instagram-web',
         userId,
         ...(resolution.subjectInstagramId ? { subjectInstagramId: resolution.subjectInstagramId } : {}),
+        ...(sessionBound ? { identitySource: 'session-actor' } : {}),
         username,
       });
       onProgress?.(Object.freeze({

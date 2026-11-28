@@ -2604,6 +2604,10 @@
           partialDetails.push(`${label}: the native list could not be read completely.`);
         }
       }
+      if (result.identitySource === 'session-actor'
+        && [result.reasons.followers, result.reasons.following].includes('count-unverified')) {
+        partialDetails.push(`Run Check mutuals from your profile page to confirm the totals.`);
+      }
       const mismatch = ` ${partialDetails.join(' ') || 'A bounded read limit was reached.'}`;
       status(
         `Checked @${result.username}: ${result.followers.length.toLocaleString('en-US')} followers and ${result.following.length.toLocaleString('en-US')} following.${result.complete.followers && result.complete.following ? '' : mismatch}`,

@@ -307,6 +307,27 @@ test('primary native check opts in, saves an atomic DOM pair, and supplies no Pr
   assert.equal(f.fields['scan-bar'].attributes['aria-valuetext'], 'Mutual check complete');
 });
 
+test('a session-bound self check away from the profile saves an ID-bound partial and says how to confirm totals', async () => {
+  const f = fixture(); const old = f.state.capture;
+  const pending = f.context.checkAccountRelationships();
+  f.resolve({
+    username: 'fixture.owner', subjectInstagramId: '4242', userId: '4242', identitySource: 'session-actor',
+    source: 'authenticated-instagram-web', capturedAt: '2026-11-27T00:00:00.000Z',
+    followers: [{ username: 'one' }], following: [{ username: 'one' }, { username: 'two' }],
+    complete: { followers: false, following: false },
+    expectedCounts: { followers: null, following: null }, pages: { followers: 1, following: 1 },
+    reasons: { followers: 'count-unverified', following: 'count-unverified' },
+  });
+  await pending;
+  assert.equal(f.saved.length, 1); assert.notEqual(f.state.capture, old);
+  assert.equal(f.state.capture.subjectInstagramId, '4242');
+  assert.deepEqual({ ...f.state.capture.source }, { followers: 'authenticated-web', following: 'authenticated-web' });
+  assert.deepEqual({ ...f.state.capture.complete }, { followers: false, following: false });
+  assert.match(f.messages.at(-1), /a fresh exact profile total could not be verified/);
+  assert.match(f.messages.at(-1), /Run Check mutuals from your profile page to confirm the totals\./);
+  assert.match(f.details.at(-1), /— partial\./);
+});
+
 test('primary stopped native reads preserve the saved pair and export separate explicit partial data', async () => {
   const f = fixture(); const old = f.state.capture;
   const pending = f.context.checkAccountRelationships();

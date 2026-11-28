@@ -2,9 +2,9 @@
 
 ## Latest version
 
-**4.3.10 is the latest development build.** [Install the 4.3.10 test build](https://raw.githubusercontent.com/celubos/Insta-Toolbox/80e0d56c56b9dfc158327576ed9163c75c85e22b/userscripts/insta-toolbox.user.js) or read its [changes, checksums and validation status](docs/DEVELOPMENT_RELEASE.md).
+**4.3.11 is the latest development build.** [Install the 4.3.11 test build](https://raw.githubusercontent.com/celubos/Insta-Toolbox/PINNED_COMMIT/userscripts/insta-toolbox.user.js) or read its [changes, checksums and validation status](docs/DEVELOPMENT_RELEASE.md).
 
-The latest published stable release is **[4.3.1](https://github.com/celubos/Insta-Toolbox/releases/tag/v4.3.1)**. Version 4.3.10 passes the automated checks; installed recovery and remaining live action checks are still pending. The stable install button below continues to use the published release channel.
+The latest published stable release is **[4.3.1](https://github.com/celubos/Insta-Toolbox/releases/tag/v4.3.1)**. Version 4.3.11 repairs Mutual Checker after Instagram retired its account lookups (HTTP 404); installed live acceptance is still pending. The stable install button below continues to use the published release channel.
 
 **[Install the stable version with Tampermonkey](https://github.com/slaveofsolace/Insta-Toolbox/releases/latest/download/insta-toolbox.user.js)**
 
@@ -123,9 +123,9 @@ pnpm run qa:overlay:check
 pnpm run verify:repo-hygiene
 ```
 
-The development matrix covers the PWA, extension, userscript, layout controls, and packaged apps. Version 4.3.10 preserves partial conversation discovery across Instagram page reloads and requires a fresh review before cleanup. Installed 4.3.9 completed native list scans, Presence controls, serial-tab history retention, loaded-post Insights and one approved message removal. Its Ghost discovery lost state during a full-page navigation, so complete acceptance remains held. The timed 377-activity Live Like Me result belongs to 4.3.8. Official release also requires authorized maintainer dispatch/review access, which is unavailable. Fixtures do not prove authenticated Instagram behavior.
+The development matrix covers the PWA, extension, userscript, layout controls, and packaged apps. Version 4.3.11 checks your own followers and following through the list route that still works after Instagram retired its account lookups. Version 4.3.10 preserves partial conversation discovery across Instagram page reloads and requires a fresh review before cleanup. Installed 4.3.9 completed native list scans, Presence controls, serial-tab history retention, loaded-post Insights and one approved message removal. Its Ghost discovery lost state during a full-page navigation, so complete acceptance remains held. The timed 377-activity Live Like Me result belongs to 4.3.8. Official release also requires authorized maintainer dispatch/review access, which is unavailable. Fixtures do not prove authenticated Instagram behavior.
 
-See [Contributing](CONTRIBUTING.md), [Maintainer Guide](docs/MAINTAINER_GUIDE.md), [4.3.10 compatibility](docs/compatibility/4.3.10.md), and [4.3.10 acceptance](docs/acceptance/4.3.10.md). The held packages retain their [4.3.1 compatibility](docs/compatibility/4.3.1.md) and [acceptance record](docs/acceptance/4.3.1.md).
+See [Contributing](CONTRIBUTING.md), [Maintainer Guide](docs/MAINTAINER_GUIDE.md), [4.3.11 compatibility](docs/compatibility/4.3.11.md), and [4.3.11 acceptance](docs/acceptance/4.3.11.md). The held packages retain their [4.3.1 compatibility](docs/compatibility/4.3.1.md) and [acceptance record](docs/acceptance/4.3.1.md).
 
 ## License and credit
 
