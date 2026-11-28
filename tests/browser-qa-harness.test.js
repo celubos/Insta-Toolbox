@@ -148,7 +148,7 @@ test('candidate version and timestamp stay pinned without relabeling historical 
   assert.equal(evidence.baseline.captureTimestamp, baseline.captureTimestamp);
   assert.equal(JSON.stringify(baseline), original, 'validation must not relabel capture provenance');
   assert.throws(() => context.productEvidence({ required,
-    candidate: { ...required, productVersion: '4.3.1' }, baseline }), /candidate product version/);
+    candidate: { ...required, productVersion: '0.0.0' }, baseline }), /candidate product version/);
   assert.throws(() => context.productEvidence({ required,
     candidate: { ...required, captureTimestamp: baseline.captureTimestamp }, baseline }), /candidate capture timestamp/);
   assert.throws(() => context.productEvidence({ required, candidate: { ...required },
