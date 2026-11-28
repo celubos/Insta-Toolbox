@@ -2,9 +2,9 @@
 
 ## Latest version
 
-**4.5.0 is the release candidate.** [Install the 4.5.0 candidate](https://raw.githubusercontent.com/celubos/Insta-Toolbox/638789f22bbd787a92f37984ae2abf1b9420b88a/userscripts/insta-toolbox.user.js) or read its [changes, checksums and validation status](docs/DEVELOPMENT_RELEASE.md).
+**Version 4.5.0** repairs Mutual Checker after Instagram retired its account lookups (HTTP 404) and DM Unsend after Instagram changed its message layout. Read its [changes, checksums and validation](docs/DEVELOPMENT_RELEASE.md).
 
-The latest published stable release is **[4.3.1](https://github.com/celubos/Insta-Toolbox/releases/tag/v4.3.1)**. Version 4.5.0 repairs Mutual Checker after Instagram retired its account lookups (HTTP 404) and DM Unsend after Instagram changed its message layout; publication follows live validation. The stable install button below continues to use the published release channel.
+The install button always serves the latest published release; existing installs update in place.
 
 **[Install the stable version with Tampermonkey](https://github.com/slaveofsolace/Insta-Toolbox/releases/latest/download/insta-toolbox.user.js)**
 

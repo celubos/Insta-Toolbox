@@ -1,6 +1,6 @@
 # GitHub repository settings
 
-Release candidate: **4.5.0**. Latest published stable release: **4.3.1**.
+Current version: **4.5.0**. Held extension, desktop and web packages: **4.3.1**.
 
 Keep the stable userscript URL on the published release channel. Link the pinned development build and its validation separately; do not label an unreleased candidate as the latest stable release.
 
@@ -27,7 +27,7 @@ Keep the stable userscript URL on the published release channel. Link the pinned
 
 ## Version information
 
-[4.5.0 release candidate, checksum and validation](DEVELOPMENT_RELEASE.md).
+[4.5.0 changes, checksum and validation](DEVELOPMENT_RELEASE.md).
 
 ## Stable userscript
 

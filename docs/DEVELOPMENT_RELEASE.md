@@ -1,14 +1,13 @@
-# Insta Toolbox 4.5.0 release candidate
+# Insta Toolbox 4.5.0
 
-Version **4.5.0** is the release candidate. The latest published stable
-release remains [4.3.1](https://github.com/celubos/Insta-Toolbox/releases/tag/v4.3.1).
-The development userscript is available for testing; it has not been promoted
-to the stable release channel.
+Version **4.5.0** follows 4.3.1 on the Tampermonkey release channel.
+Extension, desktop and web/PWA packages stay on hold at
+[4.3.1](https://github.com/celubos/Insta-Toolbox/releases/tag/v4.3.1).
 
 ## Install or update
 
 1. Install [Tampermonkey](https://www.tampermonkey.net/). In Chrome 138 or newer, enable **Allow User Scripts** in Tampermonkey's extension details; older Chrome and Edge use Developer Mode.
-2. Open the [commit-pinned 4.5.0 userscript](https://raw.githubusercontent.com/celubos/Insta-Toolbox/638789f22bbd787a92f37984ae2abf1b9420b88a/userscripts/insta-toolbox.user.js). Choose **Install**, or **Update** if Insta Toolbox is already installed.
+2. Open the [release install link](https://github.com/slaveofsolace/Insta-Toolbox/releases/latest/download/insta-toolbox.user.js) or the [commit-pinned 4.5.0 userscript](https://raw.githubusercontent.com/celubos/Insta-Toolbox/638789f22bbd787a92f37984ae2abf1b9420b88a/userscripts/insta-toolbox.user.js). Choose **Install**, or **Update** if Insta Toolbox is already installed.
 3. Reload Instagram and open **IT**. Keep one Insta Toolbox copy enabled.
 
 The pinned file is **876,308 bytes**, SHA-256:
@@ -51,10 +50,13 @@ the repair was written against those observed routes. Seven live-derived
 regressions fail on 4.3.10 and pass on 4.5.0. Full local and CI results for
 the exact candidate are recorded in its pull request.
 
-Installed 4.5.0 activation and live acceptance are in progress. Earlier live
+Installed 4.5.0 passed live checks of Mutual Checker (own account from the
+profile and elsewhere, other accounts, Stop), manual capture, Insights,
+Presence review and an approved All-messages Unsend; see the
+[acceptance record](acceptance/4.5.0.md). Earlier live
 results retain their original versions: the full 377-activity timed Presence
 run belongs to 4.3.8; list scans, Presence controls, history retention, sampled
 Insights and one approved message removal belong to 4.3.9.
 
-Official publication remains held until the required live checks and protected
-current-main artifact promotion pass.
+Publication promotes the exact successful main CI artifacts through the
+protected release workflow.
