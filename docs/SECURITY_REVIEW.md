@@ -105,7 +105,7 @@ Provenance-verified partial comparisons remain visible and downloadable with unc
 
 ## Local app and web delivery
 
-The PWA service worker uses network-first same-origin GET handling, caches only successful same-origin responses, bypasses the HTTP cache for service-worker update checks, and removes earlier cache generations. Version 4.1.4 used `insta-toolbox-v414`; the 4.3.11 preparation uses `insta-toolbox-v4311`. Persisted workspace and settings keys are unchanged. Public web/PWA delivery remains on hold at 4.3.1.
+The PWA service worker uses network-first same-origin GET handling, caches only successful same-origin responses, bypasses the HTTP cache for service-worker update checks, and removes earlier cache generations. Version 4.1.4 used `insta-toolbox-v414`; the 4.5.0 preparation uses `insta-toolbox-v450`. Persisted workspace and settings keys are unchanged. Public web/PWA delivery remains on hold at 4.3.1.
 
 The loopback development server accepts only loopback Host headers and serves an explicit asset allowlist. Repository metadata, tests, documentation, and Git internals are not served. Framing protection is sent as HTTP headers because `frame-ancestors` is ineffective in a meta policy.
 
@@ -123,7 +123,7 @@ When release credentials are available, remove the library-validation exception,
 
 Earlier reviews fixed structural profile-control binding, pre-existing-dialog confusion, missing extension reservations, malformed migration fields, discard races, weak message identity, unbound or noninteractive DM controls, synthetic confirmation acceptance, and incomplete oldest-edge traversal. Regression fixtures cover these boundaries.
 
-Historical releases retain their own acceptance records. They are not evidence that the current 4.3.10 preparation passed authenticated acceptance; the same applies to 4.3.11. Current authenticated compatibility, human screen-reader use, Windows publisher trust, Apple notarization, and physical Intel Mac behavior require fresh acceptance.
+Historical releases retain their own acceptance records. They are not evidence that the current 4.3.10 preparation passed authenticated acceptance; the same applies to 4.5.0. Current authenticated compatibility, human screen-reader use, Windows publisher trust, Apple notarization, and physical Intel Mac behavior require fresh acceptance.
 
 ## Dependencies and supply chain
 
@@ -288,7 +288,7 @@ See [4.3.9 acceptance](./acceptance/4.3.9.md).
 
 The application is MIT licensed. Source provenance and third-party licenses are recorded in `THIRD_PARTY_NOTICES.md`. Release archives include the license and notices.
 
-## 4.3.11 own-account binding boundary
+## 4.5.0 own-account binding boundary
 
 Instagram's two lookup GETs return HTTP 404 for every session. When both are
 retired, the checker binds a numeric ID only for the signed-in account's own
@@ -302,7 +302,7 @@ partial. Missing from a partial list is never treated as a non-mutual.
 
 ## 4.3.10 discovery recovery boundary
 
-Withdrawn in 4.3.11: inbox, DM, reaction and Ghost sources are restored to
+Withdrawn in 4.5.0: inbox, DM, reaction and Ghost sources are restored to
 4.3.9 and no discovery observations are written to tab storage.
 
 Only bounded thread observations and sanitized historical labels are written

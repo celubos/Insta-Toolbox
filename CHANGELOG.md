@@ -2,7 +2,7 @@
 
 This project uses [Semantic Versioning](https://semver.org/).
 
-## 4.3.11 - 2026-11-27 (development)
+## 4.5.0 - 2026-11-27
 
 - Repair Mutual Checker after Instagram retired both account lookups it used.
   Live on 2026-11-27 they returned HTTP 404 for signed-in and signed-out tabs,
@@ -15,7 +15,11 @@ This project uses [Semantic Versioning](https://semver.org/).
   results stay partial and ask for a rerun from the profile.
 - Report a tab with no signed-in account instead of an account change. Other
   accounts keep the native-profile path. No grants, endpoints or storage change.
-- Restore DM Unsend, reaction cleanup and Ghost Mode to the exact 4.3.9 code,
+- Recognize sent messages in Instagram's current DM layout. Message lanes now
+  compute `flow-end` / `flow-start`; the ownership check accepted only
+  `flex-end` / `flex-start`, so Unsend found none of the user's messages and
+  scrolled up hunting for one before its first removal.
+- Restore DM Unsend, reaction cleanup and Ghost Mode to the 4.3.9 code,
   the last version with a verified live removal. Withdraw the 4.3.10
   discovery-recovery checkpoint and its tab-storage write.
 

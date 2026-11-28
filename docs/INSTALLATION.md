@@ -4,7 +4,7 @@
 
 The latest published stable release is **4.3.1**. The install steps below use the stable channel.
 
-For the latest development build, [install the 4.3.11 test userscript](https://raw.githubusercontent.com/celubos/Insta-Toolbox/a867987fff8e96ba08b6edc5da7a99ba4c6f5caa/userscripts/insta-toolbox.user.js). It is a development candidate; installed live acceptance is pending. See [4.3.11 changes, checksum and validation](DEVELOPMENT_RELEASE.md) before choosing it. If Insta Toolbox is already installed, Tampermonkey offers **Update** instead of **Install**. Reload Instagram afterward.
+For the latest development build, [install the 4.5.0 release candidate](https://raw.githubusercontent.com/celubos/Insta-Toolbox/a867987fff8e96ba08b6edc5da7a99ba4c6f5caa/userscripts/insta-toolbox.user.js). It is a development candidate; installed live acceptance is pending. See [4.5.0 changes, checksum and validation](DEVELOPMENT_RELEASE.md) before choosing it. If Insta Toolbox is already installed, Tampermonkey offers **Update** instead of **Install**. Reload Instagram afterward.
 
 **Tampermonkey is the active update channel.** Chrome extension, Windows/macOS desktop and web/PWA packages are **On hold after 4.3.1**. Existing downloads and local data remain available.
 
@@ -180,12 +180,13 @@ Read the reason shown in the active tool. Challenge, rate-limit, wrong-thread, c
 
 ## Acceptance and support
 
-Version 4.3.11 checks your own followers and following again after Instagram
+Version 4.5.0 checks your own followers and following again after Instagram
 retired the account lookups Mutual Checker used. Run it from your profile to
 confirm the totals. Other accounts are read from their open profile.
 
 DM Unsend and Ghost Mode run the 4.3.9 code. The 4.3.10 Restore found
-conversations change was withdrawn in 4.3.11. No new permissions are requested.
+conversations change was withdrawn in 4.5.0. Unsend recognizes your
+messages in Instagram's current message layout. No new permissions are requested.
 
 Installed 4.3.9 verified native list scans, Presence controls, history retention,
 Insights and an approved one-message Unsend. Ghost discovery lost its inventory
@@ -197,8 +198,8 @@ private history storage. The 500-entry display/export limit is not a global
 physical-storage cap. Identity, author and stable installation URLs remain
 unchanged.
 
-- [4.3.11 userscript candidate acceptance](acceptance/4.3.11.md)
-- [4.3.11 userscript compatibility](compatibility/4.3.11.md)
+- [4.5.0 acceptance](acceptance/4.5.0.md)
+- [4.5.0 compatibility](compatibility/4.5.0.md)
 - [4.3.10 userscript candidate acceptance](acceptance/4.3.10.md)
 - [4.3.10 userscript compatibility](compatibility/4.3.10.md)
 - [4.3.1 acceptance record](acceptance/4.3.1.md)
