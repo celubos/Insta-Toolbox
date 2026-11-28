@@ -2,6 +2,27 @@
 
 This project uses [Semantic Versioning](https://semver.org/).
 
+## 4.5.0 - 2026-11-27
+
+- Repair Mutual Checker after Instagram retired both account lookups it used.
+  Live on 2026-11-27 they returned HTTP 404 for signed-in and signed-out tabs,
+  while the follower list route still worked. Checks started away from the
+  subject's profile failed with "Open @account's profile" or HTTP 404.
+- Check the signed-in account's own lists through the working list route. The
+  numeric ID is bound only when Instagram's rendered viewer record, rendered
+  app identity and visible navigation agree, and is re-verified between and
+  after the lists. Totals come only from the exact open profile; otherwise
+  results stay partial and ask for a rerun from the profile.
+- Report a tab with no signed-in account instead of an account change. Other
+  accounts keep the native-profile path. No grants, endpoints or storage change.
+- Recognize sent messages in Instagram's current DM layout. Message lanes now
+  compute `flow-end` / `flow-start`; the ownership check accepted only
+  `flex-end` / `flex-start`, so Unsend found none of the user's messages and
+  scrolled up hunting for one before its first removal.
+- Restore DM Unsend, reaction cleanup and Ghost Mode to the 4.3.9 code,
+  the last version with a verified live removal. Withdraw the 4.3.10
+  discovery-recovery checkpoint and its tab-storage write.
+
 ## 4.3.10 - 2026-11-10 (development)
 
 - Preserve bounded conversation observations in private tab storage before

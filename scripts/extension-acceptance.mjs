@@ -203,6 +203,29 @@ async function resizeViewport(webContents, viewport) {
   );
 }
 
+async function applyViewportZoom(webContents, viewport) {
+  const expected = { width: viewport.width / viewport.zoom, height: viewport.height / viewport.zoom };
+  const label = `${viewport.label}: native zoom CSS viewport`;
+  webContents.setZoomFactor(viewport.zoom);
+  try {
+    await withTimeout(waitForPageValue(
+      webContents,
+      `innerWidth === ${expected.width} && innerHeight === ${expected.height}`,
+      label,
+    ), label, 12_000);
+  } catch (error) {
+    let actual;
+    try {
+      actual = await withTimeout(webContents.executeJavaScript(
+        '({ width: innerWidth, height: innerHeight })', true,
+      ), `${label}: diagnostic dimensions`, 2_000);
+    } catch (diagnosticError) {
+      actual = { unavailable: diagnosticError.message };
+    }
+    throw new Error(`${label}: expected ${JSON.stringify(expected)}, actual ${JSON.stringify(actual)}, zoom ${webContents.getZoomFactor()}.`, { cause: error });
+  }
+}
+
 async function loadFixture(webContents, baseUrl, mode) {
   const url = `${baseUrl}/fixture.html?mode=${encodeURIComponent(mode)}&shadow=open`;
   await withTimeout(webContents.loadURL(url), `${mode}: fixture load`);
@@ -1610,7 +1633,8 @@ async function acceptUserscriptFieldSpacing(webContents, baseUrl) {
               .map(e => ({ text: e.textContent.trim(), color: getComputedStyle(e).color,
                 textFill: getComputedStyle(e).webkitTextFillColor })),
             reducedMotion: getComputedStyle(s.querySelector('.panel')).animationName,
-            liveRegions: s.querySelectorAll('[aria-live]').length };
+            liveRegions: [...s.querySelectorAll('[aria-live]')].filter(node =>
+              node.getClientRects().length && !node.closest('[hidden], [aria-hidden="true"]')).length };
         })()`, true);
         assert.ok(metrics.fields.length > 0, `${state}: no visible fields`);
         assert.ok(metrics.fields.every(field => field.gap >= 4 && field.gap <= 8.1), `${state}: label gap ${JSON.stringify(metrics)}`);
@@ -1743,7 +1767,10 @@ async function acceptUserscriptInboxPanelLayout(webContents, baseUrl) {
           summary: summary.textContent.trim(), disclosureOpen: details.open,
           sectionOptions: [...inbox.querySelector('select').options].map(option => option.textContent),
           reviewHidden: [...inbox.querySelectorAll('button')].find(button => /^Review /.test(button.textContent)).hidden,
-          liveRegions: root.querySelectorAll('[aria-live]').length,
+          // A hidden tab's status is not exposed to assistive technology.
+          // Count announced regions in this journey, retaining the one-region gate.
+          liveRegions: [...root.querySelectorAll('[aria-live]')].filter(node =>
+            node.getClientRects().length && !node.closest('[hidden], [aria-hidden="true"]')).length,
           fastControls: root.querySelectorAll('[data-role="unsend-speed"], [data-cleanup-preference="speed"]').length,
           fastLabels: [...root.querySelectorAll('[data-panel="messages"] button, [data-panel="messages"] label, [data-panel="messages"] option')]
             .filter(node => /\\bFast\\b/.test(node.textContent)).map(node => node.textContent),
@@ -1999,7 +2026,7 @@ async function acceptToolboxLayout(webContents, baseUrl) {
         media: 'screen',
         features: [{ name: 'prefers-color-scheme', value: viewport.theme }],
       }), `${viewport.label}: emulate theme`);
-      webContents.setZoomFactor(viewport.zoom);
+      await withTimeout(applyViewportZoom(webContents, viewport), `${viewport.label}: apply native zoom`);
       await withTimeout(webContents.executeJavaScript(`new Promise((resolve) => {
         requestAnimationFrame(() => requestAnimationFrame(() => {
           if (${Number.isFinite(viewport.panelWidth)}) {
@@ -2110,7 +2137,7 @@ async function acceptToolboxLayout(webContents, baseUrl) {
         media: 'screen',
         features: [{ name: 'prefers-color-scheme', value: viewport.theme }],
       }), `${viewport.label}: emulate theme`);
-      webContents.setZoomFactor(viewport.zoom);
+      await withTimeout(applyViewportZoom(webContents, viewport), `${viewport.label}: apply native zoom`);
       await withTimeout(webContents.executeJavaScript(`new Promise((resolve) => {
         const host = document.querySelector('#insta-toolbox-userscript-root');
         const shadow = host.shadowRoot;
@@ -2245,7 +2272,8 @@ async function acceptUserscriptToolbox(webContents, baseUrl) {
       ],
       header: shadow.querySelector('.header h1')?.textContent,
       credit: shadow.querySelector('.footer a')?.textContent,
-      liveRegions: shadow.querySelectorAll('[aria-live]').length,
+      liveRegions: [...shadow.querySelectorAll('[aria-live]')].filter(node =>
+        node.getClientRects().length && !node.closest('[hidden], [aria-hidden="true"]')).length,
       hasGlobalUnlock: Boolean(shadow.querySelector('[data-role="live-actions"]')),
       liveControls: [
         Boolean(shadow.querySelector('[data-presence-start]')),

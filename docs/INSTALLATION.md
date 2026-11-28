@@ -2,9 +2,9 @@
 
 ## Choose a version
 
-The latest published stable release is **4.3.1**. The install steps below use the stable channel.
+The current version is **4.5.0**. The install steps below use the release channel, which always serves the latest published release.
 
-For the latest development build, [install the 4.3.10 test userscript](https://raw.githubusercontent.com/celubos/Insta-Toolbox/80e0d56c56b9dfc158327576ed9163c75c85e22b/userscripts/insta-toolbox.user.js). It is a development candidate with passing automated checks; remaining live acceptance is pending. See [4.3.10 changes, checksum and validation](DEVELOPMENT_RELEASE.md) before choosing it. If Insta Toolbox is already installed, Tampermonkey offers **Update** instead of **Install**. Reload Instagram afterward.
+The exact tested 4.5.0 file is also available as a [commit-pinned download](https://raw.githubusercontent.com/celubos/Insta-Toolbox/638789f22bbd787a92f37984ae2abf1b9420b88a/userscripts/insta-toolbox.user.js). See [4.5.0 changes, checksum and validation](DEVELOPMENT_RELEASE.md). If Insta Toolbox is already installed, Tampermonkey offers **Update** instead of **Install**. Reload Instagram afterward.
 
 **Tampermonkey is the active update channel.** Chrome extension, Windows/macOS desktop and web/PWA packages are **On hold after 4.3.1**. Existing downloads and local data remain available.
 
@@ -17,6 +17,11 @@ Tampermonkey is the quickest way to put the toolbox on Instagram. Desktop and we
 1. Install [Tampermonkey](https://www.tampermonkey.net/).
 
 2. In Chrome, open `chrome://extensions/?id=dhdgffkkebhmkfjojejmpbldmpobfkfo`. Turn on **Allow User Scripts**.
+
+   On Chrome 138 and newer, this is a separate permission from the script's
+   enabled switch. An installed, enabled script cannot run until this permission
+   is on. See [Tampermonkey's instructions](https://www.tampermonkey.net/faq.php?locale=en&q=Q209)
+   and [Chrome's documentation](https://developer.chrome.com/docs/extensions/reference/api/userScripts#chrome_versions_138_and_newer_allow_user_scripts_toggle).
 
    ![Tampermonkey details page showing the Allow User Scripts switch](media/install/01-allow-user-scripts.png)
 
@@ -175,6 +180,28 @@ Read the reason shown in the active tool. Challenge, rate-limit, wrong-thread, c
 
 ## Acceptance and support
 
+Version 4.5.0 checks your own followers and following again after Instagram
+retired the account lookups Mutual Checker used. Run it from your profile to
+confirm the totals. Other accounts are read from their open profile.
+
+DM Unsend and Ghost Mode run the 4.3.9 code. The 4.3.10 Restore found
+conversations change was withdrawn in 4.5.0. Unsend recognizes your
+messages in Instagram's current message layout. No new permissions are requested.
+
+Installed 4.3.9 verified native list scans, Presence controls, history retention,
+Insights and an approved one-message Unsend. Ghost discovery lost its inventory
+on full-page navigation. Installed recovery and Ghost execution still require
+acceptance; official publication and protected current-main promotion remain held.
+
+The four manager-storage grants introduced in 4.3.8 access this userscript's
+private history storage. The 500-entry display/export limit is not a global
+physical-storage cap. Identity, author and stable installation URLs remain
+unchanged.
+
+- [4.5.0 acceptance](acceptance/4.5.0.md)
+- [4.5.0 compatibility](compatibility/4.5.0.md)
+- [4.3.10 userscript candidate acceptance](acceptance/4.3.10.md)
+- [4.3.10 userscript compatibility](compatibility/4.3.10.md)
 - [4.3.1 acceptance record](acceptance/4.3.1.md)
 - [4.3.1 compatibility](compatibility/4.3.1.md)
 - [Operator acceptance guide](OPERATOR_ACCEPTANCE.md)

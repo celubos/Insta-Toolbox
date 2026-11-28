@@ -87,6 +87,47 @@ test('native outgoing message group is recognized beside a timestamp heading', (
   assert.equal(proof.sentByCurrentUser(row, view), false);
 });
 
+// Live 2026-11-27 (Chrome, signed-in thread): Instagram's message lanes
+// computed justify-content `flow-end` for all four of the viewer's messages and
+// `flow-start` for all three received ones. 4.3.x only accepted flex-end /
+// flex-start, so no message counted as the viewer's: Check conversation found
+// none and an All-messages Unsend scrolled up hunting for one before starting.
+test('current Instagram flow-end / flow-start lanes keep exact message ownership', () => {
+  for (const [ownValue, receivedValue] of [['flow-end', 'flow-start'], ['end', 'start']]) {
+    const { Element, root, proof, view } = fixture();
+    const build = (justifyContent) => {
+      const actions = new Element('div', { role: 'group', 'aria-label': 'Message actions' },
+        [new Element('button', { text: 'Options' })]);
+      const lane = new Element('div', {}, [new Element('span', { dir: 'auto', text: 'Disposable message' }), actions],
+        { display: 'flex', flexDirection: 'row', justifyContent });
+      const group = new Element('div', { role: 'group' }, [lane]);
+      return new Element('div', {}, [group]);
+    };
+    const own = build(ownValue);
+    const received = build(receivedValue);
+    root.append(own, received);
+    assert.equal(proof.sentByCurrentUser(own, view), true, `${ownValue} lane is the viewer's`);
+    assert.equal(proof.sentByCurrentUser(received, view), false, `${receivedValue} lane is received`);
+  }
+  const { Element, root, proof, view } = fixture();
+  // A received flow-start lane still wins over right-aligned nested controls.
+  const actions = new Element('div', { role: 'group', 'aria-label': 'Message actions' }, [new Element('button')]);
+  const controls = new Element('div', {}, [new Element('span', { dir: 'auto', text: 'Reaction' }), actions],
+    { display: 'flex', flexDirection: 'row', justifyContent: 'flow-end' });
+  const receivedLane = new Element('div', {}, [new Element('span', { dir: 'auto', text: 'Received message' }), controls],
+    { display: 'flex', flexDirection: 'row', justifyContent: 'flow-start' });
+  const group = new Element('div', { role: 'group' }, [receivedLane]);
+  root.append(group);
+  assert.equal(proof.sentByCurrentUser(group, view), false);
+  // Explicit received markers and unknown values remain neutral or negative.
+  const unknown = new Element('div', {}, [new Element('div', { role: 'group' }, [new Element('div', {}, [
+    new Element('span', { dir: 'auto', text: 'Disposable' }),
+    new Element('div', { role: 'group', 'aria-label': 'Message actions' }, [new Element('button')]),
+  ], { display: 'flex', flexDirection: 'row', justifyContent: 'space-between' })])]);
+  root.append(unknown);
+  assert.equal(proof.sentByCurrentUser(unknown, view), false);
+});
+
 test('multiple native message groups cannot provide combined ownership proof', () => {
   const { Element, root, proof, view } = fixture();
   const makeGroup = () => new Element('div', { role: 'group' }, [

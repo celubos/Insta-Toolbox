@@ -8,7 +8,7 @@ const ACTION_ORDER = Object.freeze([
 
 export const PRESENCE_ACTION_LABELS = Object.freeze({
   viewStories: 'View stories',
-  reactStories: 'React to stories',
+  reactStories: 'Like stories',
   likePosts: 'Like posts',
   followPeople: 'Follow people',
   acceptRequests: 'Accept incoming requests',
@@ -90,6 +90,7 @@ export function createPresenceSession({
 
   let controller = null;
   let pauseGate = null;
+  let reviewDeadline = 0;
   let runSequence = 0;
   let state = Object.freeze({
     status: 'idle', reason: null, accountId: null, current: null,
@@ -97,11 +98,14 @@ export function createPresenceSession({
     mode: 'session', runId: null, enabledActions: Object.freeze([]),
     results: Object.freeze([]), canPause: false,
     canResume: false, canStop: false,
+    startedAt: null, expiresAt: null, nextActionAt: null, waitingReason: null,
   });
 
   const publish = (patch = {}) => {
     const nextResults = patch.results || state.results;
-    state = Object.freeze({ ...state, ...patch, results: Object.freeze([...nextResults].slice(0, 50)) });
+    const clearWait = patch.status && !['waiting', 'quiet', 'paused'].includes(patch.status)
+      ? { nextActionAt: null, waitingReason: null } : {};
+    state = Object.freeze({ ...state, ...clearWait, ...patch, results: Object.freeze([...nextResults].slice(0, 50)) });
     onUpdate(snapshot());
     return state;
   };
@@ -158,7 +162,7 @@ export function createPresenceSession({
   }
 
   async function start(review) {
-    if (active()) fail('presence-session-active');
+    if (controller) fail('presence-session-active');
     if (!review || !reviews.has(review) || consumed.has(review)) fail('presence-review-required');
     if (review.expiresAt <= now()) fail('presence-review-expired');
     if (!locks) fail('presence-account-lock-unavailable');
@@ -170,8 +174,14 @@ export function createPresenceSession({
       if (!lock || lock.name !== lockName || lock.mode !== 'exclusive') fail('presence-account-busy');
       context(review.accountId);
       consumed.add(review);
-      controller = new AbortController();
-      const { signal } = controller;
+      const runController = new AbortController();
+      controller = runController;
+      reviewDeadline = review.expiresAt;
+      const { signal } = runController;
+      // A paused run must release its account lane at the reviewed deadline
+      // without requiring a later Resume or Stop click.
+      const expiryTimer = setTimeout(() => runController.abort('presence-session-expired'),
+        Math.max(0, review.expiresAt - now()));
       const results = [];
       const seen = new Set();
       const unavailableUntil = new Map();
@@ -205,10 +215,12 @@ export function createPresenceSession({
         completed: 0, skipped: 0, uncertain: 0, maxActions: review.options.maxActions,
         mode: review.options.mode, runId, enabledActions: review.enabledActions,
         results, canPause: true, canResume: false, canStop: true,
+        startedAt: now(), expiresAt: review.expiresAt,
       });
       try {
         while (!signal.aborted && !reachedLimit() && now() < review.expiresAt) {
           await awaitResume(signal);
+          if (signal.aborted || now() >= review.expiresAt) break;
           context(review.accountId);
           const action = itinerary[cursor % itinerary.length];
           cursor += 1;
@@ -218,7 +230,8 @@ export function createPresenceSession({
             if (review.enabledActions.every(value => (unavailableUntil.get(value) || 0) > now())) {
               if (review.options.mode !== 'live') break;
               const next = Math.min(...review.enabledActions.map(value => unavailableUntil.get(value)));
-              publish({ status: 'searching', current: null });
+              publish({ status: 'waiting', current: null, waitingReason: 'no-activities',
+                nextActionAt: Math.min(next, review.expiresAt) });
               await waitWithinReview(next - now());
             }
             continue;
@@ -297,26 +310,31 @@ export function createPresenceSession({
             && review.options.scheduledBreaks
             && verifiedInBurst >= review.options.liveBurstActions) {
             verifiedInBurst = 0;
-            publish({ status: 'quiet', current: null });
+            publish({ status: 'quiet', current: null, waitingReason: 'scheduled-break',
+              nextActionAt: Math.min(now() + review.options.quietMinutes * 60_000, review.expiresAt) });
             await waitWithinReview(review.options.quietMinutes * 60_000);
             await awaitResume(signal);
             if (!signal.aborted) publish({ status: 'running' });
             continue;
           }
           const delay = Math.round(minDelayMs + random() * (maxDelayMs - minDelayMs));
-          publish({ status: 'waiting', current: null });
+          publish({ status: 'waiting', current: null, waitingReason: 'spacing',
+            nextActionAt: Math.min(now() + delay, review.expiresAt) });
           await waitWithinReview(delay);
           if (!signal.aborted && state.status !== 'paused') publish({ status: 'running' });
         }
         if (signal.aborted) throw new DOMException('Stopped', 'AbortError');
         const expired = now() >= review.expiresAt;
         publish({ status: expired ? 'expired' : 'completed',
-          reason: expired ? 'presence-session-expired' : null, current: null,
+          reason: expired ? 'presence-session-expired'
+            : reachedLimit() ? 'presence-action-limit-reached' : 'presence-no-activities', current: null,
           canPause: false, canResume: false, canStop: false });
         return snapshot();
       } catch (error) {
         if (signal.aborted || error?.name === 'AbortError') {
-          publish({ status: 'stopped', reason: 'presence-session-stopped', current: null,
+          const expired = signal.reason === 'presence-session-expired';
+          publish({ status: expired ? 'expired' : 'stopped',
+            reason: expired ? 'presence-session-expired' : 'presence-session-stopped', current: null,
             canPause: false, canResume: false, canStop: false });
           return snapshot();
         }
@@ -324,7 +342,9 @@ export function createPresenceSession({
           canPause: false, canResume: false, canStop: false });
         return snapshot();
       } finally {
+        clearTimeout(expiryTimer);
         controller = null;
+        reviewDeadline = 0;
         pauseGate = null;
       }
     });
@@ -341,6 +361,11 @@ export function createPresenceSession({
     },
     resume() {
       if (!controller || state.status !== 'paused') return false;
+      if (now() >= reviewDeadline) {
+        controller.abort('presence-session-expired');
+        pauseGate?.();
+        return false;
+      }
       publish({ status: 'running', canPause: true, canResume: false, canStop: true });
       pauseGate?.();
       return true;

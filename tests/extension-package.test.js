@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 import { canonicalizeExtensionEntry } from '../scripts/canonical-extension-entry.mjs';
+import { validateInstagramControlPaths } from '../scripts/validate-instagram-control-paths.mjs';
 
 const manifest = JSON.parse(await readFile(
   new URL('../extension/manifest.json', import.meta.url),
@@ -139,11 +140,11 @@ test('v3 pairing and bridge updates use only the Insta Toolbox storage namespace
   assert.doesNotMatch(instagramOverlay, /['"]bridgePairings['"]/);
 });
 
-test('Instagram content script isolates its only page-control call behind the reviewed live driver', () => {
+test('Instagram content script separates reviewed live actions from native list navigation', () => {
   assert.match(instagramContent, /insta-toolbox-inspect-profile/);
   assert.match(instagramContent, /insta-toolbox-capture-visible-accounts/);
   assert.match(instagramContent, /replace\(\/\^\\\/\+\/, ''\)/);
-  assert.equal((instagramContent.match(/\.click\s*\(/g) || []).length, 1);
+  assert.deepEqual(validateInstagramControlPaths(instagramContent), { liveCalls: 1, nativeReadCalls: 2 });
   assert.match(instagramContent, /function activateLiveControl\(control\)[\s\S]*?control\.click\(\)/);
   assert.match(instagramContent, /profileResolutions\.delete\(token\)/);
   assert.match(instagramContent, /globalThis\.__instaToolboxActionLabels/);

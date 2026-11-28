@@ -23,7 +23,7 @@ function fixture(options = {}) {
   const state = { ledger: { day: 'fixture-day', actions: 4, unsends: 8, reactions: 2 },
     cleanupPreferences: { removeOwnReactions: true } };
   const context = vm.createContext({
-    fixtureInboxPanel: options.inboxPanel || null,
+    fixtureInboxPanel: options.inboxPanel || null, manualScanController: null,
     AbortController, Date: class extends Date { static now() { return clock; } },
     DM_PLAN_CAPABILITY_MS: 900_000, state,
     dmRunner: {

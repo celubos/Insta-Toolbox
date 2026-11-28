@@ -117,28 +117,41 @@ function inspector() {
 }
 
 test('actual checker retains raw IDs, omits rounded numeric IDs, and keeps partial results unchanged', async () => {
-  for (const ownerId of ['777', 9007199254740992]) {
-    const rows = [{ username: 'safe', pk: 123 }, { username: 'large', id: '12345678901234567890' },
-      { username: 'rounded', pk: 9007199254740992 }, { username: 'legacy' }];
-    const result = await inspector().fetchFollowerComparison({
-      username: 'fixture.owner', sleepImpl: async () => {},
-      fetchImpl: async (input) => {
-        const path = new URL(input).pathname;
-        const data = path.includes('topsearch') ? { users: [{ user: { pk: ownerId, username: 'fixture.owner' } }] }
-          : path.includes('web_profile_info') ? { data: { user: { id: ownerId, username: 'fixture.owner', edge_follow: { count: 4 }, edge_followed_by: { count: 5 } } } }
-            : { users: rows };
-        return { ok: true, status: 200, json: async () => data };
-      },
-    });
-    assert.equal(result.userId, String(ownerId));
-    assert.equal(result.subjectInstagramId, typeof ownerId === 'string' ? ownerId : undefined);
-    const found = new Map(result.followers.map((row) => [row.username, row]));
-    assert.equal(found.get('safe').instagramId, '123');
-    assert.equal(found.get('large').instagramId, '12345678901234567890');
-    assert.equal(Object.hasOwn(found.get('rounded'), 'instagramId'), false);
-    assert.equal(Object.hasOwn(found.get('legacy'), 'instagramId'), false);
-    assert.equal(result.complete.followers, false);
-    assert.equal(result.complete.following, true);
-    assert.equal(result.reasons.followers, 'count-mismatch');
-  }
+  const ownerId = '777';
+  const rows = [{ username: 'safe', pk: 123 }, { username: 'large', id: '12345678901234567890' },
+    { username: 'rounded', pk: 9007199254740992 }, { username: 'legacy' }];
+  const result = await inspector().fetchFollowerComparison({
+    username: 'fixture.owner', sleepImpl: async () => {},
+    fetchImpl: async (input) => {
+      const path = new URL(input).pathname;
+      const data = path.includes('topsearch') ? { users: [{ user: { pk: ownerId, username: 'fixture.owner' } }] }
+        : path.includes('web_profile_info') ? { data: { user: { id: ownerId, username: 'fixture.owner', edge_follow: { count: 4 }, edge_followed_by: { count: 5 } } } }
+          : { users: rows };
+      return { ok: true, status: 200, json: async () => data };
+    },
+  });
+  assert.equal(result.userId, ownerId);
+  assert.equal(result.subjectInstagramId, ownerId);
+  const found = new Map(result.followers.map((row) => [row.username, row]));
+  assert.equal(found.get('safe').instagramId, '123');
+  assert.equal(found.get('large').instagramId, '12345678901234567890');
+  assert.equal(Object.hasOwn(found.get('rounded'), 'instagramId'), false);
+  assert.equal(Object.hasOwn(found.get('legacy'), 'instagramId'), false);
+  assert.equal(result.complete.followers, false);
+  assert.equal(result.complete.following, true);
+  assert.equal(result.reasons.followers, 'count-mismatch');
+});
+
+test('actual checker rejects an unsafe numeric subject before relationship requests', async () => {
+  const paths = [];
+  await assert.rejects(inspector().fetchFollowerComparison({
+    username: 'fixture.owner', sleepImpl: async () => {}, fetchImpl: async input => {
+      const path = new URL(input).pathname; paths.push(path);
+      return { ok: true, status: 200, json: async () => ({
+        users: [{ user: { pk: 9007199254740992, username: 'fixture.owner' } }],
+      }) };
+    },
+  }), error => error.code === 'username-not-found');
+  assert.deepEqual(paths, ['/api/v1/web/search/topsearch/']);
+  assert.equal(paths.some(path => path.includes('/friendships/')), false);
 });

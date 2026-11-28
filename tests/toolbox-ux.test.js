@@ -394,7 +394,6 @@ test('Presence keeps a local activity log with an optional separate window', () 
   assert.match(presencePanel, /Download log/);
   assert.match(presencePanel, /Clear log/);
   assert.match(presencePanel, /window\?\.open\?\.\('', 'insta-toolbox-presence-log'/);
-  assert.match(presencePanel, /Stored only in this browser\./);
   assert.doesNotMatch(presencePanel, /messageBody|document\.cookie|sessionToken/);
 });
 
@@ -476,7 +475,7 @@ test('finite run confirmation replaces global unlock controls and phrases', () =
   assert.match(confirmation, /immutableCopy\(request\.binding \|\| \{\}\)/);
   assert.doesNotMatch(shell, /globalThis\.confirm|window\.confirm/);
   assert.match(shell, /approvedTargets: \[\.\.\.queue\]/);
-  assert.match(shell, /capabilityExpiresAt: Date\.now\(\) \+ RUN_CAPABILITY_MS/);
+  assert.match(shell, /capabilityExpiresAt: Math\.min\(Date\.now\(\) \+ RUN_CAPABILITY_MS,/);
   assert.doesNotMatch(labels, /currentEligibleCount !== plan\.eligibleCount/);
   assert.match(labels, /\[2, PLAN_VERSION\]\.includes\(version\)/);
   assert.doesNotMatch(labels, /liveAuthority\?\.enable|ARM UNSEND/);
@@ -670,6 +669,7 @@ test('failed manual scans replace the visible scanning message', async () => {
   const select = { value: '' };
   const scanInto = loadShellFunction('scanInto', {
     inboxPanel: null,
+    assertManualScanAvailable() {},
     actions: { 'scan-list': async () => outcome },
     query(selector) {
       if (selector === '[data-role="list-type"]') return select;

@@ -28,13 +28,14 @@
     const confirmButton = query('confirm-accept');
     let pending = null;
 
-    function renderList(role, values) {
+    function renderList(role, values, itemLimit = 250) {
       const list = query(role);
       if (!list) return;
+      const limit = Number.isInteger(itemLimit) && itemLimit > 0 ? Math.min(itemLimit, 1_000) : 250;
       const items = (Array.isArray(values) ? values : [])
         .map((value) => cleanText(value))
         .filter(Boolean)
-        .slice(0, 250);
+        .slice(0, limit);
       list.replaceChildren(...items.map((value) => {
         const item = root.ownerDocument.createElement('li');
         item.textContent = value;
@@ -95,7 +96,7 @@
       if (detail) detail.textContent = cleanText(request.detail, 'This cannot be undone.');
       confirmButton.textContent = cleanText(request.confirmLabel, 'Confirm');
       renderFacts(request.facts);
-      renderList('confirm-items', request.items);
+      renderList('confirm-items', request.items, request.itemLimit);
 
       const binding = immutableCopy(request.binding || {});
       return new Promise((resolve) => {

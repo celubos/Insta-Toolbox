@@ -100,9 +100,41 @@
         },
       });
     }
-    globalThis.GM_setValue = (key, value) => {
-      globalThis.fixtureGmStore[key] = structuredClone(value);
+    // Ordinary browser-journey storage simulation. Promise methods acknowledge
+    // this fake store operation; stale manager caches are tested separately.
+    const fixtureGmListeners = new Map();
+    let fixtureGmListenerId = 0;
+    const fixtureGmChanged = (key, previous, next) => {
+      const before = structuredClone(previous), after = structuredClone(next);
+      for (const [id, listener] of fixtureGmListeners) if (listener.key === key) {
+        queueMicrotask(() => {
+          if (fixtureGmListeners.get(id) === listener) {
+            listener.callback(key, structuredClone(before), structuredClone(after), false);
+          }
+        });
+      }
     };
+    globalThis.GM_setValue = (key, value) => {
+      const previous = GM_getValue(key);
+      globalThis.fixtureGmStore[key] = structuredClone(value);
+      fixtureGmChanged(key, previous, value);
+    };
+    globalThis.GM_addValueChangeListener = (key, callback) => {
+      const id = ++fixtureGmListenerId;
+      fixtureGmListeners.set(id, { key, callback });
+      return id;
+    };
+    globalThis.GM_removeValueChangeListener = id => fixtureGmListeners.delete(id);
+    globalThis.GM = Object.freeze({
+      getValue: async (key, fallback) => GM_getValue(key, fallback),
+      setValue: async (key, value) => { GM_setValue(key, value); },
+      listValues: async () => Object.keys(globalThis.fixtureGmStore),
+      deleteValue: async key => {
+        const previous = GM_getValue(key);
+        delete globalThis.fixtureGmStore[key];
+        fixtureGmChanged(key, previous, undefined);
+      },
+    });
     globalThis.fixtureManagerTab = partialRunFixture ? {
       instaToolboxCheckerDraftV1: {
         schemaVersion: 6,

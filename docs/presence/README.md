@@ -7,7 +7,7 @@ Presence runs a small, reviewed Instagram session from the userscript.
 The current userscript exposes five activities:
 
 - View stories
-- React to stories
+- Like stories (the story heart control)
 - Like posts
 - Follow on Explore
 - Accept incoming requests
@@ -18,6 +18,16 @@ continue until that window ends or Stop. Scheduled breaks are optional and off
 by default. One confirmation names the signed-in
 account and exact choices. Pause, Resume, and Stop remain available while the
 session runs.
+
+The purpose is to reduce repeated navigation for activities you explicitly
+choose. **Live like me does not learn your tastes or imitate your past behavior.**
+Explore follows use the loaded recommendations; the separate growth review lets
+you choose exact candidates. Keep the Instagram tab open and loaded.
+
+While running, Presence shows verified progress, skipped actions, the reviewed
+end time, and the next check or scheduled restart. A session with no eligible
+targets says so instead of suggesting its action goal was reached. Paused runs
+still expire and release their account lane at the reviewed deadline.
 
 Tampermonkey is the primary surface. Deterministic browser fixtures are separate
 from current authenticated Instagram compatibility; see the
@@ -58,9 +68,14 @@ Presence processes one exact target at a time. Before each click it checks:
 
 After each click it requires a matching Instagram state change. An uncertain
 result stops the session and is not retried. Private-profile follows may finish
-as **Requested** instead of **Following**. Story reactions automatically include
+as **Requested** instead of **Following**. Story likes automatically include
 story viewing. A new story starts by opening one exact visible profile and then
 its visible story control; Presence does not jump to a discovered story URL.
+
+Stop prevents another action. A like, follow, or request acceptance already sent
+gets a bounded read-only outcome check: proven success stays in the log; missing
+proof remains uncertain and is not retried. An account change cannot prove a
+success for the original account.
 
 The current adapters use rendered Instagram controls. They do not call private
 endpoints, collect credentials, bypass restrictions, spoof the browser, or run

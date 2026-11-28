@@ -4,7 +4,7 @@
 
 Tampermonkey is the active update channel. All other packages are **On hold
 after 4.3.1**: Chrome extension, Windows/macOS desktop and web/PWA. Preserve
-their code, local data and published downloads. Complete the existing 4.3.1
+their code, local data and published downloads. Complete the existing
 release gates; do not remove package checks or shared-engine coverage as part
 of this status change. Future feature work focuses on the userscript.
 
@@ -121,21 +121,32 @@ double-click application; verify it through HTTPS or localhost.
 ## Release promotion
 
 The `Release` workflow promotes tested artifacts; it does not rebuild them.
+Version 4.3.1 retains the complete six-file distribution. Later versions publish
+only `insta-toolbox.user.js`, its SBOM and `SHA256SUMS.txt`. Existing 4.3.1
+extension, desktop and web downloads stay available at their pinned URLs.
+All CI package and shared-engine checks remain required. Before selecting the
+public files, promotion verifies all six tested artifacts against the complete
+CI checksum manifest, including extension and web archive contents and versions.
 
-1. Merge the candidate into `main` and wait for the complete CI workflow.
-2. Record the successful CI run ID and its exact commit.
-3. Run the `Release` workflow manually with that run ID and the
+1. For a version after 4.3.1, add reviewed release notes at
+   `docs/releases/<package.version>.md`. Record current authenticated acceptance
+   separately; automated fixtures cannot establish live Instagram compatibility.
+2. Merge the candidate into `main` and wait for the complete CI workflow.
+3. Record the successful CI run ID and its exact commit.
+4. Run the `Release` workflow manually with that run ID and the
    `v<package.version>` tag.
-4. Approve the protected `release` environment after reviewing the run and
-   [acceptance record](./acceptance/4.3.1.md).
-5. Confirm that the workflow rejects a stale, non-`main`, non-push, failed, or
+5. Approve the protected `release` environment after reviewing the run and the
+   acceptance record for that version.
+6. Confirm that the workflow rejects a stale, non-`main`, pull-request, failed, or
    version-mismatched CI run.
-6. Verify every promoted file against `SHA256SUMS.txt`, then inspect the SBOM,
+7. Verify every promoted file against `SHA256SUMS.txt`, then inspect the SBOM,
    provenance attestation, tag target, and release notes.
 
 Configure the `release` environment with required reviewers. Configure GitHub
 Pages to use GitHub Actions; the Pages workflow extracts the exact successful
-`main` web artifact instead of rebuilding it.
+`main` web artifact instead of rebuilding it. Its channel gate permits only
+4.3.1; later CI web artifacts are verified without deployment while the PWA is
+on hold.
 
 Keep the repository description, homepage, and topics aligned with
 [GITHUB_METADATA.md](./GITHUB_METADATA.md).
@@ -217,8 +228,9 @@ close the tab in the middle of verification.
 - [ ] Public documentation contains no local paths, temporary notes, or credentials
 - [ ] Dependency and third-party license review completed
 - [ ] CodeQL and dependency review passed for the release commit
-- [ ] `SHA256SUMS.txt` covers the userscript, extension, web, and desktop artifacts
+- [ ] The complete CI checksum manifest covers all six tested artifacts
+- [ ] Published `SHA256SUMS.txt` covers every promoted file and its SBOM
 - [ ] SBOM and provenance attestation cover the promoted release files
-- [ ] GitHub Pages serves the exact successful `main` web artifact
+- [ ] The Pages channel gate retains the held 4.3.1 PWA
 - [ ] Secret scan completed
 - [ ] Repository metadata and issue titles are current

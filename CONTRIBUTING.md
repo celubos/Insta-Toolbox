@@ -45,7 +45,7 @@ CI actions are pinned to full commit SHAs. Dependabot proposes action and npm up
 
 The release workflow promotes artifacts from a successful `main` CI run. It must not rebuild them. A maintainer supplies the CI run ID and `v<package.version>` tag, then approves the protected `release` environment. Configure that environment with required reviewers before the first release.
 
-GitHub Pages deploys the web artifact from a successful `main` CI run. Configure Pages to use **GitHub Actions** as its source.
+GitHub Pages deploys the web artifact from a successful `main` CI run only for the held 4.3.1 PWA. Later web packages remain CI-only while that channel is on hold. Configure Pages to use **GitHub Actions** as its source.
 
 ## Code style
 

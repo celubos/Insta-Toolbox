@@ -22,7 +22,10 @@
       '--insta-toolbox-bg-raised': 'rgb(var(--ig-elevated-background, 255 255 255))',
       '--insta-toolbox-bg-sunken': 'rgb(var(--ig-secondary-background, 250 250 250))',
       '--insta-toolbox-text': 'rgb(var(--ig-primary-text, 0 0 0))',
-      '--insta-toolbox-text-muted': 'rgb(var(--ig-secondary-text, 115 115 115))',
+      // The panel can overlap dark media on a light page, or the reverse.
+      // Move Instagram's secondary text toward its primary text so the
+      // translucent default surface retains readable secondary copy.
+      '--insta-toolbox-text-muted': 'color-mix(in srgb, rgb(var(--ig-secondary-text, 115 115 115)) 80%, rgb(var(--ig-primary-text, 0 0 0)))',
       '--insta-toolbox-line': 'rgb(var(--ig-separator, 219 219 219))',
       '--insta-toolbox-accent': '#b83d67',
       '--insta-toolbox-accent-violet': '#7657d6',
@@ -31,6 +34,9 @@
       '--insta-toolbox-success': 'rgb(var(--ig-success, 0 148 84))',
       '--insta-toolbox-warning': '#b26a00',
       '--insta-toolbox-danger': 'rgb(var(--ig-error-or-destructive, 237 73 86))',
+      // Filled controls need stronger contrast than Instagram's alert red.
+      '--insta-toolbox-danger-fill': '#b42331',
+      '--insta-toolbox-on-danger': '#fff',
       // Deliberately not the danger colour: an uncertain outcome may well have
       // succeeded, and colouring it as a failure would assert what we do not know.
       '--insta-toolbox-uncertain': '#7a5cc4',
@@ -128,7 +134,7 @@
     const selector = (theme) => scope === ':host'
       ? `:host([data-theme-preference="${theme}"])`
       : `${scope}[data-theme-preference="${theme}"]`;
-    return `${selector('light')} { --insta-toolbox-bg:#fff; --insta-toolbox-bg-raised:#fff; --insta-toolbox-bg-sunken:#fafafa; --insta-toolbox-text:#171717; --insta-toolbox-text-muted:#666; --insta-toolbox-line:#dbdbdb; color-scheme:light; }
+    return `${selector('light')} { --insta-toolbox-bg:#fff; --insta-toolbox-bg-raised:#fff; --insta-toolbox-bg-sunken:#fafafa; --insta-toolbox-text:#171717; --insta-toolbox-text-muted:#606060; --insta-toolbox-line:#dbdbdb; color-scheme:light; }
 ${selector('dark')} { --insta-toolbox-bg:#101114; --insta-toolbox-bg-raised:#1e2023; --insta-toolbox-bg-sunken:#17181a; --insta-toolbox-text:#f3f3f3; --insta-toolbox-text-muted:#b3b3b3; --insta-toolbox-line:#36383c; color-scheme:dark; }`;
   }
 

@@ -14,6 +14,7 @@ import {
   instagramScriptOrder,
 } from './instagram-script-order.mjs';
 import { canonicalizeExtensionEntry } from './canonical-extension-entry.mjs';
+import { validateInstagramControlPaths } from './validate-instagram-control-paths.mjs';
 import {
   expectedExtensionArchiveEntries,
   extensionIconFiles,
@@ -134,15 +135,7 @@ async function validateSources() {
       .filter((file) => !['action-labels.js', 'content-instagram.js'].includes(file))
       .map((file) => readFile(path.join(sourceRoot, file), 'utf8')),
   )).join('\n');
-  const allowedLiveActivator = `function activateLiveControl(control) {
-    control.click();
-  }`;
-  if (!instagramSource.includes(allowedLiveActivator)) {
-    throw new Error('Instagram content script is missing the isolated live-control activator.');
-  }
-  if (/\.click\s*\(/.test(instagramSource.replace(allowedLiveActivator, ''))) {
-    throw new Error('Instagram content script contains an unreviewed click path.');
-  }
+  validateInstagramControlPaths(instagramSource);
   if (/\.click\s*\(|dispatchEvent\s*\(/.test(overlaySource)) {
     throw new Error('Instagram overlay must not directly control the page.');
   }

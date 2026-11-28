@@ -136,6 +136,16 @@ test('subject ID and capture-time proof are required and injected checker option
   assert.equal('now' in h.options, false);
 });
 
+test('native list comparisons remain useful checker data without becoming authenticated Presence evidence', async () => {
+  const native = result({ source: 'list-dialog', subjectInstagramId: undefined,
+    followers: [{ username: 'demo_follower', source: 'extension-scrolled-dom' }],
+    reasons: { followers: 'native-list-complete', following: 'native-list-complete' } });
+  const h = harness(native); const capture = await read(h);
+  assert.equal(capture, native);
+  assert.equal(capture.followers.length, 1);
+  assert.equal(prepare(h, capture).reason, 'fresh-runtime-capture-required');
+});
+
 test('cancelled or overlapping calls cannot retain an earlier capture receipt', async () => {
   const h = harness(); let finish;
   h.setResult(() => new Promise((resolve) => { finish = resolve; }));

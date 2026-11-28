@@ -8,6 +8,7 @@ const [actionLabelsSource, inspectorSource] = await Promise.all([
   readFile(new URL('../extension/action-labels.js', import.meta.url), 'utf8'),
   readFile(new URL('../extension/content-instagram.js', import.meta.url), 'utf8'),
 ]);
+const nativeProfileContract = JSON.parse(await readFile(new URL('./fixtures/native-instagram-profile-contract.json', import.meta.url), 'utf8'));
 
 test('partial diagnostics retain exact counts and observed pagination reasons in summary and downloads', () => {
   const inspector = createInspector();
@@ -76,6 +77,7 @@ function createInspector({
   pageLocation = null,
   headerUsername = null,
   headerCopies = 1,
+  session = null,
 } = {}) {
   const profileLinkData = Array.isArray(suppliedProfileLinks)
     ? suppliedProfileLinks
@@ -102,15 +104,33 @@ function createInspector({
     contains: (link) => profileLinks.includes(link) && !profileLinkData[profileLinks.indexOf(link)].outsideHeader,
     querySelectorAll: () => [{ getAttribute: () => null, textContent: headerUsername }],
   };
+  // `session` models only what the live page exposes: Instagram's
+  // server-rendered viewer records and app identity, plus the visible viewer
+  // verifier. Shapes match the 2026-11-27 live page (values synthetic).
+  const renderedScripts = () => [
+    ...(session?.pageConfig ? [{ textContent: JSON.stringify({ require: [['ScheduledServerJS', 'handle', null, []]] }) }] : []),
+    ...(session?.scopedIds || []).map(id => ({ textContent: JSON.stringify({ identity: { appScopedIdentity: id, claim: 'fixture' } }) })),
+    ...(session?.rendered || []).map(record => ({ textContent: JSON.stringify({ require: [['ScheduledServerJS', 'handle', null,
+      [{ __bbox: { define: [['PolarisViewer', [], { data: record, id: 'fixture' }, 1]] } }]]] }) })),
+  ];
   const document = {
     body: { innerText: '' },
     querySelector: () => null,
     querySelectorAll: (selector) => (
       selector === 'a[role="link"], a[href="#"]' ? profileLinks
-        : selector === 'main header' && headerUsername ? Array(headerCopies).fill(header) : []
+        : selector === 'script[type="application/json"]' ? renderedScripts()
+          : selector === 'main header' && headerUsername ? Array(headerCopies).fill(header) : []
     ),
   };
+  const viewerGlobals = session ? {
+    InstaToolboxInstagramViewer: {
+      inspect: () => (session.viewer
+        ? { accountVerified: true, accountId: session.viewer }
+        : { accountVerified: false, accountId: '' }),
+    },
+  } : {};
   const context = vm.createContext({
+    ...viewerGlobals,
     AbortController,
     URL,
     chrome: { runtime: { onMessage: { addListener() {} } } },
@@ -281,6 +301,327 @@ test('authenticated follower check requires an exact username search result', as
   );
 });
 
+for (const status of [404, 410]) {
+  test(`retired lookup HTTP ${status} resolves through the existing profile GET and reuses its first counts`, async () => {
+    const inspector = createInspector();
+    const requests = [];
+    const result = await inspector.fetchFollowerComparison({
+      username: 'target_name',
+      fetchImpl: async (input, options) => {
+        const url = new URL(input);
+        requests.push(url.pathname);
+        assert.equal(options.method, 'GET');
+        assert.equal(options.credentials, 'include');
+        assert.equal(url.origin, 'https://www.instagram.com');
+        if (url.pathname.includes('topsearch')) {
+          return status === 404
+            ? { ok: false, status, async json() { throw new SyntaxError('HTML'); } }
+            : response({ status: 'fail' }, status);
+        }
+        if (url.pathname === '/api/v1/users/web_profile_info/') {
+          assert.equal(url.searchParams.get('username'), 'target_name');
+          return response({ data: { user: { username: 'Target_Name', id: '77', pk: 77,
+            follower_count: 0, following_count: 0 } } });
+        }
+        assert.match(url.pathname, /^\/api\/v1\/friendships\/77\/(followers|following)\/$/);
+        return response({ users: [] });
+      },
+    });
+    assert.equal(result.userId, '77');
+    assert.equal(result.subjectInstagramId, '77');
+    assert.deepEqual({ ...result.complete }, { followers: true, following: true });
+    assert.deepEqual(requests, [
+      '/api/v1/web/search/topsearch/',
+      '/api/v1/users/web_profile_info/',
+      '/api/v1/friendships/77/followers/',
+      '/api/v1/friendships/77/following/',
+      '/api/v1/users/web_profile_info/',
+    ], 'reuse initial metadata, but fetch fresh totals after list traversal');
+  });
+}
+
+test('retired lookup fallback still detects profile counts changing during traversal', async () => {
+  const inspector = createInspector();
+  let profiles = 0;
+  const result = await inspector.fetchFollowerComparison({
+    username: 'target_name',
+    fetchImpl: async (input) => {
+      const url = new URL(input);
+      if (url.pathname.includes('topsearch')) return response({}, 404);
+      if (url.pathname === '/api/v1/users/web_profile_info/') {
+        profiles += 1;
+        return profileResponse({ followers: profiles === 1 ? 0 : 1, following: 0 });
+      }
+      return response({ users: [] });
+    },
+  });
+  assert.equal(profiles, 2);
+  assert.equal(result.complete.followers, false);
+  assert.equal(result.reasons.followers, 'count-changed');
+  assert.equal(result.expectedCounts.followers, 1);
+});
+
+test('retired lookup fallback rejects unbound, conflicting, or malformed profile identities before reading lists', async () => {
+  for (const profile of [
+    { username: 'similar_name', id: '77' },
+    { username: 'https://www.instagram.com/target_name/', id: '77' },
+    { username: '@target_name', id: '77' },
+    { username: 'target_name', id: '77', pk: '78' },
+    { username: 'target_name', id: '0' },
+    { username: 'target_name', id: Number.MAX_SAFE_INTEGER + 1 },
+    { username: 'target_name', id: '77', pk: 'not-an-id' },
+    { username: 'target_name' },
+    null,
+  ]) {
+    const inspector = createInspector();
+    const requests = [];
+    await assert.rejects(inspector.fetchFollowerComparison({
+      username: 'target_name',
+      fetchImpl: async (input) => {
+        const pathname = new URL(input).pathname;
+        requests.push(pathname);
+        return pathname.includes('topsearch') ? response({}, 404) : response({ data: { user: profile } });
+      },
+    }), { code: 'profile-mismatch' });
+    assert.deepEqual(requests, ['/api/v1/web/search/topsearch/', '/api/v1/users/web_profile_info/']);
+  }
+});
+
+// Live 2026-11-27, main Chrome, installed 4.3.9: while SIGNED IN, both lookup
+// GETs (topsearch and web_profile_info) answered HTTP 404 with Instagram's
+// HTML shell, and that shell is marked <html class="no-js not-logged-in ">
+// for signed-in and signed-out tabs alike. The friendships list GET still
+// returned 200 JSON. 4.3.9/4.3.10 therefore never reached the list route:
+// away from the subject's profile the check failed with "Open @x's profile",
+// and on the profile it fell back to the slower native dialog (83 of 84).
+const RETIRED_SHELL = '<!DOCTYPE html>\n<html lang="None" class="no-js not-logged-in "><head><title>Page not found</title></head><body></body></html>';
+const retiredLookup = () => new Response(RETIRED_SHELL, { status: 404, headers: { 'content-type': 'text/html; charset="utf-8"' } });
+const SELF_ID = '4242';
+const signedInSelf = (overrides = {}) => ({
+  rendered: [{ username: 'self_name', id: SELF_ID, can_use_messaging: true }], scopedIds: [SELF_ID], viewer: 'self_name', ...overrides,
+});
+const listPage = (users, next = null) => response({ users: users.map(([username, pk]) => ({ username, pk })),
+  has_more: Boolean(next), ...(next ? { next_max_id: next } : {}) });
+
+test('retired lookups bind the verified signed-in viewer and read the working list route instead of native dialogs', async () => {
+  for (const allowNativeListFallback of [false, true]) {
+    const inspector = createInspector({ pathname: '/', session: signedInSelf() });
+    const requests = [];
+    const phases = [];
+    const result = await inspector.fetchFollowerComparison({
+      username: 'Self_Name',
+      allowNativeListFallback,
+      onProgress: event => phases.push(event.phase),
+      sleepImpl: async () => {},
+      fetchImpl: async (input) => {
+        const url = new URL(input);
+        requests.push(url.pathname);
+        if (!url.pathname.startsWith('/api/v1/friendships/')) return retiredLookup();
+        return url.pathname.endsWith('/followers/')
+          ? listPage([['one', '1'], ['two', '2']])
+          : listPage([['two', '2'], ['three', '3']]);
+      },
+    });
+    assert.deepEqual(requests, [
+      '/api/v1/web/search/topsearch/',
+      '/api/v1/users/web_profile_info/',
+      `/api/v1/friendships/${SELF_ID}/followers/`,
+      `/api/v1/friendships/${SELF_ID}/following/`,
+    ], 'no retired profile GET for totals or revalidation, and no native dialog');
+    assert.ok(!phases.includes('native-lists'));
+    assert.equal(result.source, 'authenticated-instagram-web');
+    assert.equal(result.identitySource, 'session-actor');
+    assert.equal(result.userId, SELF_ID);
+    assert.equal(result.subjectInstagramId, SELF_ID);
+    assert.deepEqual(Array.from(result.followers, row => row.username), ['one', 'two']);
+    assert.deepEqual(Array.from(result.following, row => row.username), ['three', 'two']);
+    // No exact total was available away from the profile: never complete.
+    assert.deepEqual({ ...result.complete }, { followers: false, following: false });
+    assert.deepEqual({ ...result.reasons }, { followers: 'count-unverified', following: 'count-unverified' });
+    assert.deepEqual({ ...result.expectedCounts }, { followers: null, following: null });
+  }
+});
+
+test('session-bound self check on the open profile uses exact header totals to finish complete or partial', async () => {
+  for (const [followingTotal, complete, reason] of [[2, true, 'pagination-complete'], [3, false, 'count-mismatch']]) {
+    const inspector = createInspector({
+      pathname: '/self_name/', headerUsername: 'self_name', session: signedInSelf(),
+      profileLinks: [
+        { href: '/self_name/followers/', text: '2 followers' },
+        { href: '/self_name/following/', text: `${followingTotal} following` },
+      ],
+    });
+    const result = await inspector.fetchFollowerComparison({
+      username: 'self_name',
+      allowNativeListFallback: true,
+      sleepImpl: async () => {},
+      fetchImpl: async (input) => {
+        const { pathname } = new URL(input);
+        if (!pathname.startsWith('/api/v1/friendships/')) return retiredLookup();
+        return listPage([['one', '1'], ['two', '2']]);
+      },
+    });
+    assert.equal(result.identitySource, 'session-actor');
+    assert.equal(result.complete.followers, true);
+    assert.equal(result.complete.following, complete);
+    assert.equal(result.reasons.following, reason);
+    assert.equal(result.expectedCounts.following, followingTotal);
+  }
+});
+
+test('session binding fails closed for other subjects, unverified viewers, or disagreeing identity sources', async () => {
+  for (const [label, session, username] of [
+    ['other subject', signedInSelf(), 'someone_else'],
+    ['viewer unverified', signedInSelf({ viewer: null }), 'self_name'],
+    ['rendered app identity differs', signedInSelf({ scopedIds: ['9999'] }), 'self_name'],
+    ['ambiguous rendered app identity', signedInSelf({ scopedIds: [SELF_ID, '9999'] }), 'self_name'],
+    ['rendered app identity missing', signedInSelf({ scopedIds: [] }), 'self_name'],
+    ['rendered viewer record missing', signedInSelf({ rendered: [] }), 'self_name'],
+    ['two rendered viewer records', signedInSelf({ rendered: [{ username: 'self_name', id: SELF_ID }, { username: 'other_name', id: '9999' }] }), 'self_name'],
+    ['rendered username differs from visible viewer', signedInSelf({ rendered: [{ username: 'other_name', id: SELF_ID }] }), 'self_name'],
+    ['malformed rendered id', signedInSelf({ rendered: [{ username: 'self_name', id: '0x42' }], scopedIds: ['0x42'] }), 'self_name'],
+    ['numeric rendered id beyond safe range', signedInSelf({ rendered: [{ username: 'self_name', id: Number.MAX_SAFE_INTEGER + 2 }] }), 'self_name'],
+  ]) {
+    const inspector = createInspector({ pathname: '/', session });
+    const requests = [];
+    await assert.rejects(inspector.fetchFollowerComparison({
+      username,
+      fetchImpl: async (input) => { requests.push(new URL(input).pathname); return retiredLookup(); },
+    }), error => error.code === 'request-failed' && error.httpStatus === 404 && error.lookupRoutesRetired === true, label);
+    assert.deepEqual(requests, ['/api/v1/web/search/topsearch/', '/api/v1/users/web_profile_info/'], `${label}: no list read without an exact binding`);
+  }
+});
+
+test('retired lookups in a signed-out tab say so instead of an account change or a bare HTTP 404', async () => {
+  for (const allowNativeListFallback of [false, true]) {
+    const inspector = createInspector({ pathname: '/', session: { pageConfig: true, rendered: [], scopedIds: [], viewer: null } });
+    const requests = [];
+    const phases = [];
+    await assert.rejects(inspector.fetchFollowerComparison({
+      username: 'target_name',
+      allowNativeListFallback,
+      onProgress: event => phases.push(event.phase),
+      fetchImpl: async (input) => { requests.push(new URL(input).pathname); return retiredLookup(); },
+    }), (error) => {
+      assert.equal(error.code, 'session-expired');
+      assert.match(error.message, /no signed-in account.*Sign in to Instagram/i);
+      assert.doesNotMatch(error.message, /HTTP 404|account changed/i);
+      assert.notEqual(error.lookupRoutesRetired, true, 'Growth must not treat a signed-out tab as retired routes');
+      return true;
+    });
+    assert.equal(requests.length, 2);
+    assert.ok(!phases.includes('native-lists'));
+  }
+  // Either signal alone, or a page without Instagram's rendered config, is not
+  // called signed out; each keeps the existing native-profile path.
+  for (const session of [
+    { pageConfig: true, rendered: [], scopedIds: [], viewer: 'self_name' },
+    { pageConfig: true, rendered: [{ username: 'self_name', id: SELF_ID }], scopedIds: [SELF_ID], viewer: null },
+    { pageConfig: false, rendered: [], scopedIds: [], viewer: null },
+  ]) {
+    const partial = createInspector({ pathname: '/', session });
+    await assert.rejects(partial.fetchFollowerComparison({ username: 'self_name', fetchImpl: async () => retiredLookup() }),
+      error => error.code === 'request-failed' && error.lookupRoutesRetired === true);
+  }
+});
+
+test('an account switch during a session-bound check stops before results are published', async () => {
+  const session = signedInSelf();
+  const inspector = createInspector({ pathname: '/', session });
+  let following = 0;
+  await assert.rejects(inspector.fetchFollowerComparison({
+    username: 'self_name',
+    sleepImpl: async () => {},
+    fetchImpl: async (input) => {
+      const { pathname } = new URL(input);
+      if (!pathname.startsWith('/api/v1/friendships/')) return retiredLookup();
+      if (pathname.endsWith('/followers/')) {
+        session.viewer = 'other_name';
+        return listPage([['one', '1']]);
+      }
+      following += 1;
+      return listPage([]);
+    },
+  }), { code: 'profile-mismatch' });
+  assert.equal(following, 0, 'the second list is never read for a different signed-in account');
+});
+
+test('lookup fallback does not run after authentication, restriction, schema, or unrelated HTTP failures', async () => {
+  for (const [status, data, responseUrl, code] of [
+    [401, {}, '', 'session-expired'],
+    [403, {}, '', 'request-failed'],
+    [429, {}, '', 'rate-limited'],
+    [500, {}, '', 'request-failed'],
+    [200, { users: [{ user: { username: 'similar_name', pk: '77' } }] }, '', 'username-not-found'],
+    [404, { message: 'challenge_required' }, '', 'challenge'],
+    [404, { message: 'feedback_required' }, '', 'action-blocked'],
+    [410, { message: 'Please wait a few minutes' }, '', 'rate-limited'],
+    [410, { message: 'login_required' }, '', 'session-expired'],
+    [404, {}, 'https://www.instagram.com/accounts/login/', 'session-expired'],
+  ]) {
+    const inspector = createInspector();
+    let requests = 0;
+    await assert.rejects(inspector.fetchFollowerComparison({
+      username: 'target_name',
+      fetchImpl: async () => { requests += 1; return { ...response(data, status), url: responseUrl }; },
+      sleepImpl: async () => assert.fail('terminal lookup failure must not retry'),
+    }), { code });
+    assert.equal(requests, 1, `HTTP ${status} ${code} must not reach profile fallback`);
+  }
+  const inspector = createInspector();
+  let invalidRequests = 0;
+  await assert.rejects(inspector.fetchFollowerComparison({
+    username: 'target_name',
+    fetchImpl: async () => {
+      invalidRequests += 1;
+      return { ok: true, status: 200, async json() { throw new SyntaxError('Malformed JSON'); } };
+    },
+  }), { code: 'invalid-response' });
+  assert.equal(invalidRequests, 1, 'a successful HTTP response with a parsing failure does not unlock fallback');
+});
+
+test('stopped lookup and unavailable fallback do not issue more account requests', async () => {
+  const inspector = createInspector();
+  const controller = new AbortController();
+  let stoppedRequests = 0;
+  await assert.rejects(inspector.fetchFollowerComparison({
+    username: 'target_name', signal: controller.signal,
+    fetchImpl: async () => { stoppedRequests += 1; controller.abort(); return response({}, 404); },
+  }), { code: 'stopped' });
+  assert.equal(stoppedRequests, 1);
+
+  let unavailableRequests = 0;
+  await assert.rejects(inspector.fetchFollowerComparison({
+    username: 'target_name',
+    fetchImpl: async () => { unavailableRequests += 1; return response({}, 404); },
+  }), error => error.code === 'request-failed' && error.httpStatus === 404);
+  assert.equal(unavailableRequests, 2, 'the metadata route cannot recursively fall back or start list traversal');
+});
+
+test('retired lookup can bind an ID while current-profile counters remain the count authority', async () => {
+  const inspector = createInspector({
+    pathname: '/target_name/', headerUsername: 'target_name',
+    profileLinks: [
+      { href: '/target_name/followers/', text: '0 followers' },
+      { href: '/target_name/following/', text: '0 following' },
+    ],
+  });
+  const requests = [];
+  const result = await inspector.fetchFollowerComparison({
+    username: 'target_name',
+    fetchImpl: async input => {
+      const pathname = new URL(input).pathname;
+      requests.push(pathname);
+      if (pathname.includes('topsearch')) return response({}, 410);
+      if (pathname === '/api/v1/users/web_profile_info/') return response({ data: { user: { username: 'target_name', pk: '77' } } });
+      return response({ users: [] });
+    },
+  });
+  assert.deepEqual({ ...result.complete }, { followers: true, following: true });
+  assert.deepEqual(requests, ['/api/v1/web/search/topsearch/', '/api/v1/users/web_profile_info/',
+    '/api/v1/friendships/77/followers/', '/api/v1/friendships/77/following/']);
+});
+
 test('open-profile background check uses exact rendered totals without profile requests or dialogs', async () => {
   const inspector = createInspector({
     pathname: '/target_name/',
@@ -349,6 +690,83 @@ for (const titled of [false, true]) {
     assert.deepEqual({ ...result.expectedCounts }, { followers: 1_001, following: 2 });
     assert.deepEqual({ ...result.complete }, { followers: true, following: true });
     assert.equal(paths.length, 23);
+  });
+}
+
+test('loaded profile counters cannot authorize a rounded numeric search subject', async () => {
+  const inspector = createInspector({ pathname: '/target_name/', headerUsername: 'target_name',
+    profileLinks: [{ href: '#', text: '1 followers' }, { href: '#', text: '1 following' }],
+  });
+  const paths = [];
+  await assert.rejects(inspector.fetchFollowerComparison({ username: 'target_name',
+    sleepImpl: async () => {}, fetchImpl: async input => {
+      const path = new URL(input).pathname; paths.push(path);
+      assert.equal(path, '/api/v1/web/search/topsearch/');
+      return response({ users: [{ user: { pk: 9007199254740992, username: 'target_name' } }] });
+    },
+  }), error => error.code === 'username-not-found');
+  assert.deepEqual(paths, ['/api/v1/web/search/topsearch/']);
+  assert.equal(paths.some(path => path.includes('/friendships/')), false);
+});
+
+test('loaded profile counters retain an exact large string search subject', async () => {
+  const ownerId = '9007199254740992';
+  const inspector = createInspector({ pathname: '/target_name/', headerUsername: 'target_name',
+    profileLinks: [{ href: '#', text: '1 followers' }, { href: '#', text: '1 following' }],
+  });
+  const paths = [];
+  const result = await inspector.fetchFollowerComparison({ username: 'target_name',
+    sleepImpl: async () => {}, fetchImpl: async input => {
+      const path = new URL(input).pathname; paths.push(path);
+      if (path.includes('topsearch')) return response({ users: [{ user: { pk: ownerId, username: 'target_name' } }] });
+      assert.ok(path.startsWith(`/api/v1/friendships/${ownerId}/`));
+      return response({ users: [{ username: 'fixture.account' }] });
+    },
+  });
+  assert.equal(result.userId, ownerId);
+  assert.equal(result.subjectInstagramId, ownerId);
+  assert.deepEqual({ ...result.complete }, { followers: true, following: true });
+  assert.equal(paths.filter(path => path.includes('/friendships/')).length, 2);
+  assert.equal(paths.some(path => path.includes('web_profile_info')), false);
+});
+
+test('native same-profile counter links use exact labels inside the uniquely verified profile header', async () => {
+  const inspector = createInspector({ pathname: nativeProfileContract.pathname,
+    headerUsername: nativeProfileContract.username,
+    profileLinks: [...nativeProfileContract.counterLinks,
+      { href: nativeProfileContract.pathname, text: '999 followers', outsideHeader: true }],
+  });
+  const paths = [];
+  const result = await inspector.fetchFollowerComparison({ username: nativeProfileContract.username,
+    sleepImpl: async () => {}, fetchImpl: async input => {
+      const url = new URL(input); paths.push(url.pathname);
+      if (url.pathname.includes('topsearch')) return response({ users: [{ user: { pk: '77', username: nativeProfileContract.username } }] });
+      assert.ok(url.pathname.includes('/friendships/'), 'exact native counters must not need profile metadata fallback');
+      const total = url.pathname.includes('/followers/') ? 3 : 2;
+      return response({ users: Array.from({ length: total }, (_, i) => ({ username: `fixture.${i}` })) });
+    } });
+  assert.deepEqual({ ...result.expectedCounts }, { followers: 3, following: 2 });
+  assert.deepEqual({ ...result.complete }, { followers: true, following: true });
+  assert.equal(paths.length, 3);
+});
+
+for (const invalid of ['missing-header', 'ambiguous-header', 'outside-header', 'different-owner', 'external-origin']) {
+  test(`same-profile native counters reject ${invalid} evidence`, async () => {
+    const inspector = createInspector({ pathname: nativeProfileContract.pathname,
+      headerUsername: invalid === 'missing-header' ? null : nativeProfileContract.username,
+      headerCopies: invalid === 'ambiguous-header' ? 2 : 1,
+      profileLinks: nativeProfileContract.counterLinks.map(link => ({ ...link,
+        href: invalid === 'different-owner' ? '/another_owner/' : invalid === 'external-origin'
+          ? 'https://example.org/target_name/' : link.href,
+        outsideHeader: invalid === 'outside-header',
+      })),
+    });
+    await assert.rejects(inspector.fetchFollowerComparison({ username: nativeProfileContract.username,
+      fetchImpl: async input => {
+        if (input.includes('topsearch')) return response({ users: [{ user: { pk: '77', username: nativeProfileContract.username } }] });
+        assert.ok(input.includes('web_profile_info'), 'unbound labels cannot authorize a relationship-list read');
+        return response({}, 429);
+      } }), { code: 'rate-limited' });
   });
 }
 

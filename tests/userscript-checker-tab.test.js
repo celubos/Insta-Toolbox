@@ -76,6 +76,19 @@ test('same-tab reload restores only its own checker draft and diagnostics', () =
   assert.equal(Object.hasOwn(shared.get(stateKey), 'capture'), false);
 });
 
+test('same-tab reload retains native list provenance and count uncertainty without inventing API identity', () => {
+  const shared = new Map(), tab = { value: {} }, initial = capture('native.fixture');
+  initial.source = { followers: 'list-dialog', following: 'list-dialog' };
+  initial.reasons = { followers: 'count-unverified', following: 'native-list-complete' };
+  initial.pages = { followers: null, following: null };
+  const first = openTab(shared, tab); first.capture(initial);
+  const restored = openTab(shared, tab).read().capture;
+  assert.deepEqual({ ...restored.source }, initial.source);
+  assert.equal(restored.complete.followers, false); assert.equal(restored.complete.following, true);
+  assert.equal(restored.reasons.followers, 'count-unverified'); assert.equal(restored.reasons.following, 'native-list-complete');
+  assert.equal(restored.pages.followers, null); assert.equal('subjectInstagramId' in restored, false);
+});
+
 test('different tabs cannot overwrite or inherit one another’s checker drafts', () => {
   const shared = new Map(); const a = { value: {} }, b = { value: {} };
   const first = openTab(shared, a); first.capture(capture('first.person'));
