@@ -16,6 +16,9 @@ const bundle=await readFile(path.join(repositoryRoot,'userscripts','insta-toolbo
 const bundleSha256=createHash('sha256').update(bundle).digest('hex');
 const interactive=process.env.INSTA_TOOLBOX_SANDBOX_INTERACTIVE==='1';
 const ROOT=`document.querySelector('#insta-toolbox-userscript-root').shadowRoot`;
+// Values interpolated into page code are escaped for a script context, not
+// just JSON, so a selector or label can never close or alter the snippet.
+const literal=value=>JSON.stringify(value).replace(/[<>/\u2028\u2029]/g,character=>`\\u${character.charCodeAt(0).toString(16).padStart(4,'0')}`);
 const checks=[],failures=[],network=[],problems=[],evidence=[];
 const runIdentity=new Date().toISOString().replaceAll(':','-');
 let window,isolated;
@@ -29,14 +32,14 @@ async function waitForPageValue(web,expression,label,timeoutMs=15_000){
   throw new Error(`${label} timed out: ${JSON.stringify(state)}`);
 }
 const evaluate=expression=>window.webContents.executeJavaScript(expression,true);
-const value=selector=>`${ROOT}.querySelector(${JSON.stringify(selector)})`;
+const value=selector=>`${ROOT}.querySelector(${literal(selector)})`;
 async function click(selector){
-  await evaluate(`(()=>{const node=${value(selector)};if(!node||node.disabled||node.hidden)throw new Error('Unavailable control: '+${JSON.stringify(selector)});node.scrollIntoView({block:'center'});return new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));})()`);
-  const point=await evaluate(`(()=>{const node=${value(selector)},r=node.getBoundingClientRect();if(r.width<=0||r.height<=0)throw new Error('Hidden control: '+${JSON.stringify(selector)});return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};})()`);
+  await evaluate(`(()=>{const node=${value(selector)};if(!node||node.disabled||node.hidden)throw new Error('Unavailable control: '+${literal(selector)});node.scrollIntoView({block:'center'});return new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));})()`);
+  const point=await evaluate(`(()=>{const node=${value(selector)},r=node.getBoundingClientRect();if(r.width<=0||r.height<=0)throw new Error('Hidden control: '+${literal(selector)});return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};})()`);
   window.webContents.focus();for(const type of ['mouseMove','mouseDown','mouseUp'])window.webContents.sendInputEvent({type,...point,...(type==='mouseMove'?{}:{button:'left',clickCount:1})});
 }
 async function change(selector,newValue){
-  await evaluate(`(()=>{const node=${value(selector)};node.value=${JSON.stringify(String(newValue))};node.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+  await evaluate(`(()=>{const node=${value(selector)};node.value=${literal(String(newValue))};node.dispatchEvent(new Event('change',{bubbles:true}));})()`);
 }
 async function openView(view){
   await evaluate(`(()=>{const root=${ROOT};if(root.querySelector('.panel').hidden)root.querySelector('.launcher').click();root.querySelector('[data-view="${view}"]').click();})()`);
@@ -62,13 +65,13 @@ async function ready(){
   await openView('checker');
 }
 async function scan(type){
-  await evaluate(`instagramSandbox.openList(${JSON.stringify(type)});${value('[data-action="scan-following"]')}.closest('details').open=true;`);
+  await evaluate(`instagramSandbox.openList(${literal(type)});${value('[data-action="scan-following"]')}.closest('details').open=true;`);
   await click(`[data-action="scan-${type}"]`);
   await waitForPageValue(window.webContents,`instagramSandbox.managerTab().instaToolboxCheckerDraftV1?.capture?.complete?.${type}===true`,`complete ${type} virtualized scan`,25_000);
 }
 async function selectPresence(actions,maxActions=1,mode='session'){
   await openView('account');
-  await evaluate(`(()=>{for(const input of ${ROOT}.querySelectorAll('[data-presence-action]')){input.checked=${JSON.stringify(actions)}.includes(input.dataset.presenceAction);input.dispatchEvent(new Event('change',{bubbles:true}));}})()`);
+  await evaluate(`(()=>{for(const input of ${ROOT}.querySelectorAll('[data-presence-action]')){input.checked=${literal(actions)}.includes(input.dataset.presenceAction);input.dispatchEvent(new Event('change',{bubbles:true}));}})()`);
   await change('[data-presence-mode]',mode);await change('[data-presence-limit]',maxActions);
 }
 async function startPresence({cancel=false}={}){
